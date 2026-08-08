@@ -1,0 +1,61 @@
+# --- IDE / Tooling ---
+.idea/
+.omc/
+.vscode/
+*.iml
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Environment / Secrets ---
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets/
+
+# --- Spark ---
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+_SUCCESS
+
+# --- Airflow ---
+airflow.cfg
+airflow.db
+airflow-webserver.pid
+logs/
+standalone_admin_password.txt
+
+# --- Data / Artifacts ---
+*.parquet
+*.csv
+data/
+!data/.gitkeep
+
+# --- Terraform / Infra (추후 사용 시) ---
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# --- Logs ---
+*.log
