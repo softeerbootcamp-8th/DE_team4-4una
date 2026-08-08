@@ -20,6 +20,14 @@ dist/
 venv/
 env/
 
+# --- Python Tooling / Test Artifacts ---
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+/tests/
+
 # --- Jupyter ---
 .ipynb_checkpoints/
 
