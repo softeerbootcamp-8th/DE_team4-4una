@@ -1,3 +1,5 @@
+<!-- PR 제목은 <type>: <subject> 형식으로 작성해 주세요. 예: feat: add tlc data ingestion pipeline -->
+
 ## 📝 작업 내용
 
 > 이번 PR에서 작업한 내용을 체크리스트로 간략히 작성해 주세요.
