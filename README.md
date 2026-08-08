@@ -1,8 +1,8 @@
-# DE_team4-4una
+# DE4
 
 > **세그먼트별 승차감(Ride Comfort) 표준 데이터셋 구축 프로젝트**
 >
-> 소프티어 부트캠프 8기 Data Engineering 트랙 4팀(4una) 최종 프로젝트입니다.
+> 소프티어 부트캠프 8기 Data Engineering 트랙 4팀(DE4) 최종 프로젝트입니다.
 
 > 🚧 **현재 기획 단계입니다.** 아래 내용은 개발 진행 상황에 따라 계속 업데이트됩니다.
 
@@ -26,8 +26,8 @@
 brew install uv
 
 # 저장소 복제 후 의존성 설치
-git clone https://github.com/softeerbootcamp-8th/DE_team4-4una.git
-cd DE_team4-4una
+git clone YOUR_REPOSITORY_URL de4
+cd de4
 uv sync --locked
 
 # 검증

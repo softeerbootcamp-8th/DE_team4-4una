@@ -1,5 +1,5 @@
 [project]
-name = "4una"
+name = "de4"
 version = "0.1.0"
 description = "Build a standardized ride-comfort dataset for route recommendation"
 readme = "README.md"
@@ -10,14 +10,11 @@ requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [project.scripts]
-4una = "de4:main"
+de4 = "de4:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = "de4"
 
 [dependency-groups]
 dev = [
