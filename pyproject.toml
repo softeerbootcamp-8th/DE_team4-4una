@@ -1,19 +1,23 @@
 [project]
-name = "fouruna"
+name = "4una"
 version = "0.1.0"
-description = "Add your description here"
+description = "Build a standardized ride-comfort dataset for route recommendation"
+readme = "README.md"
 authors = [
     { name = "Kijoon Jeong", email = "jkijoon701@gmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = []
 
 [project.scripts]
-fouruna = "fouruna:main"
+4una = "de4:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "de4"
 
 [dependency-groups]
 dev = [

@@ -7,6 +7,7 @@
 > 🚧 **현재 기획 단계입니다.** 아래 내용은 개발 진행 상황에 따라 계속 업데이트됩니다.
 
 ## 목차
+0. [로컬 개발 환경](#로컬-개발-환경)
 1. [프로젝트 개요](#1-프로젝트-개요)
 2. [문제 정의](#2-문제-정의)
 3. [데이터](#3-데이터)
@@ -14,6 +15,31 @@
 5. [처리 과정](#5-처리-과정)
 6. [결과](#6-결과)
 7. [팀원 소개](#7-팀원-소개)
+
+
+## 로컬 개발 환경
+
+이 프로젝트는 Python 3.12와 [uv](https://docs.astral.sh/uv/)를 사용합니다.
+
+```bash
+# macOS
+brew install uv
+
+# 저장소 복제 후 의존성 설치
+git clone https://github.com/softeerbootcamp-8th/DE_team4-4una.git
+cd DE_team4-4una
+uv sync --locked
+
+# 검증
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+Windows에서는 `winget install --id=astral-sh.uv -e`로 uv를 설치할 수 있습니다.
+프로젝트 의존성은 `uv add <package>`, 개발 전용 의존성은
+`uv add --dev <package>`로 추가하고, 변경된 `pyproject.toml`과 `uv.lock`을
+함께 커밋합니다. 로컬 환경인 `.venv`는 커밋하지 않습니다.
 
 
 ## 1. 프로젝트 개요
