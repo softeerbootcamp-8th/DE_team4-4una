@@ -1,0 +1,13 @@
+[project]
+name = "stream-processor"
+version = "0.1.0"
+description = "Processes streaming ride-comfort events"
+requires-python = ">=3.12,<3.13"
+dependencies = ["de4-core"]
+
+[project.scripts]
+stream-processor = "stream_processor:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

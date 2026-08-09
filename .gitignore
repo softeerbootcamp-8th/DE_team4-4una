@@ -26,7 +26,6 @@ env/
 .coverage
 .coverage.*
 htmlcov/
-/tests/
 
 # --- Jupyter ---
 .ipynb_checkpoints/
@@ -34,6 +33,7 @@ htmlcov/
 # --- Environment / Secrets ---
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 credentials.json
