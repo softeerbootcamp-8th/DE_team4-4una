@@ -21,8 +21,23 @@
 이 프로젝트는 Python 3.12와 [uv](https://docs.astral.sh/uv/)를 사용합니다.
 
 ```bash
-uv sync
-uv run de4
+uv sync --all-packages
+uv run --package sensor-producer python -m sensor_producer
+```
+
+전체 워크스페이스는 하나의 `uv.lock`을 공유합니다. 특정 패키지 명령은 저장소 루트에서
+`uv run --package <패키지명> ...` 형식으로 실행합니다.
+
+### 저장소 구조
+
+```text
+libs/de4-core/         서비스 간 공유 계약과 공통 코드
+services/              독립적으로 실행·배포되는 워크스페이스 패키지
+db/                    마이그레이션과 시드
+infra/                 로컬 및 공용 인프라 구성
+terraform/envs/        리전별 Terraform 환경
+config/                공통·개발·운영 환경 설정
+tests/                  워크스페이스 통합 테스트와 fixture
 ```
 
 ## 1. 프로젝트 개요

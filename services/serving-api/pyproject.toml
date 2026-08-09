@@ -1,0 +1,13 @@
+[project]
+name = "serving-api"
+version = "0.1.0"
+description = "Serves ride-comfort data to clients"
+requires-python = ">=3.12,<3.13"
+dependencies = ["de4-core"]
+
+[project.scripts]
+serving-api = "serving_api:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

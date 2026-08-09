@@ -9,15 +9,20 @@ authors = [
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
-[project.scripts]
-de4 = "de4:main"
-
-[build-system]
-requires = ["uv_build>=0.12.3,<0.13.0"]
-build-backend = "uv_build"
-
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+de4-core = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "libs/*",
+    "services/*",
 ]

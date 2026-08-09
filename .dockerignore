@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/tests
+dist
+docs
+infra
+terraform
+.env
+.env.*
