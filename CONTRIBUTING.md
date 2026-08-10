@@ -207,6 +207,8 @@ PR에는 최소한 다음 내용을 포함합니다.
 
 ## 5. Merge 전략
 
+각 병합 방식에 대한 자세한 설명은 문서 가장 아래의 [Merge 전략 가이드](#merge-전략-가이드) 부록을 참고합니다.
+
 ### 병합 방식
 
 - 작업 브랜치에서 `develop`으로 병합할 때는 **Squash merge**를 사용합니다.
@@ -308,3 +310,73 @@ git merge --abort
 - 리뷰와 필수 검증을 생략하고 병합하지 않습니다.
 - 서로 관련 없는 여러 이슈를 하나의 PR에 포함하지 않습니다.
 
+---
+
+<a id="merge-전략-가이드"></a>
+
+<details>
+<summary>Merge 전략 가이드</summary>
+
+브랜치를 병합하는 방법에는 여러 가지가 있습니다. 아래 내용을 참고하면 [5. Merge 전략](#5-merge-전략)에서 병합 지점마다 왜 그 방식을 선택했는지 이해할 수 있습니다.
+
+## Fast-Forward Merge
+
+![Fast-Forward Merge](docs/images/fast-forward-merge.png)
+
+브랜치를 나눈 뒤 base 브랜치에 아무 변경이 없었다면, 병합 커밋 없이 작업 브랜치의 커밋들이 그대로 base 브랜치 뒤에 이어붙습니다.
+
+```bash
+git checkout main
+git merge feature/branch
+```
+
+- 히스토리가 하나의 직선으로 깔끔하게 유지됩니다.
+- 병합 커밋이 없어서 어떤 브랜치가 언제 합쳐졌는지 구분하기 어렵습니다.
+
+## Merge Commit (3-way / Recursive Merge)
+
+base 브랜치와 작업 브랜치 양쪽에 각각 변경이 있으면, 두 브랜치의 변경 사항을 합치는 병합 커밋이 새로 생성됩니다. Fast-Forward가 가능한 상황에서도 `--no-ff` 옵션을 주면 병합 커밋을 강제로 만들 수 있습니다.
+
+```bash
+git checkout main
+git merge feature/branch
+```
+
+- 모든 커밋 이력이 그대로 보존되어 어떤 브랜치가 언제 병합됐는지 추적할 수 있습니다.
+- 병합이 반복될수록 그래프가 복잡해져 가독성이 떨어질 수 있습니다.
+- **우리 프로젝트에서는 `develop`에서 `main`으로 병합할 때 이 방식을 사용합니다.** 배포 시점마다 어떤 변경이 반영됐는지 이력을 명확히 남기기 위함입니다.
+
+## Squash & Merge
+
+![Squash & Merge](docs/images/squash-merge.png)
+
+작업 브랜치의 모든 커밋을 하나로 합쳐, base 브랜치에 새 커밋 1개로 추가하는 방식입니다.
+
+```bash
+git checkout main
+git merge --squash feature/branch
+git commit -m "squash & merge"
+```
+
+- base 브랜치의 히스토리가 이슈 단위로 깔끔하게 정리됩니다.
+- 작업 브랜치에 쌓여 있던 개별 커밋 이력은 병합 후 사라집니다.
+- **우리 프로젝트에서는 작업 브랜치에서 `develop`으로 병합할 때 이 방식을 사용합니다.** 이슈 하나당 `develop`에는 정리된 커밋 1개만 남기기 위함입니다.
+
+## Rebase & Merge
+
+![Rebase & Merge](docs/images/rebase-merge.png)
+
+작업 브랜치의 base를 최신 base 브랜치 위로 옮기고, 그 뒤에 커밋들을 다시 쌓는 방식입니다. base가 바뀌면서 커밋 해시도 새로 생성됩니다.
+
+```bash
+git checkout feature/branch
+git rebase main
+```
+
+- 병합 커밋 없이 히스토리를 하나의 직선으로 유지할 수 있습니다.
+- 이미 원격에 push한 커밋을 rebase하면 커밋 해시가 바뀌어 강제 push(Force Push)가 필요해지고, 같은 브랜치를 쓰는 팀원의 이력과 충돌할 위험이 큽니다.
+- **우리 프로젝트에서는 이 방식을 사용하지 않습니다.** [Force Push 금지](#6-브랜치-보호-및-금지-사항) 원칙과 상충하기 때문입니다.
+
+> 참고: [Merge 전략 정리 (leetrue.hashnode.dev)](https://leetrue.hashnode.dev/branch-merge-strategy)
+
+</details>
