@@ -1,0 +1,129 @@
+---
+owner: simulation-team
+status: proposed
+last_reviewed: 2026-08-10
+---
+
+# Deterministic Trip Simulation
+
+## Purpose
+
+Convert approximately 1,000 completed HVFHV trips from one source day into a
+reproducible wall-clock stream of dispatch and vehicle sensor observations. The
+simulation creates engineering data for pipeline development; it does not claim
+to reconstruct the vehicles' actual routes or physical motion.
+
+## Reproducibility contract
+
+A simulation run should record at least:
+
+- simulation run ID
+- source dataset identifier and source date
+- trip-sampling algorithm version and seed
+- road-environment snapshot ID
+- endpoint-selection algorithm version and seed
+- routing algorithm and graph version
+- vehicle-profile version
+- motion-model version
+- sensor sampling frequency
+- event-contract version
+- replay start time and time-scale value
+
+The same inputs and logical seeds must produce the same sampled trips, endpoints,
+routes, segment traversal order, and synthetic measurements. Wall-clock event
+timestamps may differ between runs, so events should also carry deterministic
+simulation offsets.
+
+## Proposed pipeline
+
+1. Validate the chosen HVFHV source day and remove rows that cannot support a
+   passenger-trip simulation.
+2. Sort using a documented stable ordering and select approximately 1,000 rows
+   with a seeded deterministic procedure.
+3. Use the source request time as the dispatch time and use pickup time as the
+   beginning of passenger motion. If the selected source schema does not provide
+   request time, require an accepted fallback policy rather than silently
+   substituting a different timestamp.
+4. Find valid canonical-road points inside pickup and drop-off taxi zones using a
+   stable spatial ordering plus a deterministic seed derived from the trip ID.
+5. Route between endpoints over the canonical road graph.
+6. Assign a vehicle type using a configured deterministic strategy.
+7. Convert route geometry and the pickup-to-drop-off duration into
+   configured-frequency passenger-journey progress and motion states.
+8. Apply road attributes, humps, turns, speed changes, and vehicle parameters to
+   generate comfort-related measurements.
+9. Replay inter-dispatch gaps and movement at `time_scale = 1.0`.
+10. Assign zero-based `trip_seq` values and publish keyed, versioned events to
+    Kafka.
+
+## Candidate simulation inputs per sample
+
+### Route and road state
+
+- canonical segment ID and progress along the segment
+- segment length, road class, direction, and geometry curvature
+- pavement rating or normalized pavement-condition feature
+- speed-hump proximity and hump traversal phase
+- intersection or turn proximity
+- assumed segment speed limit or modeled target speed, if available
+
+### Vehicle profile
+
+- mass
+- wheelbase and track width
+- suspension stiffness and damping proxies
+- tire sidewall or tire-compliance proxy
+- wheel diameter
+- center-of-mass height proxy
+- powertrain or regenerative-braking behavior where relevant
+
+These are model parameters, not claims about real vehicle specifications, until
+their sources and units are accepted.
+
+### Generated motion measurements
+
+- speed
+- longitudinal acceleration and jerk
+- lateral acceleration and jerk
+- vertical acceleration and jerk
+- yaw rate or heading change
+- pitch and roll proxies
+- braking and acceleration state
+- bump or hump impact magnitude
+
+The supplied Bronze `sensor_event` contract currently retains speed, heading,
+three acceleration axes, and one jerk value. Other candidate measurements above
+require a contract change before publication.
+
+## Sensor sequence and map matching
+
+The production sampling frequency is not yet selected. At 10 Hz the producer
+emits one sample every 100 ms; at `n` Hz the nominal interval is `1000 / n` ms.
+Every trip uses `trip_seq = 0, 1, 2, ...` independent of clock jitter.
+
+Bronze sensor events carry GPS coordinates but no `segment_id`. Even though the
+simulator uses a LION route internally, Spark performs the authoritative
+GPS-to-LION match later and writes the result to `sensor_events_matched`. This
+keeps Bronze immutable when road snapshots or matching rules change.
+
+## Time behavior
+
+The confirmed replay scale is one simulated second per real second. To make tests
+practical, the implementation may expose an injectable clock or faster test mode,
+but production demonstration defaults must preserve the confirmed scale.
+
+The source pickup gaps may make a 1,000-trip run long or create overlapping
+trips. Concurrency policy, source-day selection, and whether idle gaps are capped
+are open questions and must not be hidden inside implementation defaults.
+
+## Failure and restart behavior
+
+The supplied schema declares `event_id` as the primary key and proposes
+`(trip_id, trip_seq)` as the deterministic replay and deduplication key. A
+restarted producer should either resume from a checkpoint or safely reproduce
+that logical key. Whether it remains unique when the same source trip is
+simulated for multiple vehicle profiles is still open.
+
+Trips without valid endpoints or routes should be written to a rejection dataset
+with a reason code. They should not disappear silently or receive fabricated
+cross-zone straight-line routes.

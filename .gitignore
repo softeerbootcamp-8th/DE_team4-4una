@@ -58,6 +58,8 @@ standalone_admin_password.txt
 *.csv
 data/
 !data/.gitkeep
+!context/data/
+!context/data/**
 
 # --- Terraform / Infra (추후 사용 시) ---
 *.tfstate
