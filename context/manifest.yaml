@@ -1,0 +1,78 @@
+version: 0.2.0
+last_reviewed: 2026-08-10
+project_stage: planning
+
+documents:
+  - id: context-index
+    path: context/README.md
+    purpose: Entry point, reading routes, and authority rules
+    status: confirmed
+
+  - id: project-definition
+    path: context/project.md
+    purpose: Product goal, scope, requirements, and success conditions
+    status: draft
+
+  - id: target-architecture
+    path: context/architecture.md
+    purpose: Target data flow and local-first component boundaries
+    status: proposed
+
+  - id: service-map
+    path: context/services.md
+    purpose: Responsibilities of the existing workspace packages
+    status: proposed
+
+  - id: simulation-design
+    path: context/simulation.md
+    purpose: Deterministic trip replay and vehicle-motion simulation
+    status: proposed
+
+  - id: comfort-score-design
+    path: context/comfort-score.md
+    purpose: Candidate measurements and aggregation constraints
+    status: proposed
+
+  - id: project-glossary
+    path: context/glossary.md
+    purpose: Shared domain vocabulary
+    status: draft
+
+  - id: source-catalog
+    path: context/data/sources.yaml
+    purpose: Reference and trip-input dataset inventory
+    status: draft
+
+  - id: logical-contracts
+    path: context/data/contracts.md
+    purpose: Draft event and dataset grains, keys, and fields
+    status: proposed
+    future_canonical_path: libs/de4-core/src/de4_core/contracts/
+
+  - id: table-schema-catalog
+    path: context/data/schema-catalog.md
+    purpose: Supplied field-level source, Bronze, Silver, reference, and Gold schemas
+    status: draft-contract
+    future_canonical_path: libs/de4-core/src/de4_core/contracts/
+
+  - id: data-quality-rules
+    path: context/data/quality-rules.md
+    purpose: Sensor sequence, map-matching, conservation, and score validations
+    status: draft-contract
+
+  - id: data-lineage
+    path: context/data/lineage.md
+    purpose: Source-to-API transformation map
+    status: proposed
+
+  - id: open-questions
+    path: context/open-questions.md
+    purpose: Decisions that agents must not make implicitly
+    status: active
+
+canonical_external_paths:
+  shared_contracts: libs/de4-core/
+  architecture_decisions: docs/adr/
+  environment_config: config/
+  database_migrations: db/
+  service_implementations: services/
