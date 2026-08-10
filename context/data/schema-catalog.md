@@ -144,7 +144,7 @@ superseded by this version.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | Generated | STRING / UUID | N | PK | Unique event identifier |
+| Sensor event ID | `event_id` | Generated | STRING | N | PK | Deterministic UUID-formatted event identifier |
 | Vehicle ID | `vehicle_id` | Generated | STRING | N |  | Vehicle instance identifier |
 | Vehicle profile | `vehicle_profile_id` | Generated | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | Generated | STRING | N |  | Simulated journey identifier |
@@ -154,10 +154,10 @@ superseded by this version.
 | Longitude | `longitude` | Generated | DOUBLE | N |  | GPS longitude |
 | Speed | `speed_mps` | Generated | DOUBLE | N |  | Meters per second |
 | Heading | `heading` | Generated | DOUBLE | Y |  | Direction from 0 through 360 degrees |
-| Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration; unit must be finalized |
-| Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration; unit must be finalized |
-| Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact; unit must be finalized |
-| Jerk | `jerk` | Generated | DOUBLE | N |  | Acceleration change; axis and unit must be finalized |
+| Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration in m/s² |
+| Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration in m/s² |
+| Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact in m/s² |
+| Jerk | `jerk` | Generated | DOUBLE | N |  | Longitudinal acceleration change in m/s³ |
 | Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Bronze load time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Simulation and ingestion run identifier |
 
@@ -230,7 +230,7 @@ classification. Unmatched and ambiguous observations are retained.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING / UUID | N | PK | Bronze event identifier |
+| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING | N | PK | UUID-formatted Bronze event identifier |
 | Vehicle ID | `vehicle_id` | `vehicle_id` | STRING | N |  | Vehicle instance |
 | Vehicle profile | `vehicle_profile_id` | `vehicle_profile_id` | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | `trip_id` | STRING | N |  | Simulated journey |
