@@ -13,7 +13,8 @@ class SensorEvent:
     """One immutable Bronze vehicle sensor measurement.
 
     Timestamps are timezone-aware UTC values. Acceleration values use m/s²,
-    speed uses m/s, heading uses degrees, and jerk is longitudinal m/s³.
+    speed uses m/s, heading uses degrees, and jerk values use m/s³. ``jerk``
+    is retained as a compatibility alias for ``jerk_x``.
     """
 
     event_id: str
@@ -30,6 +31,9 @@ class SensorEvent:
     accel_y: float | None
     accel_z: float
     jerk: float
+    jerk_x: float
+    jerk_y: float
+    jerk_z: float
     _ingested_at: datetime
     _run_id: str
 
@@ -50,10 +54,20 @@ class SensorEvent:
             raise ValueError("speed_mps must be finite and non-negative")
         if self.heading is not None and not 0 <= self.heading < 360:
             raise ValueError("heading must be in [0, 360)")
-        for name in ("accel_x", "accel_y", "accel_z", "jerk"):
+        for name in (
+            "accel_x",
+            "accel_y",
+            "accel_z",
+            "jerk",
+            "jerk_x",
+            "jerk_y",
+            "jerk_z",
+        ):
             value = getattr(self, name)
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"{name} must be finite when present")
+        if self.jerk != self.jerk_x:
+            raise ValueError("jerk must equal its longitudinal jerk_x alias")
 
     @property
     def message_key(self) -> bytes:

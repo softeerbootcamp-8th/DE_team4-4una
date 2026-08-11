@@ -20,6 +20,9 @@ def make_event(**overrides: object) -> SensorEvent:
         "accel_y": 0.2,
         "accel_z": 0.3,
         "jerk": 0.4,
+        "jerk_x": 0.4,
+        "jerk_y": 0.5,
+        "jerk_z": 0.6,
         "_ingested_at": datetime(2024, 2, 1, tzinfo=UTC),
         "_run_id": "run-1",
     }
@@ -32,7 +35,15 @@ def test_sensor_event_serializes_agreed_schema() -> None:
 
     assert event.message_key == b"trip-1"
     assert event.to_dict()["trip_seq"] == 0
+    assert event.to_dict()["jerk_x"] == 0.4
+    assert event.to_dict()["jerk_y"] == 0.5
+    assert event.to_dict()["jerk_z"] == 0.6
     assert b'"event_time":"2024-02-01T00:00:00+00:00"' in event.to_json()
+
+
+def test_sensor_event_requires_legacy_jerk_to_match_jerk_x() -> None:
+    with pytest.raises(ValueError, match="jerk must equal"):
+        make_event(jerk_x=0.5)
 
 
 @pytest.mark.parametrize(

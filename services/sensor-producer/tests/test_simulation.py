@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
+import pytest
 from sensor_producer.domain import (
     VEHICLE_PROFILES,
     RouteLeg,
@@ -47,6 +49,35 @@ def route(pavement_rating: float, humps: tuple[float, ...] = ()) -> RoutePlan:
     )
 
 
+def turning_route() -> RoutePlan:
+    first = RouteLeg(
+        segment_id="segment-1",
+        geometry=LineString([(-73.99, 40.67), (-73.9895, 40.67)]),
+        length_m=50.0,
+        posted_speed_mph=25.0,
+        curve_radius_m=None,
+        pavement_rating=8.0,
+        hump_distances_m=(),
+    )
+    second = RouteLeg(
+        segment_id="segment-2",
+        geometry=LineString([(-73.9895, 40.67), (-73.9895, 40.6705)]),
+        length_m=50.0,
+        posted_speed_mph=25.0,
+        curve_radius_m=None,
+        pavement_rating=8.0,
+        hump_distances_m=(),
+    )
+    return RoutePlan(
+        trip_id="trip-1",
+        planned_at=trip().request_datetime,
+        start_node_id="n1",
+        end_node_id="n3",
+        legs=(first, second),
+        total_length_m=100.0,
+    )
+
+
 def simulate(plan: RoutePlan):
     return list(
         MotionSimulator().generate(
@@ -68,6 +99,31 @@ def test_sensor_samples_start_at_pickup_and_have_stable_sequence() -> None:
     assert (events[1].event_time - events[0].event_time).total_seconds() == 0.1
     assert all(event.to_dict().get("segment_id") is None for event in events)
     assert all(abs(event.accel_y or 0) <= 4.0 for event in events)
+    assert events[0].jerk == events[0].jerk_x == 0.0
+    assert events[0].jerk_y == events[0].jerk_z == 0.0
+
+
+def test_three_axis_jerk_is_derived_from_published_acceleration() -> None:
+    events = simulate(turning_route())
+    interval_seconds = 0.1
+
+    assert any(abs(event.jerk_y) > 0 for event in events[1:])
+    assert any(abs(event.jerk_z) > 0 for event in events[1:])
+    for previous, current in pairwise(events):
+        assert previous.accel_x is not None
+        assert previous.accel_y is not None
+        assert current.accel_x is not None
+        assert current.accel_y is not None
+        assert current.jerk_x == pytest.approx(
+            (current.accel_x - previous.accel_x) / interval_seconds
+        )
+        assert current.jerk_y == pytest.approx(
+            (current.accel_y - previous.accel_y) / interval_seconds
+        )
+        assert current.jerk_z == pytest.approx(
+            (current.accel_z - previous.accel_z) / interval_seconds
+        )
+        assert current.jerk == current.jerk_x
 
 
 def test_poor_pavement_increases_vertical_motion() -> None:

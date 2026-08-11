@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 ---
 
 # Data Quality and Idempotency Rules
@@ -33,8 +33,9 @@ delay.
 
 ## Sequence-aware calculations
 
-A derivative such as jerk is valid only across consecutive samples. Proposed
-Silver behavior:
+A derivative such as jerk is valid only across consecutive samples. Apply the
+same rule independently to the x, y, and z axes. Proposed Silver behavior for
+the longitudinal axis:
 
 ```sql
 CASE
@@ -44,9 +45,11 @@ CASE
 END
 ```
 
-This proposed null behavior conflicts with the supplied non-null Silver `jerk`
-schema. The implementation must wait for the nullability or rejection policy to
-be accepted.
+This proposed null behavior conflicts with the supplied non-null Silver
+`jerk`, `jerk_x`, `jerk_y`, and `jerk_z` schema. The implementation must wait
+for the nullability or rejection policy to be accepted. Bronze has no missing
+samples while it is generated; its first sample uses zero for every jerk axis
+because no prior observation exists.
 
 ## Bronze-to-Silver conservation
 

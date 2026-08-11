@@ -57,6 +57,8 @@ class MotionSimulator:
         sample_count = max(2, int(duration * config.sample_hz) + 1)
         previous_speed = 0.0
         previous_accel_x = 0.0
+        previous_accel_y = 0.0
+        previous_accel_z = 0.0
         previous_heading: float | None = None
         phase = deterministic_phase(trip.trip_id, config.seed)
 
@@ -75,11 +77,13 @@ class MotionSimulator:
 
             if sequence == 0:
                 accel_x = 0.0
-                jerk = 0.0
                 accel_y = 0.0
             else:
-                accel_x = (speed - previous_speed) / config.interval_seconds
-                jerk = (accel_x - previous_accel_x) / config.interval_seconds
+                accel_x = (
+                    (speed - previous_speed)
+                    / config.interval_seconds
+                    * profile.longitudinal_response
+                )
                 heading_delta = signed_heading_delta(previous_heading or heading, heading)
                 yaw_rate = math.radians(heading_delta) / config.interval_seconds
                 accel_y = clamp(speed * yaw_rate * profile.lateral_response, -4.0, 4.0)
@@ -92,6 +96,14 @@ class MotionSimulator:
                 phase,
                 profile,
             )
+            if sequence == 0:
+                jerk_x = 0.0
+                jerk_y = 0.0
+                jerk_z = 0.0
+            else:
+                jerk_x = (accel_x - previous_accel_x) / config.interval_seconds
+                jerk_y = (accel_y - previous_accel_y) / config.interval_seconds
+                jerk_z = (accel_z - previous_accel_z) / config.interval_seconds
             event_time = (trip.pickup_datetime + timedelta(seconds=elapsed)).astimezone(UTC)
             event_id = str(
                 uuid.uuid5(
@@ -110,15 +122,20 @@ class MotionSimulator:
                 longitude=point.x,
                 speed_mps=max(0.0, speed),
                 heading=heading,
-                accel_x=accel_x * profile.longitudinal_response,
+                accel_x=accel_x,
                 accel_y=accel_y,
                 accel_z=accel_z,
-                jerk=jerk * profile.longitudinal_response,
+                jerk=jerk_x,
+                jerk_x=jerk_x,
+                jerk_y=jerk_y,
+                jerk_z=jerk_z,
                 _ingested_at=datetime.now(UTC),
                 _run_id=config.run_id,
             )
             previous_speed = speed
             previous_accel_x = accel_x
+            previous_accel_y = accel_y
+            previous_accel_z = accel_z
             previous_heading = heading
 
 

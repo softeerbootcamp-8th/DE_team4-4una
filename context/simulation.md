@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 ---
 
 # Deterministic Trip Simulation
@@ -91,9 +91,10 @@ their sources and units are accepted.
 - braking and acceleration state
 - bump or hump impact magnitude
 
-The supplied Bronze `sensor_event` contract currently retains speed, heading,
-three acceleration axes, and one jerk value. Other candidate measurements above
-require a contract change before publication.
+The Bronze `sensor_event` contract retains speed, heading, three acceleration
+axes, and the corresponding three jerk axes. The legacy `jerk` field remains an
+exact alias of `jerk_x`. Other candidate measurements above require a contract
+change before publication.
 
 ## Sensor sequence and map matching
 
@@ -120,8 +121,11 @@ implicit idle-gap cap is applied.
 ## Prototype signal model
 
 The implementation uses deterministic synthetic SI measurements: speed in m/s,
-all three acceleration axes in m/s², and `jerk` as longitudinal jerk in m/s³.
-A smoothstep speed trajectory spans each routed distance over the TLC
+all three acceleration axes in m/s², and `jerk_x`, `jerk_y`, and `jerk_z` in
+m/s³. Each jerk axis is the discrete derivative of its published acceleration
+axis across consecutive samples; the first sample is zero because no preceding
+measurement exists. `jerk` is emitted with the same value as `jerk_x`. A
+smoothstep speed trajectory spans each routed distance over the TLC
 pickup-to-drop-off duration. Pavement rating changes deterministic vertical
 vibration amplitude, while a mapped hump adds a localized Gaussian impact and a
 damped oscillation scaled by speed and vehicle profile. Lateral acceleration is

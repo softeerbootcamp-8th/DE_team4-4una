@@ -23,6 +23,9 @@ def event() -> SensorEvent:
         accel_y=0.0,
         accel_z=0.0,
         jerk=0.0,
+        jerk_x=0.0,
+        jerk_y=0.0,
+        jerk_z=0.0,
         _ingested_at=datetime(2024, 2, 1, tzinfo=UTC),
         _run_id="run-1",
     )
@@ -37,6 +40,8 @@ def test_jsonl_publisher_writes_bronze_contract(tmp_path) -> None:
 
     value = json.loads(output.read_text())
     assert value["trip_id"] == "trip-1"
+    assert value["jerk"] == value["jerk_x"]
+    assert {"jerk_x", "jerk_y", "jerk_z"} <= value.keys()
     assert "segment_id" not in value
 
 

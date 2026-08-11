@@ -74,7 +74,8 @@ without a broker.
   geometry identifies the containing road section rather than each hump point.
 - Speed follows a smooth pickup-to-drop-off trajectory over the routed distance.
   Signals are deterministic SI measurements: speed in m/s, acceleration in
-  m/s², heading in degrees, and longitudinal jerk in m/s³.
+  m/s², heading in degrees, and three-axis jerk in m/s³. The legacy `jerk`
+  field is identical to longitudinal `jerk_x`.
 
 The checked-in execution evidence and exact input checksums are in
 [`context/runs/2026-08-10-nyc-sensor-smoke.md`](../../context/runs/2026-08-10-nyc-sensor-smoke.md).
