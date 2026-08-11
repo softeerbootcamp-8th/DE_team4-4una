@@ -3,7 +3,7 @@ name = "de4-core"
 version = "0.1.0"
 description = "Shared contracts and domain primitives for DE4 services"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = ["boto3>=1.40.0"]
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
