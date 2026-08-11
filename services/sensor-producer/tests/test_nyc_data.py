@@ -15,8 +15,6 @@ def test_load_trips_interprets_naive_tlc_times_as_new_york(tmp_path) -> None:
                     "dropoff_datetime": "2024-02-01T10:06:00",
                     "pu_location_id": 181,
                     "do_location_id": 181,
-                    "trip_miles": 0.5,
-                    "trip_time": 60,
                 }
             ]
         )

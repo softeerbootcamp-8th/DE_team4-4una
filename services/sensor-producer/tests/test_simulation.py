@@ -23,8 +23,6 @@ def trip() -> TripRecord:
         dropoff_datetime=pickup + timedelta(seconds=2),
         pu_location_id=181,
         do_location_id=181,
-        trip_miles=0.1,
-        trip_time=2,
     )
 
 
