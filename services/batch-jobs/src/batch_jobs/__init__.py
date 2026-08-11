@@ -1,5 +1,5 @@
-"""Offline ride-comfort data jobs."""
+"""Offline reference-data ingestion and environment preparation jobs."""
 
+from batch_jobs.cli import main
 
-def main() -> None:
-    print("batch-jobs")
+__all__ = ["main"]
