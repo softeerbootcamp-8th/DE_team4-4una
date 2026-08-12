@@ -38,13 +38,14 @@ class VehicleProfile:
     damping: float
     longitudinal_response: float = 1.0
     lateral_response: float = 1.0
+    steering_vibration_response: float = 1.0
 
 
 VEHICLE_PROFILES: dict[int, VehicleProfile] = {
-    1: VehicleProfile(1, "genesis", 0.72, 0.82, 0.90, 0.90),
-    2: VehicleProfile(2, "grandeur", 0.82, 0.76, 0.95, 0.95),
-    3: VehicleProfile(3, "avante", 1.08, 0.62, 1.05, 1.08),
-    4: VehicleProfile(4, "ev5", 0.94, 0.72, 0.88, 1.02),
+    1: VehicleProfile(1, "genesis", 0.72, 0.82, 0.90, 0.90, 0.72),
+    2: VehicleProfile(2, "grandeur", 0.82, 0.76, 0.95, 0.95, 0.82),
+    3: VehicleProfile(3, "avante", 1.08, 0.62, 1.05, 1.08, 1.08),
+    4: VehicleProfile(4, "ev5", 0.94, 0.72, 0.88, 1.02, 0.94),
 }
 
 

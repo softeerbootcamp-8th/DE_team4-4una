@@ -76,6 +76,11 @@ without a broker.
   Signals are deterministic SI measurements: speed in m/s, acceleration in
   m/s², heading in degrees, and three-axis jerk in m/s³. The legacy `jerk`
   field is identical to longitudinal `jerk_x`.
+- `steering_vibration` is a non-negative RMS-like steering-wheel acceleration
+  amplitude in m/s². It approximates vibration transferred from vertical road
+  motion plus lateral steering activity, fades toward zero at low speed, and is
+  scaled by the synthetic vehicle profile. It is not a calibrated steering
+  column measurement.
 
 The checked-in execution evidence and exact input checksums are in
 [`context/runs/2026-08-10-nyc-sensor-smoke.md`](../../context/runs/2026-08-10-nyc-sensor-smoke.md).

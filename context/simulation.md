@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 ---
 
 # Deterministic Trip Simulation
@@ -86,15 +86,16 @@ their sources and units are accepted.
 - longitudinal acceleration and jerk
 - lateral acceleration and jerk
 - vertical acceleration and jerk
+- steering-wheel vibration amplitude
 - yaw rate or heading change
 - pitch and roll proxies
 - braking and acceleration state
 - bump or hump impact magnitude
 
 The Bronze `sensor_event` contract retains speed, heading, three acceleration
-axes, and the corresponding three jerk axes. The legacy `jerk` field remains an
-exact alias of `jerk_x`. Other candidate measurements above require a contract
-change before publication.
+axes, the corresponding three jerk axes, and `steering_vibration`. The legacy
+`jerk` field remains an exact alias of `jerk_x`. Other candidate measurements
+above require a contract change before publication.
 
 ## Sensor sequence and map matching
 
@@ -131,6 +132,13 @@ vibration amplitude, while a mapped hump adds a localized Gaussian impact and a
 damped oscillation scaled by speed and vehicle profile. Lateral acceleration is
 derived from heading change and bounded to 4 m/s² to avoid discontinuities in
 simplified source geometry producing impossible spikes.
+
+`steering_vibration` is a non-negative RMS-like amplitude in m/s² rather than a
+steering angle. It combines road-induced vertical acceleration and lateral
+steering activity, attenuates road vibration near zero speed, and applies a
+deterministic high-frequency carrier plus the vehicle profile's synthetic
+steering response. It is intended as an explainable pipeline feature, not a
+calibrated steering-column dynamics model.
 
 These rules create useful pipeline and scoring features but are not a calibrated
 reconstruction of the source taxi's actual dynamics.

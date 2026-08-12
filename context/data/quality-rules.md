@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 ---
 
 # Data Quality and Idempotency Rules
@@ -17,6 +17,7 @@ last_reviewed: 2026-08-11
 - `(trip_id, trip_seq)` is the deterministic replay, ordering, and deduplication
   key, provided `trip_id` uniquely identifies a vehicle-specific simulation.
 - Replaying the same logical sample must reproduce its `trip_id` and `trip_seq`.
+- `steering_vibration` is finite and non-negative, with m/s² as its unit.
 - Downstream windows order samples by `trip_seq`; `event_time` alone is not a
   deterministic ordering key when timestamps tie or events arrive late.
 

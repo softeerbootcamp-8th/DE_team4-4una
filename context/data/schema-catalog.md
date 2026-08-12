@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 ---
 
 # Table Schema Catalog
@@ -161,6 +161,7 @@ superseded by this version.
 | Longitudinal jerk | `jerk_x` | Generated | DOUBLE | N |  | Change in `accel_x` per second in m/s³ |
 | Lateral jerk | `jerk_y` | Generated | DOUBLE | N |  | Change in `accel_y` per second in m/s³ |
 | Vertical jerk | `jerk_z` | Generated | DOUBLE | N |  | Change in `accel_z` per second in m/s³ |
+| Steering vibration | `steering_vibration` | Generated | DOUBLE | N |  | Non-negative RMS-like steering-wheel acceleration amplitude in m/s² |
 | Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Bronze load time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Simulation and ingestion run identifier |
 
@@ -250,6 +251,7 @@ classification. Unmatched and ambiguous observations are retained.
 | Longitudinal jerk | `jerk_x` | `jerk_x` | DOUBLE | N |  | Change in `accel_x` per second; nullability conflict is open |
 | Lateral jerk | `jerk_y` | `jerk_y` | DOUBLE | N |  | Change in `accel_y` per second; nullability conflict is open |
 | Vertical jerk | `jerk_z` | `jerk_z` | DOUBLE | N |  | Change in `accel_z` per second; nullability conflict is open |
+| Steering vibration | `steering_vibration` | `steering_vibration` | DOUBLE | N |  | Validated non-negative RMS-like steering-wheel acceleration amplitude in m/s² |
 | Road segment | `segment_id` | GPS-LION match | STRING | Y | FK | Matched canonical LION segment |
 | LION snapshot date | `road_snapshot_date` | Matching reference | DATE | N | FK | `road_segment` version used |
 | Match status | `match_status` | Derived | STRING | N |  | For example `MATCHED`, `UNMATCHED`, or `AMBIGUOUS` |

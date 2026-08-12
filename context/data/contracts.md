@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -87,6 +87,7 @@ Candidate fields:
 - heading and longitudinal, lateral, and vertical acceleration
 - longitudinal `jerk_x`, lateral `jerk_y`, and vertical `jerk_z` in m/s³
 - legacy `jerk`, retained as an exact alias of `jerk_x`
+- non-negative RMS-like `steering_vibration` amplitude in m/s²
 - `_ingested_at` and `_run_id`
 
 Bronze does not carry `segment_id`, road attributes, or threshold-derived event

@@ -12,9 +12,10 @@ from datetime import datetime
 class SensorEvent:
     """One immutable Bronze vehicle sensor measurement.
 
-    Timestamps are timezone-aware UTC values. Acceleration values use m/s²,
-    speed uses m/s, heading uses degrees, and jerk values use m/s³. ``jerk``
-    is retained as a compatibility alias for ``jerk_x``.
+    Timestamps are timezone-aware UTC values. Acceleration and the RMS-like
+    steering vibration amplitude use m/s², speed uses m/s, heading uses degrees,
+    and jerk values use m/s³. ``jerk`` is retained as a compatibility alias for
+    ``jerk_x``.
     """
 
     event_id: str
@@ -34,6 +35,7 @@ class SensorEvent:
     jerk_x: float
     jerk_y: float
     jerk_z: float
+    steering_vibration: float
     _ingested_at: datetime
     _run_id: str
 
@@ -62,10 +64,13 @@ class SensorEvent:
             "jerk_x",
             "jerk_y",
             "jerk_z",
+            "steering_vibration",
         ):
             value = getattr(self, name)
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"{name} must be finite when present")
+        if self.steering_vibration < 0:
+            raise ValueError("steering_vibration must be non-negative")
         if self.jerk != self.jerk_x:
             raise ValueError("jerk must equal its longitudinal jerk_x alias")
 

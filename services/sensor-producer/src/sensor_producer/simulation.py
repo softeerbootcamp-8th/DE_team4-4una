@@ -96,6 +96,14 @@ class MotionSimulator:
                 phase,
                 profile,
             )
+            steering_vibration = steering_vibration_amplitude(
+                speed,
+                accel_y,
+                accel_z,
+                elapsed,
+                phase,
+                profile,
+            )
             if sequence == 0:
                 jerk_x = 0.0
                 jerk_y = 0.0
@@ -129,6 +137,7 @@ class MotionSimulator:
                 jerk_x=jerk_x,
                 jerk_y=jerk_y,
                 jerk_z=jerk_z,
+                steering_vibration=steering_vibration,
                 _ingested_at=datetime.now(UTC),
                 _run_id=config.run_id,
             )
@@ -309,6 +318,32 @@ def vertical_acceleration(
             1.8 * impact + 0.35 * ring
         )
     return pavement + hump_response, near_hump
+
+
+def steering_vibration_amplitude(
+    speed_mps: float,
+    accel_y: float,
+    accel_z: float,
+    elapsed_seconds: float,
+    phase: float,
+    profile: VehicleProfile,
+) -> float:
+    """Approximate the non-negative steering-wheel vibration amplitude in m/s².
+
+    This is an RMS-like engineering signal rather than a calibrated steering
+    column model. Road vibration reaches the wheel only while moving, lateral
+    acceleration contributes during steering, and the carrier gives the signal
+    a deterministic high-frequency texture.
+    """
+
+    moving_factor = clamp(speed_mps / 1.5, 0.0, 1.0)
+    speed_factor = clamp(speed_mps / 8.0, 0.0, 1.5)
+    road_component = abs(accel_z) * (0.20 + 0.25 * speed_factor) * moving_factor
+    steering_component = abs(accel_y) * 0.14
+    carrier = 0.85 + 0.15 * abs(math.sin(elapsed_seconds * 28.0 + phase))
+    return profile.steering_vibration_response * (
+        road_component + steering_component
+    ) * carrier
 
 
 def smoothstep(value: float) -> float:
