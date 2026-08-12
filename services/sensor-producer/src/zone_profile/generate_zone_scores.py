@@ -56,6 +56,11 @@ WGS84 = "EPSG:4326"
 # Score 설정
 # ============================================================
 
+# 전체 weight 중 실제 사용 가능한 feature의 비중이 이보다 낮으면 score를
+# 신뢰할 수 없다고 보고 NaN 처리한다. Feature 2~3개만으로 계산된 점수가
+# 우연히 극단값이 나오는 걸 막기 위함.
+MIN_FEATURE_COVERAGE = 0.7
+
 CATEGORY_WEIGHTS = {
     "business_score": {
         "office_area_ratio": 0.20,
@@ -157,8 +162,12 @@ def weighted_score(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
     정규화 Feature들의 가중 평균을 계산한다.
 
     결측 Feature가 있으면 해당 Feature의 weight를 제외하고 나머지 weight로
-    다시 정규화한다.
+    다시 정규화한다. 단, 실제 사용된 weight 비중(coverage)이
+    MIN_FEATURE_COVERAGE보다 낮으면, 소수의 feature만으로 만든 점수가
+    과대/과소평가될 수 있으므로 NaN으로 처리한다.
     """
+
+    total_weight = sum(weights.values())
 
     numerator = pd.Series(0.0, index=df.index)
     denominator = pd.Series(0.0, index=df.index)
@@ -174,7 +183,12 @@ def weighted_score(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
         numerator.loc[valid] += df.loc[valid, norm_col] * weight
         denominator.loc[valid] += weight
 
-    return numerator / denominator.replace(0, np.nan)
+    score = numerator / denominator.replace(0, np.nan)
+
+    coverage = denominator / total_weight
+    score.loc[coverage < MIN_FEATURE_COVERAGE] = np.nan
+
+    return score
 
 
 # ============================================================
