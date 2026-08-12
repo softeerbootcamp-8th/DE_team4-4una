@@ -878,3 +878,228 @@ def generate_zone_tags(
     ]
 
     return df
+
+
+# ============================================================
+# Validation
+# ============================================================
+
+SCORE_COLUMNS = [
+    "business_score",
+    "residential_score",
+    "shopping_score",
+    "nightlife_score",
+    "tourism_score",
+    "transit_score",
+    "public_medical_score",
+    "park_score",
+    "comfort_preference_score",
+]
+
+
+def validate(
+    df: pd.DataFrame,
+) -> None:
+
+    if df[
+        "location_id"
+    ].duplicated().any():
+
+        raise ValueError(
+            "location_id 중복 발생"
+        )
+
+    for col in SCORE_COLUMNS:
+
+        values = df[col].dropna()
+
+        if not values.between(
+            0,
+            1,
+        ).all():
+
+            raise ValueError(
+                f"{col}이 0~1 범위를 벗어남"
+            )
+
+    print("\n=== Validation ===")
+    print(
+        f"rows: {len(df)}"
+    )
+    print(
+        "duplicate location_id:",
+        df["location_id"]
+        .duplicated()
+        .sum(),
+    )
+
+    print("\nScore range:")
+
+    print(
+        df[SCORE_COLUMNS]
+        .agg(
+            ["min", "max", "mean"]
+        )
+        .T
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    features, zones = load_data()
+
+    print(
+        f"zone features: "
+        f"{features.shape}"
+    )
+
+    # --------------------------------------------
+    # NYS DOH
+    # --------------------------------------------
+
+    doh = build_doh_features(
+        zones
+    )
+
+    df = features.merge(
+        doh,
+        on="location_id",
+        how="left",
+        validate="one_to_one",
+    )
+
+    # 병원이 없는 Zone은 0
+    df[
+        [
+            "doh_hospital_count",
+            "doh_hospital_bed_count",
+        ]
+    ] = (
+        df[
+            [
+                "doh_hospital_count",
+                "doh_hospital_bed_count",
+            ]
+        ]
+        .fillna(0)
+    )
+
+    # --------------------------------------------
+    # Normalize
+    # --------------------------------------------
+
+    df = add_normalized_features(
+        df
+    )
+
+    # --------------------------------------------
+    # Category score
+    # --------------------------------------------
+
+    df = generate_category_scores(
+        df
+    )
+
+    # --------------------------------------------
+    # Comfort preference
+    # --------------------------------------------
+
+    df = generate_comfort_preference(
+        df
+    )
+
+    # --------------------------------------------
+    # Tag
+    # --------------------------------------------
+
+    df = generate_zone_tags(
+        df
+    )
+
+    # geometry 없는 TLC placeholder는 score 제외
+    valid_ids = set(
+        zones.loc[
+            zones.geometry.notna(),
+            "location_id",
+        ]
+    )
+
+    invalid_mask = ~df[
+        "location_id"
+    ].isin(valid_ids)
+
+    df.loc[
+        invalid_mask,
+        SCORE_COLUMNS,
+    ] = np.nan
+
+    df.loc[
+        invalid_mask,
+        "zone_tag",
+    ] = "non_spatial"
+
+    df.loc[
+        invalid_mask,
+        "zone_tag_ko",
+    ] = "비공간 Zone"
+
+    # --------------------------------------------
+    # 최종 출력
+    # --------------------------------------------
+
+    output_cols = [
+        "location_id",
+
+        "business_score",
+        "residential_score",
+        "shopping_score",
+        "nightlife_score",
+        "tourism_score",
+        "transit_score",
+        "public_medical_score",
+        "park_score",
+
+        "zone_tag",
+        "zone_tag_ko",
+
+        "comfort_preference_score",
+
+        # 확인용
+        "doh_hospital_count",
+        "doh_hospital_bed_count",
+    ]
+
+    result = df[
+        output_cols
+    ].copy()
+
+    validate(result)
+
+    OUTPUT_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_parquet(
+        OUTPUT_PATH,
+        index=False,
+    )
+
+    print(
+        f"\nSaved: {OUTPUT_PATH}"
+    )
+
+    print("\n=== Sample ===")
+
+    print(
+        result.head(20)
+        .to_string(index=False)
+    )
+
+
+if __name__ == "__main__":
+    main()
