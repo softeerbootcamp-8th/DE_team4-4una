@@ -571,3 +571,88 @@ def build_doh_features(
     )
 
     return result
+
+
+# ============================================================
+# Normalize Features
+# ============================================================
+
+def add_normalized_features(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    df = df.copy()
+
+    used_features = set()
+
+    for weights in CATEGORY_WEIGHTS.values():
+        used_features.update(
+            weights.keys()
+        )
+
+    used_features.update(
+        COMFORT_WEIGHTS.keys()
+    )
+
+    for feature in sorted(
+        used_features
+    ):
+
+        if feature not in df.columns:
+            print(
+                f"[WARNING] "
+                f"{feature} 없음"
+            )
+            continue
+
+        df[
+            f"{feature}_norm"
+        ] = percentile_normalize(
+            df[feature]
+        )
+
+    return df
+
+
+# ============================================================
+# Category Scores
+# ============================================================
+
+def generate_category_scores(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    df = df.copy()
+
+    for score_name, weights in (
+        CATEGORY_WEIGHTS.items()
+    ):
+
+        df[score_name] = (
+            weighted_score(
+                df,
+                weights,
+            )
+        )
+
+    return df
+
+
+# ============================================================
+# Comfort Preference
+# ============================================================
+
+def generate_comfort_preference(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    df = df.copy()
+
+    df[
+        "comfort_preference_score"
+    ] = weighted_score(
+        df,
+        COMFORT_WEIGHTS,
+    )
+
+    return df
