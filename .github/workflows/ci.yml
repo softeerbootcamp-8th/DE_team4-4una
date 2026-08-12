@@ -4,8 +4,10 @@
 name: CI
 
 on:
-  # develop, main 브랜치로 향하는 PR에서만 실행한다.
+  # develop, main 브랜치로 향하는 PR에서 실행한다.
   pull_request:
+    branches: [develop, main]
+  push:
     branches: [develop, main]
 
 # 같은 PR에 연달아 push하면 이전 실행은 취소한다.
