@@ -15,7 +15,7 @@ data/processed/zone_scores.parquet
 - 8개 category score
 - zone_tag
 - zone_tag_ko
-- comfort_preference_score
+- comfort_relevance_score
 
 ※ category score는 NYC Zone 사이의 상대적인 특성을 나타낸다.
 ※ 실제 도로 승차감 comfort_score와는 다른 개념이다.
@@ -103,7 +103,7 @@ CATEGORY_WEIGHTS = {
         "subway_station_count": 0.55,
         "subway_complex_count": 0.45,
     },
-    "public_medical_score": {
+    "public_service_score": {
         "healthcare_job_ratio": 0.20,
         "education_job_ratio": 0.10,
         "public_admin_job_ratio": 0.10,
@@ -400,12 +400,12 @@ def generate_category_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# Comfort Preference
+# Comfort Relevance
 # ============================================================
 
-def generate_comfort_preference(df: pd.DataFrame) -> pd.DataFrame:
+def generate_comfort_relevance(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["comfort_preference_score"] = weighted_score(df, COMFORT_WEIGHTS)
+    df["comfort_relevance_score"] = weighted_score(df, COMFORT_WEIGHTS)
     return df
 
 
@@ -420,7 +420,7 @@ CATEGORY_LABELS = {
     "nightlife_score": ("dining_nightlife", "외식·야간"),
     "tourism_score": ("tourism_culture", "관광·문화"),
     "transit_score": ("transit", "교통·환승"),
-    "public_medical_score": ("public_medical", "행정·의료·교육"),
+    "public_service_score": ("public_service", "행정·의료·교육"),
     "park_score": ("park_leisure", "공원·레저"),
 }
 
@@ -477,9 +477,9 @@ TAG_RULES = {
         "label": ("residential_medical", "주거·의료"),
         "score_quantile": {
             "residential_score": 0.60,  # 주거 상위 40%
-            "public_medical_score": 0.75,  # 의료 상위 25%
+            "public_service_score": 0.75,  # 의료 상위 25%
         },
-        "top_k_categories": ["residential_score", "public_medical_score"],
+        "top_k_categories": ["residential_score", "public_service_score"],
     },
     "education_residential": {
         "label": ("education_residential", "교육·주거"),
@@ -643,9 +643,9 @@ SCORE_COLUMNS = [
     "nightlife_score",
     "tourism_score",
     "transit_score",
-    "public_medical_score",
+    "public_service_score",
     "park_score",
-    "comfort_preference_score",
+    "comfort_relevance_score",
 ]
 
 
@@ -700,7 +700,7 @@ def main():
 
     analysis_df = add_normalized_features(analysis_df)
     analysis_df = generate_category_scores(analysis_df)
-    analysis_df = generate_comfort_preference(analysis_df)
+    analysis_df = generate_comfort_relevance(analysis_df)
     analysis_df = generate_zone_tags(analysis_df)
 
     # 분석 대상 Zone의 결과를 전체 location_id에 다시 붙인다. 제외된 Zone은
@@ -722,11 +722,11 @@ def main():
         "nightlife_score",
         "tourism_score",
         "transit_score",
-        "public_medical_score",
+        "public_service_score",
         "park_score",
         "zone_tag",
         "zone_tag_ko",
-        "comfort_preference_score",
+        "comfort_relevance_score",
         "doh_hospital_count",  # 확인용
         "doh_hospital_bed_count",  # 확인용
     ]
