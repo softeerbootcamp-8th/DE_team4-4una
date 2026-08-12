@@ -516,25 +516,35 @@ def main():
     hospital_cols = ["doh_hospital_count", "doh_hospital_bed_count"]
     df[hospital_cols] = df[hospital_cols].fillna(0)
 
-    # Normalize
-    df = add_normalized_features(df)
+    # 분석 대상 Zone 선택
+    #
+    # geometry 없는 TLC placeholder(264/265)와 EWR(Newark Airport, NJ
+    # 소속이라 NY주 기준 PLUTO/ACS/LODES 커버리지가 없음)은 분석 대상에서
+    # 제외한다. normalize/score/tag보다 먼저 걸러야, 이 Zone들이 percentile
+    # 순위 계산에 섞여 들어가서 다른 Zone들의 결과를 왜곡하는 걸 막을 수 있다.
+    valid_ids = set(
+        zones.loc[
+            zones.geometry.notna() & (zones["borough"] != "EWR"), "location_id",
+        ]
+    )
 
-    # Category score
-    df = generate_category_scores(df)
+    valid_mask = df["location_id"].isin(valid_ids)
+    analysis_df = df.loc[valid_mask].copy()
 
-    # Comfort preference
-    df = generate_comfort_preference(df)
+    analysis_df = add_normalized_features(analysis_df)
+    analysis_df = generate_category_scores(analysis_df)
+    analysis_df = generate_comfort_preference(analysis_df)
+    analysis_df = generate_zone_tags(analysis_df)
 
-    # Tag
-    df = generate_zone_tags(df)
+    # 분석 대상 Zone의 결과를 전체 location_id에 다시 붙인다. 제외된 Zone은
+    # 매칭이 안 돼서 SCORE_COLUMNS/tag가 자동으로 NaN이 되고, tag만
+    # 명시적으로 "excluded"로 표시한다.
+    result_cols = ["location_id", *SCORE_COLUMNS, "zone_tag", "zone_tag_ko"]
+    df = df.merge(analysis_df[result_cols], on="location_id", how="left")
 
-    # geometry 없는 TLC placeholder는 score 제외
-    valid_ids = set(zones.loc[zones.geometry.notna(), "location_id"])
-    invalid_mask = ~df["location_id"].isin(valid_ids)
-
-    df.loc[invalid_mask, SCORE_COLUMNS] = np.nan
-    df.loc[invalid_mask, "zone_tag"] = "non_spatial"
-    df.loc[invalid_mask, "zone_tag_ko"] = "비공간 Zone"
+    excluded_mask = ~df["location_id"].isin(valid_ids)
+    df.loc[excluded_mask, "zone_tag"] = "excluded"
+    df.loc[excluded_mask, "zone_tag_ko"] = "분석 제외"
 
     # 최종 출력
     output_cols = [
