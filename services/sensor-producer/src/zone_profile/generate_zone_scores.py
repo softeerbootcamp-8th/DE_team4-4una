@@ -26,7 +26,6 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import requests
 
 # ============================================================
 # Path
@@ -43,9 +42,6 @@ OUTPUT_PATH = DATA_DIR / "processed/zone_scores.parquet"
 # ============================================================
 # NYS DOH
 # ============================================================
-
-DOH_FACILITY_URL = "https://health.data.ny.gov/resource/vn5v-hh5r.json"
-DOH_CERT_URL = "https://health.data.ny.gov/resource/2g9y-7kqm.json"
 
 NYC_COUNTIES = {"Bronx", "Kings", "New York", "Queens", "Richmond"}
 
@@ -210,32 +206,8 @@ def weighted_score(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
 
 
 # ============================================================
-# NYS DOH download
+# NYS DOH
 # ============================================================
-
-def download_socrata(url: str, limit: int = 50000) -> pd.DataFrame:
-    rows = []
-    offset = 0
-
-    while True:
-        params = {"$limit": limit, "$offset": offset}
-        response = requests.get(url, params=params, timeout=180)
-        response.raise_for_status()
-
-        batch = response.json()
-
-        if not batch:
-            break
-
-        rows.extend(batch)
-        offset += len(batch)
-        print(f"DOH downloaded: {offset:,}")
-
-        if len(batch) < limit:
-            break
-
-    return pd.DataFrame(rows)
-
 
 def extract_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     """NYS DOH dataset 버전에 따라 좌표 필드명이 달라도 최대한 자동으로 탐색한다."""
@@ -272,19 +244,12 @@ def extract_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-# ============================================================
-# DOH → TLC Zone
-# ============================================================
-
 def build_doh_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("\n=== NYS DOH ===")
 
-    facilities = download_socrata(DOH_FACILITY_URL)
-    certification = download_socrata(DOH_CERT_URL)
-
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    facilities.to_json(RAW_DIR / "doh_facilities.json", orient="records")
-    certification.to_json(RAW_DIR / "doh_certification.json", orient="records")
+    # download_doh_raw.py로 미리 받아둔 raw 파일을 읽는다.
+    facilities = pd.read_json(RAW_DIR / "doh_facilities.json")
+    certification = pd.read_json(RAW_DIR / "doh_certification.json")
 
     # NYC만
     facilities = facilities[facilities["county"].isin(NYC_COUNTIES)].copy()
