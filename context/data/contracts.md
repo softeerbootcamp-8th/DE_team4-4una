@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -85,7 +85,8 @@ Candidate fields:
 - `event_time`, latitude, and longitude
 - speed in meters per second
 - heading and longitudinal, lateral, and vertical acceleration
-- jerk, with its axis and unit still to be confirmed
+- longitudinal `jerk_x`, lateral `jerk_y`, and vertical `jerk_z` in m/s³
+- legacy `jerk`, retained as an exact alias of `jerk_x`
 - `_ingested_at` and `_run_id`
 
 Bronze does not carry `segment_id`, road attributes, or threshold-derived event

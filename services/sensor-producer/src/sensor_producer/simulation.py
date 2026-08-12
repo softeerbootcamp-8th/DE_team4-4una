@@ -1,0 +1,332 @@
+"""Deterministic vehicle motion and wall-clock replay coordination."""
+
+from __future__ import annotations
+
+import hashlib
+import heapq
+import math
+import time
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+
+from de4_core import SensorEvent
+
+from sensor_producer.domain import (
+    VEHICLE_PROFILES,
+    RouteLeg,
+    RoutePlan,
+    SimulationConfig,
+    TripRecord,
+    VehicleProfile,
+)
+from sensor_producer.geo import point_and_heading
+from sensor_producer.publisher import EventPublisher
+from sensor_producer.routing import RoadRouter
+
+EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayResult:
+    trips_planned: int
+    events_published: int
+    unique_segments: int
+    rated_samples: int
+    hump_samples: int
+
+
+@dataclass(frozen=True, slots=True)
+class SamplePosition:
+    leg: RouteLeg
+    distance_in_leg_m: float
+
+
+class MotionSimulator:
+    """Generate plausible, deterministic signals rather than calibrated physics."""
+
+    def generate(
+        self,
+        trip: TripRecord,
+        route: RoutePlan,
+        profile: VehicleProfile,
+        config: SimulationConfig,
+    ) -> Iterator[SensorEvent]:
+        duration = trip.passenger_duration_seconds
+        sample_count = max(2, int(duration * config.sample_hz) + 1)
+        previous_speed = 0.0
+        previous_accel_x = 0.0
+        previous_accel_y = 0.0
+        previous_accel_z = 0.0
+        previous_heading: float | None = None
+        phase = deterministic_phase(trip.trip_id, config.seed)
+
+        for sequence in range(sample_count):
+            elapsed = min(duration, sequence * config.interval_seconds)
+            normalized_time = elapsed / duration
+            distance = route.total_length_m * smoothstep(normalized_time)
+            speed = route.total_length_m / duration * smoothstep_derivative(normalized_time)
+            position = locate(route, distance)
+            fraction = (
+                position.distance_in_leg_m / position.leg.length_m
+                if position.leg.length_m
+                else 0.0
+            )
+            point, heading = point_and_heading(position.leg.geometry, fraction)
+
+            if sequence == 0:
+                accel_x = 0.0
+                accel_y = 0.0
+            else:
+                accel_x = (
+                    (speed - previous_speed)
+                    / config.interval_seconds
+                    * profile.longitudinal_response
+                )
+                heading_delta = signed_heading_delta(previous_heading or heading, heading)
+                yaw_rate = math.radians(heading_delta) / config.interval_seconds
+                accel_y = clamp(speed * yaw_rate * profile.lateral_response, -4.0, 4.0)
+
+            accel_z, _near_hump = vertical_acceleration(
+                position,
+                distance,
+                speed,
+                elapsed,
+                phase,
+                profile,
+            )
+            if sequence == 0:
+                jerk_x = 0.0
+                jerk_y = 0.0
+                jerk_z = 0.0
+            else:
+                jerk_x = (accel_x - previous_accel_x) / config.interval_seconds
+                jerk_y = (accel_y - previous_accel_y) / config.interval_seconds
+                jerk_z = (accel_z - previous_accel_z) / config.interval_seconds
+            event_time = (trip.pickup_datetime + timedelta(seconds=elapsed)).astimezone(UTC)
+            event_id = str(
+                uuid.uuid5(
+                    EVENT_NAMESPACE,
+                    f"{config.run_id}:{trip.trip_id}:{profile.vehicle_profile_id}:{sequence}",
+                )
+            )
+            yield SensorEvent(
+                event_id=event_id,
+                vehicle_id=f"vehicle-{profile.vehicle_profile_id}-{trip.trip_id[:8]}",
+                vehicle_profile_id=profile.vehicle_profile_id,
+                trip_id=trip.trip_id,
+                trip_seq=sequence,
+                event_time=event_time,
+                latitude=point.y,
+                longitude=point.x,
+                speed_mps=max(0.0, speed),
+                heading=heading,
+                accel_x=accel_x,
+                accel_y=accel_y,
+                accel_z=accel_z,
+                jerk=jerk_x,
+                jerk_x=jerk_x,
+                jerk_y=jerk_y,
+                jerk_z=jerk_z,
+                _ingested_at=datetime.now(UTC),
+                _run_id=config.run_id,
+            )
+            previous_speed = speed
+            previous_accel_x = accel_x
+            previous_accel_y = accel_y
+            previous_accel_z = accel_z
+            previous_heading = heading
+
+
+class ReplayClock:
+    def __init__(self, time_scale: float):
+        self.time_scale = time_scale
+        self._event_anchor: datetime | None = None
+        self._monotonic_anchor: float | None = None
+
+    def wait_until(self, event_time: datetime) -> None:
+        if self.time_scale == 0:
+            return
+        if self._event_anchor is None:
+            self._event_anchor = event_time
+            self._monotonic_anchor = time.monotonic()
+            return
+        simulated_elapsed = (event_time - self._event_anchor).total_seconds()
+        target = self._monotonic_anchor + simulated_elapsed / self.time_scale  # type: ignore[operator]
+        remaining = target - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+
+
+class ReplayCoordinator:
+    def __init__(
+        self,
+        router: RoadRouter,
+        taxi_zones: dict[int, object],
+        publisher: EventPublisher,
+        config: SimulationConfig,
+        simulator: MotionSimulator | None = None,
+        clock: ReplayClock | None = None,
+    ):
+        self.router = router
+        self.taxi_zones = taxi_zones
+        self.publisher = publisher
+        self.config = config
+        self.simulator = simulator or MotionSimulator()
+        self.clock = clock or ReplayClock(config.time_scale)
+
+    def replay(self, trips: list[TripRecord]) -> ReplayResult:
+        queue: list[tuple[datetime, int, str, object]] = []
+        counter = 0
+        for trip in sorted(trips, key=lambda value: (value.request_datetime, value.trip_id)):
+            heapq.heappush(queue, (trip.request_datetime, counter, "dispatch", trip))
+            counter += 1
+
+        trips_planned = 0
+        events_published = 0
+        segments: set[str] = set()
+        rated_samples = 0
+        hump_samples = 0
+        profile = VEHICLE_PROFILES[self.config.vehicle_profile_id]
+
+        while queue:
+            action_time, _, action, value = heapq.heappop(queue)
+            self.clock.wait_until(action_time)
+            if action == "dispatch":
+                trip = value
+                assert isinstance(trip, TripRecord)
+                route = self.router.plan_for_zones(
+                    trip.trip_id,
+                    trip.request_datetime,
+                    self.taxi_zones[trip.pu_location_id],
+                    self.taxi_zones[trip.do_location_id],
+                )
+                trips_planned += 1
+                segments.update(route.segment_ids)
+                event_iterator = self.simulator.generate(trip, route, profile, self.config)
+                first_event = next(event_iterator)
+                heapq.heappush(
+                    queue,
+                    (
+                        first_event.event_time,
+                        counter,
+                        "sensor",
+                        (first_event, route, event_iterator, trip),
+                    ),
+                )
+                counter += 1
+            else:
+                event, route, event_iterator, trip = value
+                assert isinstance(event, SensorEvent)
+                assert isinstance(route, RoutePlan)
+                assert isinstance(trip, TripRecord)
+                event = replace(event, _ingested_at=datetime.now(UTC))
+                self.publisher.publish(event)
+                events_published += 1
+                try:
+                    next_event = next(event_iterator)
+                except StopIteration:
+                    pass
+                else:
+                    heapq.heappush(
+                        queue,
+                        (
+                            next_event.event_time,
+                            counter,
+                            "sensor",
+                            (next_event, route, event_iterator, trip),
+                        ),
+                    )
+                    counter += 1
+                position = locate(
+                    route,
+                    distance_for_event(event.trip_seq, route, self.config, trip),
+                )
+                if position.leg.pavement_rating is not None:
+                    rated_samples += 1
+                if any(
+                    abs(position.distance_in_leg_m - hump_distance) <= 2.0
+                    for hump_distance in position.leg.hump_distances_m
+                ):
+                    hump_samples += 1
+
+        self.publisher.flush()
+        return ReplayResult(
+            trips_planned=trips_planned,
+            events_published=events_published,
+            unique_segments=len(segments),
+            rated_samples=rated_samples,
+            hump_samples=hump_samples,
+        )
+
+
+def distance_for_event(
+    trip_seq: int,
+    route: RoutePlan,
+    config: SimulationConfig,
+    trip: TripRecord,
+) -> float:
+    elapsed = min(trip.passenger_duration_seconds, trip_seq * config.interval_seconds)
+    normalized_time = elapsed / trip.passenger_duration_seconds
+    return route.total_length_m * smoothstep(normalized_time)
+
+
+def locate(route: RoutePlan, distance_m: float) -> SamplePosition:
+    remaining = min(route.total_length_m, max(0.0, distance_m))
+    for leg in route.legs:
+        if remaining <= leg.length_m:
+            return SamplePosition(leg, remaining)
+        remaining -= leg.length_m
+    return SamplePosition(route.legs[-1], route.legs[-1].length_m)
+
+
+def vertical_acceleration(
+    position: SamplePosition,
+    route_distance_m: float,
+    speed_mps: float,
+    elapsed_seconds: float,
+    phase: float,
+    profile: VehicleProfile,
+) -> tuple[float, bool]:
+    rating = position.leg.pavement_rating
+    roughness = 0.12 if rating is None else 0.08 + (10 - rating) / 9 * 0.52
+    pavement = profile.vertical_response * roughness * (
+        math.sin(route_distance_m * 1.7 + phase)
+        + 0.35 * math.sin(route_distance_m * 4.1 + phase / 2)
+    )
+    hump_response = 0.0
+    near_hump = False
+    for hump_distance in position.leg.hump_distances_m:
+        offset = position.distance_in_leg_m - hump_distance
+        if abs(offset) > 8:
+            continue
+        near_hump = True
+        width = 1.8
+        impact = math.exp(-((offset / width) ** 2))
+        ring = math.sin(elapsed_seconds * 18) * math.exp(-abs(offset) * profile.damping)
+        hump_response += profile.vertical_response * max(0.5, speed_mps / 5) * (
+            1.8 * impact + 0.35 * ring
+        )
+    return pavement + hump_response, near_hump
+
+
+def smoothstep(value: float) -> float:
+    return 3 * value**2 - 2 * value**3
+
+
+def smoothstep_derivative(value: float) -> float:
+    return max(0.0, 6 * value - 6 * value**2)
+
+
+def signed_heading_delta(previous: float, current: float) -> float:
+    return (current - previous + 180) % 360 - 180
+
+
+def deterministic_phase(trip_id: str, seed: int) -> float:
+    digest = hashlib.sha256(f"{seed}:{trip_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64 * 2 * math.pi
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return min(maximum, max(minimum, value))

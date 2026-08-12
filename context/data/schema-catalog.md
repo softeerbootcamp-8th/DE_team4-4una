@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 ---
 
 # Table Schema Catalog
@@ -144,7 +144,7 @@ superseded by this version.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | Generated | STRING / UUID | N | PK | Unique event identifier |
+| Sensor event ID | `event_id` | Generated | STRING | N | PK | Deterministic UUID-formatted event identifier |
 | Vehicle ID | `vehicle_id` | Generated | STRING | N |  | Vehicle instance identifier |
 | Vehicle profile | `vehicle_profile_id` | Generated | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | Generated | STRING | N |  | Simulated journey identifier |
@@ -154,10 +154,13 @@ superseded by this version.
 | Longitude | `longitude` | Generated | DOUBLE | N |  | GPS longitude |
 | Speed | `speed_mps` | Generated | DOUBLE | N |  | Meters per second |
 | Heading | `heading` | Generated | DOUBLE | Y |  | Direction from 0 through 360 degrees |
-| Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration; unit must be finalized |
-| Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration; unit must be finalized |
-| Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact; unit must be finalized |
-| Jerk | `jerk` | Generated | DOUBLE | N |  | Acceleration change; axis and unit must be finalized |
+| Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration in m/s² |
+| Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration in m/s² |
+| Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact in m/s² |
+| Legacy jerk | `jerk` | Generated | DOUBLE | N |  | Compatibility alias of `jerk_x` in m/s³ |
+| Longitudinal jerk | `jerk_x` | Generated | DOUBLE | N |  | Change in `accel_x` per second in m/s³ |
+| Lateral jerk | `jerk_y` | Generated | DOUBLE | N |  | Change in `accel_y` per second in m/s³ |
+| Vertical jerk | `jerk_z` | Generated | DOUBLE | N |  | Change in `accel_z` per second in m/s³ |
 | Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Bronze load time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Simulation and ingestion run identifier |
 
@@ -230,7 +233,7 @@ classification. Unmatched and ambiguous observations are retained.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING / UUID | N | PK | Bronze event identifier |
+| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING | N | PK | UUID-formatted Bronze event identifier |
 | Vehicle ID | `vehicle_id` | `vehicle_id` | STRING | N |  | Vehicle instance |
 | Vehicle profile | `vehicle_profile_id` | `vehicle_profile_id` | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | `trip_id` | STRING | N |  | Simulated journey |
@@ -243,7 +246,10 @@ classification. Unmatched and ambiguous observations are retained.
 | Longitudinal acceleration | `accel_x` | `accel_x` | DOUBLE | Y |  | Forward/backward acceleration |
 | Lateral acceleration | `accel_y` | `accel_y` | DOUBLE | Y |  | Side-to-side acceleration |
 | Vertical acceleration | `accel_z` | `accel_z` | DOUBLE | N |  | Vertical impact or vibration |
-| Jerk | `jerk` | `jerk` | DOUBLE | N |  | Acceleration change; nullability conflict is open |
+| Legacy jerk | `jerk` | `jerk` | DOUBLE | N |  | Compatibility alias of `jerk_x`; nullability conflict is open |
+| Longitudinal jerk | `jerk_x` | `jerk_x` | DOUBLE | N |  | Change in `accel_x` per second; nullability conflict is open |
+| Lateral jerk | `jerk_y` | `jerk_y` | DOUBLE | N |  | Change in `accel_y` per second; nullability conflict is open |
+| Vertical jerk | `jerk_z` | `jerk_z` | DOUBLE | N |  | Change in `accel_z` per second; nullability conflict is open |
 | Road segment | `segment_id` | GPS-LION match | STRING | Y | FK | Matched canonical LION segment |
 | LION snapshot date | `road_snapshot_date` | Matching reference | DATE | N | FK | `road_segment` version used |
 | Match status | `match_status` | Derived | STRING | N |  | For example `MATCHED`, `UNMATCHED`, or `AMBIGUOUS` |
@@ -251,8 +257,8 @@ classification. Unmatched and ambiguous observations are retained.
 | Match method | `match_method` | Derived | STRING | Y |  | For example nearest or distance+heading |
 | Heading difference | `heading_diff_deg` | Derived | DOUBLE | Y |  | Difference between vehicle and road direction |
 | Candidate count | `candidate_count` | Derived | INTEGER | N |  | Segments inside the matching radius |
-| Hard-brake flag | `brake_flag` | `accel_x`, `jerk` | BOOLEAN | N |  | Versioned threshold result |
-| Hard-acceleration flag | `accel_flag` | `accel_x`, `jerk` | BOOLEAN | N |  | Versioned threshold result |
+| Hard-brake flag | `brake_flag` | `accel_x`, `jerk_x` | BOOLEAN | N |  | Versioned threshold result |
+| Hard-acceleration flag | `accel_flag` | `accel_x`, `jerk_x` | BOOLEAN | N |  | Versioned threshold result |
 | Discomfort flag | `discomfort_flag` | Sensor values | BOOLEAN | N |  | Versioned discomfort classification |
 | Scoring version | `scoring_version` | Derived | STRING | N |  | Threshold and classification rule version |
 | Processed time | `_processed_at` | Derived | TIMESTAMP | N |  | Silver completion time |

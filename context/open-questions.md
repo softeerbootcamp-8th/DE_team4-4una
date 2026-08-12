@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 ---
 
 # Open Questions and Decision Register
@@ -16,20 +16,20 @@ ADR when the choice affects multiple components.
 | --- | --- | --- | --- |
 | OQ-001 | Are LION IDs or Street Pavement Rating IDs canonical? | Resolved: LION source `SegmentID`, stored as `segment_id`, is canonical | Accepted 2026-08-10 |
 | OQ-002 | Which S3 file/table format and local development access pattern will be used? | S3 is confirmed for Bronze, but Spark read/write and local execution still depend on these choices | Open |
-| OQ-003 | Which Kafka implementation, topics, partitions, and serialization format will be used locally? | Controls contracts, ordering, and replay behavior | Open |
+| OQ-003 | Which Kafka implementation, topics, partitions, and serialization format will be used locally? | Prototype uses Apache Kafka 4.3.1, configurable topic, trip-ID key, and JSON values; production partition count remains open | Prototype accepted 2026-08-10 |
 | OQ-004 | Which database will serve latest scores? | Controls gold loading, indexing, and API implementation | Open |
-| OQ-005 | Which routing engine or algorithm will operate on the canonical segment network? | Controls route validity and identifier consistency | Open |
+| OQ-005 | Which routing engine or algorithm will operate on the canonical segment network? | Prototype uses deterministic Dijkstra routing over directed LION nodes and SegmentIDs | Prototype accepted 2026-08-10 |
 | OQ-006 | What is the comfort-score direction, formula, component weights, and minimum coverage? | The 0-100 range is confirmed; remaining semantics control Gold and API behavior | Open |
 
 ## Data decisions
 
 | ID | Question | Why it matters | Status |
 | --- | --- | --- | --- |
-| OQ-007 | What exact source URLs, releases, licenses, and schemas are approved? | Required for reproducible ingestion | Open |
-| OQ-008 | Which HVFHV source day should be demonstrated? | Determines runtime, density, coverage, and source schema | Open |
-| OQ-009 | How are eligible rows filtered and stably identified? | Required for deterministic sampling and deduplication | Open |
+| OQ-007 | What exact source URLs, releases, licenses, and schemas are approved? | Smoke-test endpoints and checksums are recorded in `context/runs/2026-08-10-nyc-sensor-smoke.md`; long-term snapshot policy remains open | Partially accepted 2026-08-10 |
+| OQ-008 | Which HVFHV source day should be demonstrated? | Prototype smoke test uses 2024-02-01; final showcase day may still change | Prototype accepted 2026-08-10 |
+| OQ-009 | How are eligible rows filtered and stably identified? | Prototype uses valid same-zone trips in stable timestamp/base order and derives a content-based trip ID | Prototype accepted 2026-08-10 |
 | OQ-010 | How should endpoints be selected when a taxi zone has no valid canonical road point? | Controls rejects and route coverage | Open |
-| OQ-011 | How are pavement observations and speed humps spatially assigned near ambiguous segment boundaries? | Controls road-environment consistency | Open |
+| OQ-011 | How are pavement observations and speed humps spatially assigned near ambiguous segment boundaries? | Prototype uses normalized street name plus nearest geometry within approximately 39 m; exact production policy remains open | Prototype accepted 2026-08-10 |
 | OQ-012 | What does the monthly score period represent: trip month, replay month, reference snapshot month, or publication month? | Controls grouping and API freshness | Open |
 
 ## Simulation decisions
@@ -40,8 +40,8 @@ ADR when the choice affects multiple components.
 | OQ-014 | Does "Genesis" mean the brand, Genesis G80, or another model? | Current vehicle identifier is ambiguous | Open |
 | OQ-015 | Does "EV5" refer to Kia EV5, and should it remain in a Hyundai-focused set? | Current manufacturer/model description is ambiguous | Open |
 | OQ-016 | Is each sampled trip simulated for one vehicle type or all supported vehicle types, and how does that affect `trip_id`? | Changes event volume and determines whether `(trip_id, trip_seq)` is unique | Open |
-| OQ-017 | Are overlapping trips replayed concurrently, and are long idle gaps preserved or capped? | Determines wall-clock runtime and producer concurrency | Open |
-| OQ-018 | How is speed determined along each route: source average, road class, synthetic profile, or another source? | Dominates acceleration and comfort features | Open |
+| OQ-017 | Are overlapping trips replayed concurrently, and are long idle gaps preserved or capped? | Prototype interleaves overlapping trips and preserves gaps; explicit `time_scale=0` removes waits in tests | Prototype accepted 2026-08-10 |
+| OQ-018 | How is speed determined along each route: source average, road class, synthetic profile, or another source? | Prototype uses a smoothstep profile over route length and source passenger duration; calibration remains open | Prototype accepted 2026-08-10 |
 
 ## Product decisions
 
@@ -56,19 +56,19 @@ ADR when the choice affects multiple components.
 
 | ID | Question | Why it matters | Status |
 | --- | --- | --- | --- |
-| OQ-023 | What sensor sampling frequency is used for the demonstration? | Determines event volume, timestamp precision, expected counts, and runtime | Open |
+| OQ-023 | What sensor sampling frequency is used for the demonstration? | 10 Hz, producing one sample per 100 ms; configurable for tests | Accepted 2026-08-10 |
 | OQ-024 | Should Silver `jerk` be nullable when `trip_seq` has a gap, or should such rows be rejected/quarantined? | Supplied `Nullable=N` conflicts with the stated rule to set invalid jerk to `NULL` | Open |
-| OQ-025 | Is `event_id` serialized as a STRING containing a UUID or stored using a native UUID type? | Executable contracts cannot use `STRING / UUID` as one concrete type | Open |
-| OQ-026 | What are the exact units and axis semantics for `accel_x`, `accel_y`, `accel_z`, and `jerk`? | Required for score correctness and validation ranges | Open |
+| OQ-025 | Is `event_id` serialized as a STRING containing a UUID or stored using a native UUID type? | Kafka JSON and the executable Bronze contract use a UUID-formatted STRING | Accepted 2026-08-10 |
+| OQ-026 | What are the exact units and axis semantics for `accel_x`, `accel_y`, `accel_z`, and jerk? | Prototype uses longitudinal x, lateral y, and vertical z for acceleration in m/s² and jerk in m/s³; `jerk` aliases `jerk_x` | Accepted 2026-08-11 |
 | OQ-027 | What are the physical names of the unnamed source, reference, and Gold tables? | Required for storage layout, SQL, and catalog registration | Open |
-| OQ-028 | What is the `vehicle_profile` schema? | Multiple supplied tables reference it as an FK | Open |
+| OQ-028 | What is the `vehicle_profile` schema? | Producer has versioned synthetic response profiles for four named vehicles; a persisted shared dimension remains open | Partially accepted 2026-08-10 |
 | OQ-029 | What is the taxi-zone geometry schema and source? | `dim_taxi_zone` alone cannot choose pickup/drop-off road points | Open |
 | OQ-030 | What are the accepted enums for map-match status and the three reference quality flags? | Required for shared contracts and data-quality metrics | Open |
 | OQ-031 | Must corrections to an existing `enriched_segment_reference` row retain prior versions, or is an in-place upsert sufficient? | `updated_at` exposes the latest rebuild but does not itself preserve audit history | Open |
 | OQ-032 | Is jerk's mentioned PDI weight of `0.25` accepted, and what is the complete PDI formula? | One isolated weight is insufficient to reproduce the Gold score | Open |
 | OQ-033 | Is a cross-region interruption and lossless-recovery demonstration part of the required prototype? | It is mentioned in the sequence rationale but not in the consolidated project scope | Open |
 | OQ-034 | Does idempotency deduplication occur before Bronze persistence or during Bronze-to-Silver processing? | At-least-once duplicates can conflict with the strict one-Bronze-row-to-one-Silver-row invariant | Open |
-| OQ-035 | Is `jerk` generated by the producer, recalculated in Silver from acceleration, or both with separate column names? | Bronze supplies jerk, while the sequence rationale describes a Silver calculation | Open |
+| OQ-035 | Is jerk generated by the producer, recalculated in Silver from acceleration, or both with separate column names? | Producer emits `jerk_x`, `jerk_y`, `jerk_z`, and legacy `jerk` in Bronze; Silver should validate/recalculate each axis for scoring and gap handling | Accepted 2026-08-11 |
 
 ## Proposed decision workflow
 

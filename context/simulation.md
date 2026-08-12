@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
-status: proposed
-last_reviewed: 2026-08-10
+status: implemented-prototype
+last_reviewed: 2026-08-11
 ---
 
 # Deterministic Trip Simulation
@@ -34,7 +34,7 @@ routes, segment traversal order, and synthetic measurements. Wall-clock event
 timestamps may differ between runs, so events should also carry deterministic
 simulation offsets.
 
-## Proposed pipeline
+## Implemented prototype pipeline
 
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.
@@ -91,15 +91,16 @@ their sources and units are accepted.
 - braking and acceleration state
 - bump or hump impact magnitude
 
-The supplied Bronze `sensor_event` contract currently retains speed, heading,
-three acceleration axes, and one jerk value. Other candidate measurements above
-require a contract change before publication.
+The Bronze `sensor_event` contract retains speed, heading, three acceleration
+axes, and the corresponding three jerk axes. The legacy `jerk` field remains an
+exact alias of `jerk_x`. Other candidate measurements above require a contract
+change before publication.
 
 ## Sensor sequence and map matching
 
-The production sampling frequency is not yet selected. At 10 Hz the producer
-emits one sample every 100 ms; at `n` Hz the nominal interval is `1000 / n` ms.
-Every trip uses `trip_seq = 0, 1, 2, ...` independent of clock jitter.
+The demonstration frequency is 10 Hz, so the producer emits one sample every
+100 ms. It is configurable for test and experiment runs. Every trip uses
+`trip_seq = 0, 1, 2, ...` independent of clock jitter.
 
 Bronze sensor events carry GPS coordinates but no `segment_id`. Even though the
 simulator uses a LION route internally, Spark performs the authoritative
@@ -112,17 +113,34 @@ The confirmed replay scale is one simulated second per real second. To make test
 practical, the implementation may expose an injectable clock or faster test mode,
 but production demonstration defaults must preserve the confirmed scale.
 
-The source pickup gaps may make a 1,000-trip run long or create overlapping
-trips. Concurrency policy, source-day selection, and whether idle gaps are capped
-are open questions and must not be hidden inside implementation defaults.
+The coordinator interleaves overlapping trips in one time-ordered priority queue
+and preserves idle gaps. It lazily keeps only the next sample from each active
+trip in memory. `time_scale = 0` is an explicit no-wait verification mode; no
+implicit idle-gap cap is applied.
+
+## Prototype signal model
+
+The implementation uses deterministic synthetic SI measurements: speed in m/s,
+all three acceleration axes in m/s², and `jerk_x`, `jerk_y`, and `jerk_z` in
+m/s³. Each jerk axis is the discrete derivative of its published acceleration
+axis across consecutive samples; the first sample is zero because no preceding
+measurement exists. `jerk` is emitted with the same value as `jerk_x`. A
+smoothstep speed trajectory spans each routed distance over the TLC
+pickup-to-drop-off duration. Pavement rating changes deterministic vertical
+vibration amplitude, while a mapped hump adds a localized Gaussian impact and a
+damped oscillation scaled by speed and vehicle profile. Lateral acceleration is
+derived from heading change and bounded to 4 m/s² to avoid discontinuities in
+simplified source geometry producing impossible spikes.
+
+These rules create useful pipeline and scoring features but are not a calibrated
+reconstruction of the source taxi's actual dynamics.
 
 ## Failure and restart behavior
 
-The supplied schema declares `event_id` as the primary key and proposes
-`(trip_id, trip_seq)` as the deterministic replay and deduplication key. A
-restarted producer should either resume from a checkpoint or safely reproduce
-that logical key. Whether it remains unique when the same source trip is
-simulated for multiple vehicle profiles is still open.
+The supplied schema declares `event_id` as the primary key. The producer stores
+it as a deterministic UUID string derived from run, trip, vehicle profile, and
+sequence. `(trip_id, trip_seq)` remains the ordering and replay key when each trip
+has one assigned profile; multi-profile trip identity is still open.
 
 Trips without valid endpoints or routes should be written to a rejection dataset
 with a reason code. They should not disappear silently or receive fabricated
