@@ -10,9 +10,10 @@ on:
   push:
     branches: [develop, main]
 
-# 같은 PR에 연달아 push하면 이전 실행은 취소한다.
+# 같은 PR/브랜치에 연달아 push하면 이전 실행은 취소한다.
+# PR 이벤트는 PR 번호로, push 이벤트는 ref로 묶어서 서로 겹치지 않게 한다.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
