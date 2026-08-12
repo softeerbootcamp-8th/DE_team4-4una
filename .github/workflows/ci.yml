@@ -54,3 +54,22 @@ jobs:
 
       - name: Run ruff
         run: uv run --all-packages ruff check .
+
+  # 워크스페이스 전체(services/*, libs/de4-core)의 pytest를 실행한다.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run pytest
+        run: uv run --all-packages pytest
