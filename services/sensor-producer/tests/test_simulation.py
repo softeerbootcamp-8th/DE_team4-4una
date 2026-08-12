@@ -99,6 +99,8 @@ def test_sensor_samples_start_at_pickup_and_have_stable_sequence() -> None:
     assert all(abs(event.accel_y or 0) <= 4.0 for event in events)
     assert events[0].jerk == events[0].jerk_x == 0.0
     assert events[0].jerk_y == events[0].jerk_z == 0.0
+    assert events[0].steering_vibration == 0.0
+    assert all(event.steering_vibration >= 0 for event in events)
 
 
 def test_three_axis_jerk_is_derived_from_published_acceleration() -> None:
@@ -134,16 +136,40 @@ def test_poor_pavement_increases_vertical_motion() -> None:
     assert poor_mean > good_mean * 2
 
 
+def test_poor_pavement_increases_steering_vibration() -> None:
+    poor = simulate(route(2.0))
+    good = simulate(route(9.0))
+
+    poor_mean = sum(event.steering_vibration for event in poor) / len(poor)
+    good_mean = sum(event.steering_vibration for event in good) / len(good)
+
+    assert poor_mean > good_mean * 2
+
+
+def test_turning_increases_peak_steering_vibration() -> None:
+    straight = simulate(route(8.0))
+    turning = simulate(turning_route())
+
+    assert max(event.steering_vibration for event in turning) > max(
+        event.steering_vibration for event in straight
+    )
+
+
 def test_speed_hump_creates_visible_vertical_impact() -> None:
     smooth = simulate(route(8.0))
     with_hump = simulate(route(8.0, (50.0,)))
+    replayed = simulate(route(8.0, (50.0,)))
 
     assert max(event.accel_z for event in with_hump) > max(
         event.accel_z for event in smooth
     ) + 1.0
-    assert [event.event_id for event in with_hump] == [
-        event.event_id for event in simulate(route(8.0, (50.0,)))
+    assert [event.event_id for event in with_hump] == [event.event_id for event in replayed]
+    assert [event.steering_vibration for event in with_hump] == [
+        event.steering_vibration for event in replayed
     ]
+    assert max(event.steering_vibration for event in with_hump) > max(
+        event.steering_vibration for event in smooth
+    )
 
 
 def test_replay_plans_at_request_and_publishes_from_pickup() -> None:

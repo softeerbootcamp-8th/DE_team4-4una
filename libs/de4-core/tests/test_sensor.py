@@ -23,6 +23,7 @@ def make_event(**overrides: object) -> SensorEvent:
         "jerk_x": 0.4,
         "jerk_y": 0.5,
         "jerk_z": 0.6,
+        "steering_vibration": 0.7,
         "_ingested_at": datetime(2024, 2, 1, tzinfo=UTC),
         "_run_id": "run-1",
     }
@@ -38,6 +39,7 @@ def test_sensor_event_serializes_agreed_schema() -> None:
     assert event.to_dict()["jerk_x"] == 0.4
     assert event.to_dict()["jerk_y"] == 0.5
     assert event.to_dict()["jerk_z"] == 0.6
+    assert event.to_dict()["steering_vibration"] == 0.7
     assert b'"event_time":"2024-02-01T00:00:00+00:00"' in event.to_json()
 
 
@@ -54,6 +56,7 @@ def test_sensor_event_requires_legacy_jerk_to_match_jerk_x() -> None:
         ("longitude", -181.0),
         ("speed_mps", -0.1),
         ("heading", 360.0),
+        ("steering_vibration", -0.1),
     ],
 )
 def test_sensor_event_rejects_invalid_values(field: str, value: object) -> None:
