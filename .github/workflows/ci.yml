@@ -1,0 +1,78 @@
+# PR마다 lock-check, lint, test를 병렬로 실행한다.
+# 로컬에서 `uv lock --check` / `uv run ruff check .` / `uv run pytest`를
+# 각각 실행하는 것과 동일하다.
+name: CI
+
+on:
+  # develop, main 브랜치로 향하는 PR에서 실행한다.
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+# 같은 PR/브랜치에 연달아 push하면 이전 실행은 취소한다.
+# PR 이벤트는 PR 번호로, push 이벤트는 ref로 묶어서 서로 겹치지 않게 한다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # pyproject.toml만 바뀌고 uv.lock 갱신을 빠뜨린 PR을 막는다.
+  lock-check:
+    name: Lock Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Check uv.lock is up to date
+        run: uv lock --check
+
+      - name: On failure
+        if: failure()
+        run: |
+          echo "::error::pyproject.toml과 uv.lock이 어긋났습니다."
+          echo "의존성을 바꾼 뒤 'uv lock'을 돌리고, uv.lock도 같이 커밋하세요."
+
+  # ruff로 미사용 import/변수 등 정적 분석 오류를 검사한다.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run ruff
+        run: uv run --all-packages ruff check .
+
+  # 워크스페이스 전체(services/*, libs/de4-core)의 pytest를 실행한다.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run pytest
+        run: uv run --all-packages pytest
