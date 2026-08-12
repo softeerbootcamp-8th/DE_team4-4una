@@ -393,57 +393,191 @@ CATEGORY_LABELS = {
 }
 
 
-def generate_tag(row: pd.Series) -> tuple[str, str]:
-    # 고급 주거
-    if (
-        row.get("residential_score", 0) >= 0.65
-        and row.get("median_household_income_norm", 0) >= 0.75
-        and row.get("median_home_value_norm", 0) >= 0.75
-    ):
-        return ("luxury_residential", "고급주거")
+def get_top_categories(row: pd.Series, top_n: int = 2) -> set[str]:
+    """
+    8개 category score 중 상위 top_n개의 컬럼명을 반환한다.
 
-    # 금융 업무
-    if (
-        row.get("business_score", 0) >= 0.65
-        and row.get("finance_job_ratio_norm", 0) >= 0.75
-    ):
-        return ("finance_business", "금융·업무")
+    조합 규칙이 임계값만 넘으면 바로 확정되는 걸 막기 위해, 해당 category가
+    그 Zone에서 실제로 두드러진 특성인지 같이 확인하는 용도로 쓴다.
+    """
 
-    # 주거 + 의료
-    if (
-        row.get("residential_score", 0) >= 0.55
-        and row.get("public_medical_score", 0) >= 0.65
-    ):
-        return ("residential_medical", "주거·의료")
+    values = {col: row.get(col, np.nan) for col in CATEGORY_LABELS}
 
-    # 교육 + 주거
-    education_signal = max(
-        row.get("education_job_ratio_norm", 0),
-        row.get("facility_education_count_norm", 0),
+    ranked = sorted(
+        ((value, col) for col, value in values.items() if pd.notna(value)),
+        reverse=True,
     )
 
-    if row.get("residential_score", 0) >= 0.55 and education_signal >= 0.70:
-        return ("education_residential", "교육·주거")
+    return {col for _, col in ranked[:top_n]}
 
-    # 쇼핑 + 관광
-    if (
-        row.get("shopping_score", 0) >= 0.60
-        and row.get("tourism_score", 0) >= 0.55
-    ):
-        return ("shopping_tourism", "쇼핑·관광")
 
-    # 교통 + 업무
-    if (
-        row.get("transit_score", 0) >= 0.65
-        and row.get("business_score", 0) >= 0.55
-    ):
-        return ("transit_business", "교통·업무")
+# ============================================================
+# Tag 규칙
+# ============================================================
 
-    # 외식 / 야간
-    if row.get("nightlife_score", 0) >= 0.65:
-        return ("dining_nightlife", "외식·야간")
+"""
+category score(business_score 등)는 이미 percentile 평균이라 zone마다
+분포 모양이 달라서, 고정된 절대값(예: 0.65)이 실제로는 zone별로 전혀 다른
+상위 %를 의미한다. 그래서 score 관련 조건은 "상위 quantile" 기준으로
+설정하고, 실제 임계값은 compute_score_quantiles에서 zone 전체 분포로부터
+계산한다.
 
-    # 나머지는 가장 높은 category
+median_income_norm 같은 `_norm` 컬럼은 percentile_normalize를 거쳐 이미
+0~1 percentile이라, norm_min에 쓰는 값은 그 자체로 "상위 %"다.
+"""
+
+TAG_RULES = {
+    "luxury_residential": {
+        "label": ("luxury_residential", "고급주거"),
+        "score_quantile": {"residential_score": 0.60},  # 주거 상위 40%
+        "norm_min": {
+            "median_household_income_norm": 0.75,  # 소득 상위 25%
+            "median_home_value_norm": 0.75,  # 주택가치 상위 25%
+        },
+    },
+    "finance_business": {
+        "label": ("finance_business", "금융·업무"),
+        "score_quantile": {"business_score": 0.75},  # 업무 상위 25%
+        "norm_min": {"finance_job_ratio_norm": 0.75},  # 금융고용비중 상위 25%
+        "top_k_categories": ["business_score"],
+    },
+    "residential_medical": {
+        "label": ("residential_medical", "주거·의료"),
+        "score_quantile": {
+            "residential_score": 0.60,  # 주거 상위 40%
+            "public_medical_score": 0.75,  # 의료 상위 25%
+        },
+        "top_k_categories": ["residential_score", "public_medical_score"],
+    },
+    "education_residential": {
+        "label": ("education_residential", "교육·주거"),
+        "score_quantile": {"residential_score": 0.60},  # 주거 상위 40%
+        "norm_any_min": {
+            "columns": [
+                "education_job_ratio_norm",
+                "facility_education_count_norm",
+            ],
+            "min": 0.70,  # 둘 중 하나라도 상위 30%
+        },
+        "top_k_categories": ["residential_score"],
+    },
+    "shopping_tourism": {
+        "label": ("shopping_tourism", "쇼핑·관광"),
+        "score_quantile": {
+            "shopping_score": 0.70,  # 쇼핑 상위 30%
+            "tourism_score": 0.75,  # 관광 상위 25%
+        },
+        "top_k_categories": ["shopping_score", "tourism_score"],
+    },
+    "transit_business": {
+        "label": ("transit_business", "교통·업무"),
+        "score_quantile": {
+            "transit_score": 0.75,  # 교통 상위 25%
+            "business_score": 0.60,  # 업무 상위 40%
+        },
+        "top_k_categories": ["transit_score", "business_score"],
+    },
+    "dining_nightlife": {
+        "label": ("dining_nightlife", "외식·야간"),
+        "score_quantile": {"nightlife_score": 0.75},  # 외식·야간 상위 25%
+        "top_k_categories": ["nightlife_score"],
+    },
+}
+
+
+def compute_score_quantiles(
+    df: pd.DataFrame, rules: dict,
+) -> dict[tuple[str, float], float]:
+    """TAG_RULES가 참조하는 (score 컬럼, quantile)의 실제 임계값을 전체 Zone 분포에서 계산한다."""
+
+    thresholds: dict[tuple[str, float], float] = {}
+
+    for rule in rules.values():
+        for col, quantile in rule.get("score_quantile", {}).items():
+            key = (col, quantile)
+
+            if key in thresholds:
+                continue
+
+            thresholds[key] = df[col].quantile(quantile)
+
+    return thresholds
+
+
+def _get_numeric(row: pd.Series, col: str, default: float = 0.0) -> float:
+    value = row.get(col, default)
+    return default if pd.isna(value) else value
+
+
+def _passes_tag_rule(
+    row: pd.Series,
+    rule: dict,
+    quantiles: dict[tuple[str, float], float],
+    top_categories: set[str],
+) -> bool:
+
+    for col, quantile in rule.get("score_quantile", {}).items():
+        threshold = quantiles[(col, quantile)]
+        if _get_numeric(row, col, -np.inf) < threshold:
+            return False
+
+    for col, minimum in rule.get("norm_min", {}).items():
+        if _get_numeric(row, col) < minimum:
+            return False
+
+    any_of = rule.get("norm_any_min")
+
+    if any_of:
+        best = max(_get_numeric(row, col) for col in any_of["columns"])
+        if best < any_of["min"]:
+            return False
+
+    top_k_categories = rule.get("top_k_categories")
+
+    if not top_k_categories:
+        return True
+
+    return any(col in top_categories for col in top_k_categories)
+
+
+def _rule_strength(row: pd.Series, rule: dict) -> float:
+    """
+    규칙이 근거로 삼는 score/norm 컬럼 중 최댓값.
+
+    여러 규칙이 동시에 조건을 통과했을 때, 등장 순서가 아니라 실제로 더
+    두드러진 특성을 가진 규칙을 고르는 기준으로 쓴다. luxury_residential처럼
+    category score(residential_score)보다 norm 신호(소득/주택가치)가 더
+    극단적인 규칙도 정당하게 이길 수 있도록 score_quantile과 norm_min
+    컬럼을 모두 포함한다.
+    """
+
+    columns = [
+        *rule.get("score_quantile", {}).keys(),
+        *rule.get("norm_min", {}).keys(),
+    ]
+
+    return max(
+        (_get_numeric(row, col, -np.inf) for col in columns), default=-np.inf,
+    )
+
+
+def generate_tag(
+    row: pd.Series, quantiles: dict[tuple[str, float], float],
+) -> tuple[str, str]:
+
+    top_categories = get_top_categories(row)
+
+    passing_rules = [
+        rule
+        for rule in TAG_RULES.values()
+        if _passes_tag_rule(row, rule, quantiles, top_categories)
+    ]
+
+    if passing_rules:
+        best_rule = max(passing_rules, key=lambda rule: _rule_strength(row, rule))
+        return best_rule["label"]
+
+    # 어떤 규칙에도 안 걸리면 가장 높은 category로 fallback
     values = {col: row.get(col, np.nan) for col in CATEGORY_LABELS}
     valid = {key: value for key, value in values.items() if pd.notna(value)}
 
@@ -457,7 +591,8 @@ def generate_tag(row: pd.Series) -> tuple[str, str]:
 def generate_zone_tags(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    tags = df.apply(generate_tag, axis=1)
+    quantiles = compute_score_quantiles(df, TAG_RULES)
+    tags = df.apply(lambda row: generate_tag(row, quantiles), axis=1)
 
     df["zone_tag"] = [value[0] for value in tags]
     df["zone_tag_ko"] = [value[1] for value in tags]
