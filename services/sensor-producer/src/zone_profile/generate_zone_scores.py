@@ -656,3 +656,225 @@ def generate_comfort_preference(
     )
 
     return df
+
+
+# ============================================================
+# Zone Tag
+# ============================================================
+
+CATEGORY_LABELS = {
+    "business_score": (
+        "business",
+        "업무·비즈니스",
+    ),
+    "residential_score": (
+        "residential",
+        "주거",
+    ),
+    "shopping_score": (
+        "shopping",
+        "쇼핑",
+    ),
+    "nightlife_score": (
+        "dining_nightlife",
+        "외식·야간",
+    ),
+    "tourism_score": (
+        "tourism_culture",
+        "관광·문화",
+    ),
+    "transit_score": (
+        "transit",
+        "교통·환승",
+    ),
+    "public_medical_score": (
+        "public_medical",
+        "행정·의료·교육",
+    ),
+    "park_score": (
+        "park_leisure",
+        "공원·레저",
+    ),
+}
+
+
+def generate_tag(
+    row: pd.Series,
+) -> tuple[str, str]:
+
+    # 고급 주거
+    if (
+        row.get(
+            "residential_score",
+            0,
+        ) >= 0.65
+        and row.get(
+            "median_household_income_norm",
+            0,
+        ) >= 0.75
+        and row.get(
+            "median_home_value_norm",
+            0,
+        ) >= 0.75
+    ):
+        return (
+            "luxury_residential",
+            "고급주거",
+        )
+
+    # 금융 업무
+    if (
+        row.get(
+            "business_score",
+            0,
+        ) >= 0.65
+        and row.get(
+            "finance_job_ratio_norm",
+            0,
+        ) >= 0.75
+    ):
+        return (
+            "finance_business",
+            "금융·업무",
+        )
+
+    # 주거 + 의료
+    if (
+        row.get(
+            "residential_score",
+            0,
+        ) >= 0.55
+        and row.get(
+            "public_medical_score",
+            0,
+        ) >= 0.65
+    ):
+        return (
+            "residential_medical",
+            "주거·의료",
+        )
+
+    # 교육 + 주거
+    education_signal = max(
+        row.get(
+            "education_job_ratio_norm",
+            0,
+        ),
+        row.get(
+            "facility_education_count_norm",
+            0,
+        ),
+    )
+
+    if (
+        row.get(
+            "residential_score",
+            0,
+        ) >= 0.55
+        and education_signal >= 0.70
+    ):
+        return (
+            "education_residential",
+            "교육·주거",
+        )
+
+    # 쇼핑 + 관광
+    if (
+        row.get(
+            "shopping_score",
+            0,
+        ) >= 0.60
+        and row.get(
+            "tourism_score",
+            0,
+        ) >= 0.55
+    ):
+        return (
+            "shopping_tourism",
+            "쇼핑·관광",
+        )
+
+    # 교통 + 업무
+    if (
+        row.get(
+            "transit_score",
+            0,
+        ) >= 0.65
+        and row.get(
+            "business_score",
+            0,
+        ) >= 0.55
+    ):
+        return (
+            "transit_business",
+            "교통·업무",
+        )
+
+    # 외식 / 야간
+    if row.get(
+        "nightlife_score",
+        0,
+    ) >= 0.65:
+
+        return (
+            "dining_nightlife",
+            "외식·야간",
+        )
+
+    # 나머지는 가장 높은 category
+    score_cols = list(
+        CATEGORY_LABELS.keys()
+    )
+
+    values = {
+        col: row.get(
+            col,
+            np.nan,
+        )
+        for col in score_cols
+    }
+
+    valid = {
+        key: value
+        for key, value in values.items()
+        if pd.notna(value)
+    }
+
+    if not valid:
+        return (
+            "unknown",
+            "미분류",
+        )
+
+    top_score = max(
+        valid,
+        key=valid.get,
+    )
+
+    return CATEGORY_LABELS[
+        top_score
+    ]
+
+
+def generate_zone_tags(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    df = df.copy()
+
+    tags = df.apply(
+        generate_tag,
+        axis=1,
+    )
+
+    df["zone_tag"] = [
+        value[0]
+        for value in tags
+    ]
+
+    df["zone_tag_ko"] = [
+        value[1]
+        for value in tags
+    ]
+
+    return df
