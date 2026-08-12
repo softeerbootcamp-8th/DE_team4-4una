@@ -56,6 +56,15 @@ WGS84 = "EPSG:4326"
 # Score 설정
 # ============================================================
 
+"""
+아래 weight는 통계적으로 산출한 값이 아니라 팀의 판단이다. business_score
+등은 우리가 새로 정의하는 지표라 비교할 정답(label)이 없어서, 회귀분석이나
+PCA로 "최적 weight"를 학습할 방법이 없다. 각 weight는 "이 feature가 해당
+category 성격을 얼마나 잘 대표하는지"에 대한 도메인 판단이며, 필요하면
+팀 논의로 조정한다. (category별 weight 합은 1.0이어야 한다 — 아래 assert로
+검증)
+"""
+
 # 전체 weight 중 실제 사용 가능한 feature의 비중이 이보다 낮으면 score를
 # 신뢰할 수 없다고 보고 NaN 처리한다. Feature 2~3개만으로 계산된 점수가
 # 우연히 극단값이 나오는 걸 막기 위함.
@@ -119,6 +128,15 @@ COMFORT_WEIGHTS = {
     "doh_hospital_bed_count": 0.15,
     "facility_medical_count": 0.05,
 }
+
+for _score_name, _weights in CATEGORY_WEIGHTS.items():
+    assert abs(sum(_weights.values()) - 1.0) < 1e-9, (
+        f"{_score_name}의 weight 합이 1.0이 아닙니다: {sum(_weights.values())}"
+    )
+
+assert abs(sum(COMFORT_WEIGHTS.values()) - 1.0) < 1e-9, (
+    f"COMFORT_WEIGHTS의 weight 합이 1.0이 아닙니다: {sum(COMFORT_WEIGHTS.values())}"
+)
 
 
 # ============================================================
