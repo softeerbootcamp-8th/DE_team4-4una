@@ -35,3 +35,22 @@ jobs:
         run: |
           echo "::error::pyproject.toml과 uv.lock이 어긋났습니다."
           echo "의존성을 바꾼 뒤 'uv lock'을 돌리고, uv.lock도 같이 커밋하세요."
+
+  # ruff로 미사용 import/변수 등 정적 분석 오류를 검사한다.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run ruff
+        run: uv run --all-packages ruff check .
