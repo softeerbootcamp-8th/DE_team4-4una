@@ -62,7 +62,7 @@ ADR when the choice affects multiple components.
 | OQ-026 | What are the exact units and axis semantics for `accel_x`, `accel_y`, `accel_z`, and jerk? | Prototype uses longitudinal x, lateral y, and vertical z for acceleration in m/s² and jerk in m/s³; `jerk` aliases `jerk_x` | Accepted 2026-08-11 |
 | OQ-027 | What are the physical names of the unnamed source, reference, and Gold tables? | Required for storage layout, SQL, and catalog registration | Open |
 | OQ-028 | What is the `vehicle_profile` schema? | Producer has versioned synthetic response profiles for four named vehicles; a persisted shared dimension remains open | Partially accepted 2026-08-10 |
-| OQ-029 | What is the taxi-zone geometry schema and source? | `dim_taxi_zone` alone cannot choose pickup/drop-off road points | Open |
+| OQ-029 | What is the taxi-zone geometry schema and source? | `taxi_zone_lookup` alone cannot choose pickup/drop-off road points | Open |
 | OQ-030 | What are the accepted enums for map-match status and the three reference quality flags? | Required for shared contracts and data-quality metrics | Open |
 | OQ-031 | Must corrections to an existing `enriched_segment_reference` row retain prior versions, or is an in-place upsert sufficient? | `updated_at` exposes the latest rebuild but does not itself preserve audit history | Open |
 | OQ-032 | Is jerk's mentioned PDI weight of `0.25` accepted, and what is the complete PDI formula? | One isolated weight is insufficient to reproduce the Gold score | Open |

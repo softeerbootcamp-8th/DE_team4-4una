@@ -19,7 +19,7 @@ design and must not be invented silently.
 | `street_pavement_rating` | TBD | Source/Bronze reference | One source-defined pavement section observation |
 | `speed_hump_reference` | TBD | Source/Bronze reference | One speed-hump road-section record |
 | `osm_traffic_signal` | TBD | Source/Bronze reference | One OSM traffic-signal node |
-| `taxi_zone_lookup` | `dim_taxi_zone` | Reference dimension | One TLC taxi zone |
+| `taxi_zone_lookup` | `taxi_zone_lookup` | Reference dimension | One TLC taxi zone |
 | `vehicle_profile` | `vehicle_profile` | Bronze reference (PostgreSQL) | One vehicle profile |
 | `sensor_event` | `sensor_event` | Bronze on S3 | One vehicle sensor measurement (at-least-once; duplicates possible) |
 | `road_segment` | `road_segment` | Normalized reference | One LION segment per snapshot date |
@@ -28,6 +28,9 @@ design and must not be invented silently.
 | `hourly_segment_features` | `hourly_segment_features` | Silver | One hour x segment x vehicle profile feature row |
 | `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
 | `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period |
+| `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
+| `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
+| `zone_scores` | `zone_scores` | Gold (zone-profile pipeline) | One TLC taxi zone |
 
 ## `hvfhv_trip_input`
 
@@ -43,8 +46,8 @@ path using `YYYYMM` format.
 | On-scene time | `on_scene_datetime` | `on_scene_datetime` | TIMESTAMP | Y | Driver arrival at pickup location |
 | Pickup time | `pickup_datetime` | `pickup_datetime` | TIMESTAMP | N | Passenger journey start |
 | Drop-off time | `dropoff_datetime` | `dropoff_datetime` | TIMESTAMP | N | Passenger journey end |
-| Pickup zone | `pu_location_id` | `PULocationID` | INTEGER | N | FK to `dim_taxi_zone.location_id` |
-| Drop-off zone | `do_location_id` | `DOLocationID` | INTEGER | N | FK to `dim_taxi_zone.location_id` |
+| Pickup zone | `pu_location_id` | `PULocationID` | INTEGER | N | FK to `taxi_zone_lookup.location_id` |
+| Drop-off zone | `do_location_id` | `DOLocationID` | INTEGER | N | FK to `taxi_zone_lookup.location_id` |
 | Trip distance | `trip_miles` | `trip_miles` | DOUBLE | N | Miles |
 | Trip duration | `trip_time` | `trip_time` | BIGINT | N | Seconds |
 | Base fare | `base_passenger_fare` | `base_passenger_fare` | DOUBLE | N | Excludes tolls, tips, and taxes |
@@ -123,7 +126,7 @@ extract contains only nodes whose `highway` value is `traffic_signals`.
 | Extracted time | `overpass_timestamp` | File-header `timestamp` | TIMESTAMP | N | Example `2026-08-03T09:02:51Z` |
 | Snapshot date | `snapshot_date` | Derived from `overpass_timestamp` | STRING | N | `YYYYMMDD`, for example `20260803` |
 
-## `dim_taxi_zone`
+## `taxi_zone_lookup`
 
 | Attribute | Column | Source column | Type | Nullable | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -378,6 +381,150 @@ without confirmation.
 | Score version | `score_version` | STRING | N |  | Comfort formula version |
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Gold calculation time |
 | Speed band | TBD | TBD | TBD |  | Which speed band the row belongs to; column name and type not yet supplied |
+
+## `zone_master`
+
+**Layer:** Reference dimension. **Storage:** local Parquet at
+`data/reference/tlc_zone/zone_master.parquet`. **Built by:**
+`services/sensor-producer/src/zone_profile/build_tlc_zone_base.py`. **Grain:**
+one TLC taxi zone.
+
+**Primary key:** `location_id`.
+
+| Attribute | Column | Source column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- | --- |
+| Zone ID | `location_id` | `LocationID` | INTEGER | N | PK | TLC zone code, 1-265 |
+| Borough | `borough` | `Borough` | STRING | Y | | Same category set as `taxi_zone_lookup.borough` |
+| Zone name | `zone` | `Zone` | STRING | Y | | Display name; not unique. Note the column is `zone`, not `zone_name` as in `taxi_zone_lookup` |
+| Service zone | `service_zone` | `service_zone` | STRING | Y | | Same category set as `taxi_zone_lookup.service_zone` |
+| Geometry | `geometry` | `taxi_zones.shp` polygon | GEOMETRY (WKB) | Y | | Zone polygon in `EPSG:4326`; null only for `location_id` 264 and 265 |
+
+`zone_profile_features` and `zone_scores` are 1:1 extensions of this table,
+keyed by the same `location_id`. `zone_master` overlaps with the
+already-catalogued `taxi_zone_lookup` but is a separate physical table; whether
+to unify them is open (OQ-029).
+
+## `zone_profile_features`
+
+**Layer:** Silver (zone-profile feature aggregate). **Storage:** local Parquet
+at `data/processed/zone_profile_features.parquet`. **Built by:**
+`services/sensor-producer/src/zone_profile/build_zone_profile_features.py`.
+**Grain:** one row per `zone_master.location_id`.
+
+**Primary key:** `location_id`. **Foreign key:** `location_id` references
+`zone_master.location_id`.
+
+Aggregates MapPLUTO, ACS, LODES WAC, OSM POI, MTA, NYC Facilities, NYC Parks,
+and NYS DOH data via spatial join onto zone polygons; category scores are
+computed downstream in `zone_scores`, not here. Column names follow
+`<source>_<measure>`: `_count` is a raw joined count, `_density` is count /
+zone area (km²), `_ratio` is normalized by a same-source total (for example
+jobs or building area).
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Zone ID | `location_id` | INTEGER | N | PK, FK | References `zone_master.location_id` |
+| Residential area ratio | `residential_area_ratio` | DOUBLE | Y |  | MapPLUTO residential floor area / total building floor area |
+| Office area ratio | `office_area_ratio` | DOUBLE | Y |  | MapPLUTO office floor area / total building floor area |
+| Commercial area ratio | `commercial_area_ratio` | DOUBLE | Y |  | MapPLUTO commercial floor area / total building floor area |
+| Retail area ratio | `retail_area_ratio` | DOUBLE | Y |  | MapPLUTO retail floor area / total building floor area |
+| Residential unit density | `residential_unit_density` | DOUBLE | Y |  | MapPLUTO residential units / zone area (km²) |
+| Population | `population` | DOUBLE | Y |  | ACS block-group population, area-weighted into the zone |
+| Household count | `household_count` | DOUBLE | Y |  | ACS households, area-weighted into the zone |
+| Family household ratio | `family_household_ratio` | DOUBLE | Y |  | Family households / all households |
+| Children household ratio | `children_household_ratio` | DOUBLE | Y |  | Households with children / all households |
+| Senior ratio | `senior_ratio` | DOUBLE | Y |  | Population age 65+ / total population |
+| Median household income | `median_household_income` | DOUBLE | Y |  | Household-weighted approximation across intersecting block groups |
+| Median home value | `median_home_value` | DOUBLE | Y |  | Household-weighted approximation across intersecting block groups |
+| Median gross rent | `median_gross_rent` | DOUBLE | Y |  | Household-weighted approximation across intersecting block groups |
+| Total jobs | `total_jobs` | DOUBLE | Y |  | LODES WAC total jobs (`C000`) located in the zone |
+| Job density | `job_density` | DOUBLE | Y |  | `total_jobs` / zone area (km²) |
+| Retail job ratio | `retail_job_ratio` | DOUBLE | Y |  | Retail jobs (`CNS07`) / `total_jobs` |
+| Information job ratio | `information_job_ratio` | DOUBLE | Y |  | Information jobs (`CNS09`) / `total_jobs` |
+| Finance job ratio | `finance_job_ratio` | DOUBLE | Y |  | Finance jobs (`CNS10`) / `total_jobs` |
+| Real estate job ratio | `real_estate_job_ratio` | DOUBLE | Y |  | Real-estate jobs (`CNS11`) / `total_jobs` |
+| Professional job ratio | `professional_job_ratio` | DOUBLE | Y |  | Professional-services + management jobs (`CNS12`+`CNS13`) / `total_jobs` |
+| Education job ratio | `education_job_ratio` | DOUBLE | Y |  | Education jobs (`CNS15`) / `total_jobs` |
+| Healthcare job ratio | `healthcare_job_ratio` | DOUBLE | Y |  | Healthcare jobs (`CNS16`) / `total_jobs` |
+| Arts/recreation job ratio | `arts_recreation_job_ratio` | DOUBLE | Y |  | Arts/recreation jobs (`CNS17`) / `total_jobs` |
+| Accommodation/food job ratio | `accommodation_food_job_ratio` | DOUBLE | Y |  | Accommodation/food-service jobs (`CNS18`) / `total_jobs` |
+| Public admin job ratio | `public_admin_job_ratio` | DOUBLE | Y |  | Public-administration jobs (`CNS20`) / `total_jobs` |
+| Shop POI count | `poi_shop_count` | DOUBLE | Y |  | OSM nodes tagged `shop=*` inside the zone |
+| Restaurant POI count | `poi_restaurant_count` | DOUBLE | Y |  | OSM `amenity` in (`restaurant`, `cafe`) inside the zone |
+| Nightlife POI count | `poi_nightlife_count` | DOUBLE | Y |  | OSM `amenity` in (`bar`, `pub`, `nightclub`) inside the zone |
+| Hotel POI count | `poi_hotel_count` | DOUBLE | Y |  | OSM `tourism=hotel` inside the zone |
+| Museum POI count | `poi_museum_count` | DOUBLE | Y |  | OSM `tourism=museum` inside the zone |
+| Attraction POI count | `poi_attraction_count` | DOUBLE | Y |  | OSM `tourism=attraction` inside the zone |
+| Shop POI density | `poi_shop_density` | DOUBLE | Y |  | `poi_shop_count` / zone area (km²) |
+| Restaurant POI density | `poi_restaurant_density` | DOUBLE | Y |  | `poi_restaurant_count` / zone area (km²) |
+| Nightlife POI density | `poi_nightlife_density` | DOUBLE | Y |  | `poi_nightlife_count` / zone area (km²) |
+| Hotel POI density | `poi_hotel_density` | DOUBLE | Y |  | `poi_hotel_count` / zone area (km²) |
+| Museum POI density | `poi_museum_density` | DOUBLE | Y |  | `poi_museum_count` / zone area (km²) |
+| Attraction POI density | `poi_attraction_density` | DOUBLE | Y |  | `poi_attraction_count` / zone area (km²) |
+| Subway complex count | `subway_complex_count` | DOUBLE | Y |  | Distinct MTA station complexes inside the zone |
+| Subway station count | `subway_station_count` | DOUBLE | Y |  | Sum of stations per complex inside the zone |
+| Education facility count | `facility_education_count` | DOUBLE | Y |  | NYC Facilities classified `education` inside the zone |
+| Medical facility count | `facility_medical_count` | DOUBLE | Y |  | NYC Facilities classified `medical` inside the zone |
+| Government facility count | `facility_government_count` | DOUBLE | Y |  | NYC Facilities classified `government` inside the zone |
+| Cultural facility count | `facility_cultural_count` | DOUBLE | Y |  | NYC Facilities classified `cultural` inside the zone |
+| Park area | `park_area_km2` | DOUBLE | Y |  | NYC Parks polygon area intersecting the zone, in km² |
+| Park area ratio | `park_area_ratio` | DOUBLE | Y |  | Park intersection area / zone area |
+| DOH hospital bed count | `doh_hospital_bed_count` | DOUBLE | Y |  | NYS DOH permanent hospital bed count, summed over hospitals located in the zone |
+
+## `zone_scores`
+
+**Layer:** Gold (zone score/tag). **Storage:** local Parquet at
+`data/processed/zone_scores.parquet`. **Built by:**
+`services/sensor-producer/src/zone_profile/generate_zone_scores.py`.
+**Grain:** one row per `zone_profile_features.location_id`.
+
+**Primary key:** `location_id`. **Foreign key:** `location_id` references
+`zone_profile_features.location_id`.
+
+Each category score and `comfort_relevance_score` is a weighted average of
+percentile-normalized `zone_profile_features` columns (weights in
+`CATEGORY_WEIGHTS`/`COMFORT_WEIGHTS`); a score is `NULL` if less than 70%
+(`MIN_FEATURE_COVERAGE`) of its weight has non-null input. Scoring excludes
+`location_id` 264, 265, and 1 (Newark Airport/EWR), which get
+`zone_tag = "excluded"`.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Zone ID | `location_id` | INTEGER | N | PK, FK | References `zone_profile_features.location_id` |
+| Business score | `business_score` | DOUBLE | Y | | Office area, job density, and finance/professional/information/real-estate job ratios |
+| Residential score | `residential_score` | DOUBLE | Y | | Residential building-area ratio and residential unit density |
+| Shopping score | `shopping_score` | DOUBLE | Y | | Retail area ratio, retail job ratio, and shop-POI density |
+| Nightlife score | `nightlife_score` | DOUBLE | Y | | Restaurant/nightlife POI density and accommodation-food job ratio |
+| Tourism score | `tourism_score` | DOUBLE | Y | | Hotel/museum/attraction POI density and arts-recreation job ratio |
+| Transit score | `transit_score` | DOUBLE | Y | | Subway station count and subway complex count |
+| Public service score | `public_service_score` | DOUBLE | Y | | Healthcare/education/public-admin job ratios, medical/education/government facility counts, and DOH hospital-bed count |
+| Park score | `park_score` | DOUBLE | Y | | Park area ratio, park area, and arts-recreation job ratio |
+| Zone tag | `zone_tag` | STRING | N | | English zone-character label; see value table below |
+| Zone tag (Korean) | `zone_tag_ko` | STRING | N | | Korean label paired 1:1 with `zone_tag` |
+| Comfort relevance score | `comfort_relevance_score` | DOUBLE | Y | | Income, home value, family/children-household ratio, senior ratio, and medical-capacity weighted score; a candidate proxy for comfort-improvement demand, **not** the sensor-based `comfort_score` in `hourly_comfort_score`/`segment_comfort_score` |
+
+All score columns are validated to fall within `[0, 1]` when non-null.
+`zone_tag` is assigned from `TAG_RULES` in `generate_zone_scores.py`; an
+unmatched zone falls back to its single highest category score. Possible
+values:
+
+| `zone_tag` | `zone_tag_ko` | Origin |
+| --- | --- | --- |
+| `luxury_residential` | 고급주거 | Tag rule |
+| `finance_business` | 금융·업무 | Tag rule |
+| `residential_medical` | 주거·의료 | Tag rule |
+| `education_residential` | 교육·주거 | Tag rule |
+| `shopping_tourism` | 쇼핑·관광 | Tag rule |
+| `transit_business` | 교통·업무 | Tag rule |
+| `dining_nightlife` | 외식·야간 | Tag rule, also the `nightlife_score` fallback label |
+| `business` | 업무·비즈니스 | `business_score` fallback label |
+| `residential` | 주거 | `residential_score` fallback label |
+| `shopping` | 쇼핑 | `shopping_score` fallback label |
+| `tourism_culture` | 관광·문화 | `tourism_score` fallback label |
+| `transit` | 교통·환승 | `transit_score` fallback label |
+| `public_service` | 행정·의료·교육 | `public_service_score` fallback label |
+| `park_leisure` | 공원·레저 | `park_score` fallback label |
+| `excluded` | 분석 제외 | Zone excluded from scoring |
 
 ## Required but missing contracts
 
