@@ -1,6 +1,6 @@
 # Contributing Guide
 
-이 문서는 프로젝트 개발 진행 시 지켜야 할 브랜치 전략, 커밋 메시지 컨벤션, Pull Request(PR) 규칙을 정의합니다.
+이 문서는 프로젝트 개발 진행 시 지켜야 할 이슈 발행, 브랜치 전략, 커밋 메시지 컨벤션, Pull Request(PR) 규칙을 정의합니다.
 
 ## 1. 기본 원칙
 
@@ -10,7 +10,32 @@
 - 모든 변경 사항은 PR과 코드 리뷰를 거쳐 병합합니다.
 - 하나의 PR에는 하나의 목적에 해당하는 변경만 포함합니다.
 
-## 2. 브랜치 전략
+## 2. GitHub Issue 규칙
+
+### 이슈 생성
+
+- 작업을 시작하기 전에 [작업 이슈 템플릿](.github/ISSUE_TEMPLATE/task.md)을 사용해 이슈를 생성합니다.
+- 이슈 본문은 템플릿의 요약, 작업 범위, 완료 조건, 제외 범위 항목을 채웁니다.
+- 이슈 제목은 커밋 메시지와 동일하게 `<type>: <title>` 형식으로 작성합니다.
+  - `type`은 커밋 메시지에서 사용하는 type과 동일하게 작성합니다.
+  - `title`은 영어 소문자로 작성합니다. 다만 Spark, Kafka와 같은 고유 명사는 첫 글자 대문자를 허용합니다.
+
+예시:
+
+```text
+feat: add tlc data ingestion pipeline
+fix: prevent duplicate segment records
+docs: add Kafka producer troubleshooting guide
+```
+
+### 이슈 발행 시 권장 사항
+
+- 라벨을 추가해 작업 유형이나 우선순위를 표시합니다.
+- 작업자를 지정해 담당자를 명확히 합니다.
+- 관련된 다른 이슈나 PR이 있다면 본문에서 참조합니다.
+- 완료 조건은 리뷰어나 다른 팀원이 봐도 작업 완료 여부를 판단할 수 있을 만큼 구체적으로 작성합니다.
+
+## 3. 브랜치 전략
 
 ![Branch Strategy](docs/images/branch-strategy.png)
 
@@ -54,7 +79,7 @@ docs/31-write-data-contract
 3. 작업 내용을 커밋하고 원격 저장소에 push합니다.
 4. 작업 브랜치에서 `develop`을 대상으로 PR을 생성합니다.
 5. CI, 리뷰 및 필수 검증을 통과한 후 Squash merge합니다.
-6. 병합이 끝난 작업 브랜치는 삭제합니다.
+6. 병합한 사람이 작업 브랜치를 삭제합니다.
 
 ```bash
 git switch develop
@@ -71,7 +96,7 @@ git switch -c feat/12-add-tlc-ingestion
 3. 리뷰와 검증을 거쳐 Squash merge합니다.
 4. 수정 사항을 `develop`에도 즉시 반영합니다.
 
-## 3. 커밋 메시지 컨벤션
+## 4. 커밋 메시지 컨벤션
 
 ### 기본 형식
 
@@ -166,7 +191,7 @@ revert: add tlc data ingestion pipeline
 This reverts commit <commit-hash>.
 ```
 
-## 4. Pull Request 규칙
+## 5. Pull Request 규칙
 
 ### PR 생성
 
@@ -206,7 +231,7 @@ PR에는 최소한 다음 내용을 포함합니다.
 - 충돌이 없고 최신 `develop`의 변경 사항을 반영했습니다.
 - 작성자는 자신의 PR을 직접 승인하지 않습니다.
 
-## 5. Merge 전략
+## 6. Merge 전략
 
 각 병합 방식에 대한 자세한 설명은 문서 가장 아래의 [Merge 전략 가이드](#merge-전략-가이드) 부록을 참고합니다.
 
@@ -215,7 +240,6 @@ PR에는 최소한 다음 내용을 포함합니다.
 - 작업 브랜치에서 `develop`으로 병합할 때는 **Squash merge**를 사용합니다.
 - Squash merge 시 최종 커밋 제목은 `<type>: <subject>` 형식의 커밋 컨벤션에 맞게 수정합니다.
 - 배포 또는 릴리스 시 `develop`에서 `main`으로 병합할 때는 **Merge commit**을 사용합니다.
-- 병합이 끝난 작업 브랜치는 삭제합니다.
 - `main`은 항상 배포 가능한 상태를 유지합니다.
 
 ### 충돌 해결 가이드
@@ -291,7 +315,7 @@ PR에는 최소한 다음 내용을 포함합니다.
 git merge --abort
 ```
 
-## 6. 브랜치 보호 및 금지 사항
+## 7. 브랜치 보호 및 금지 사항
 
 ### 브랜치 보호 규칙
 
@@ -318,7 +342,7 @@ git merge --abort
 <details>
 <summary>Merge 전략 가이드</summary>
 
-브랜치를 병합하는 방법에는 여러 가지가 있습니다. 아래 내용을 참고하면 [5. Merge 전략](#5-merge-전략)에서 병합 지점마다 왜 그 방식을 선택했는지 이해할 수 있습니다.
+브랜치를 병합하는 방법에는 여러 가지가 있습니다. 아래 내용을 참고하면 [6. Merge 전략](#6-merge-전략)에서 병합 지점마다 왜 그 방식을 선택했는지 이해할 수 있습니다.
 
 ## Fast-Forward Merge
 
@@ -376,7 +400,7 @@ git rebase main
 
 - 병합 커밋 없이 히스토리를 하나의 직선으로 유지할 수 있습니다.
 - 이미 원격에 push한 커밋을 rebase하면 커밋 해시가 바뀌어 강제 push(Force Push)가 필요해지고, 같은 브랜치를 쓰는 팀원의 이력과 충돌할 위험이 큽니다.
-- **우리 프로젝트에서는 이 방식을 사용하지 않습니다.** [Force Push 금지](#6-브랜치-보호-및-금지-사항) 원칙과 상충하기 때문입니다.
+- **우리 프로젝트에서는 이 방식을 사용하지 않습니다.** [Force Push 금지](#7-브랜치-보호-및-금지-사항) 원칙과 상충하기 때문입니다.
 
 > 참고: [Merge 전략 정리 (leetrue.hashnode.dev)](https://leetrue.hashnode.dev/branch-merge-strategy)
 
