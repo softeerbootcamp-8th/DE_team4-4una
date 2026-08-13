@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -18,12 +19,15 @@ class TripRecord:
     dropoff_datetime: datetime
     pu_location_id: int
     do_location_id: int
+    trip_miles: float
 
     def __post_init__(self) -> None:
         if not self.trip_id:
             raise ValueError("trip_id must be non-empty")
         if not self.request_datetime <= self.pickup_datetime < self.dropoff_datetime:
             raise ValueError("trip timestamps must satisfy request <= pickup < dropoff")
+        if self.trip_miles <= 0 or not math.isfinite(self.trip_miles):
+            raise ValueError("trip_miles must be finite and positive")
 
     @property
     def passenger_duration_seconds(self) -> float:

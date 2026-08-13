@@ -15,6 +15,7 @@ def test_load_trips_interprets_naive_tlc_times_as_new_york(tmp_path) -> None:
                     "dropoff_datetime": "2024-02-01T10:06:00",
                     "pu_location_id": 181,
                     "do_location_id": 181,
+                    "trip_miles": 1.25,
                 }
             ]
         )
@@ -24,3 +25,4 @@ def test_load_trips_interprets_naive_tlc_times_as_new_york(tmp_path) -> None:
 
     assert loaded[0].request_datetime.tzinfo is not None
     assert loaded[0].request_datetime.utcoffset().total_seconds() == -5 * 3600
+    assert loaded[0].trip_miles == 1.25

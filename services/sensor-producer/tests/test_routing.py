@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sensor_producer.domain import RoadSegment
 from sensor_producer.routing import RoadRouter
-from shapely.geometry import LineString
+from shapely.geometry import LineString, box
 
 
 def segment(
@@ -55,3 +55,24 @@ def test_route_plan_is_stamped_at_request_time() -> None:
 
     assert plan.planned_at == planned_at
     assert plan.segment_ids == ("s1",)
+
+
+def test_router_selects_route_close_to_tlc_distance() -> None:
+    router = RoadRouter(
+        [
+            segment("s1", "n1", "n2", "T", [(-74.0, 40.0), (-73.999, 40.0)]),
+            segment("s2", "n2", "n3", "T", [(-73.999, 40.0), (-73.998, 40.0)]),
+            segment("s3", "n3", "n4", "T", [(-73.998, 40.0), (-73.997, 40.0)]),
+        ]
+    )
+    zone = box(-74.001, 39.999, -73.996, 40.001)
+
+    plan = router.plan_for_zones(
+        "trip-1",
+        datetime(2024, 2, 1, 10, tzinfo=UTC),
+        zone,
+        zone,
+        target_distance_m=200.0,
+    )
+
+    assert plan.total_length_m == 200.0

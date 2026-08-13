@@ -66,16 +66,19 @@ without a broker.
 - LION `SegmentID` is the canonical routing identifier. `TrafDir` controls the
   directed graph and shortest route length is the Dijkstra cost.
 - Pickup and drop-off road nodes are deterministically selected from LION nodes
-  covered by the TLC taxi-zone polygons.
+  covered by the TLC taxi-zone polygons. Candidate routes are ranked against the
+  source `trip_miles` so zone-level coordinate synthesis does not create a
+  clearly inconsistent route length.
 - Pavement sections are matched by normalized street name and nearest geometry
   within approximately 39 metres. Rating `0` is treated as unavailable.
 - Each speed-hump source section is matched the same way. Its reported hump count
   is distributed evenly along the nearest LION segment because the source
   geometry identifies the containing road section rather than each hump point.
-- Speed follows a smooth pickup-to-drop-off trajectory over the routed distance.
-  Signals are deterministic SI measurements: speed in m/s, acceleration in
-  m/s², heading in degrees, and three-axis jerk in m/s³. The legacy `jerk`
-  field is identical to longitudinal `jerk_x`.
+- Speed follows smooth acceleration, cruise, and deceleration phases over the
+  routed distance while applying each segment's posted speed limit.
+  Signals are deterministic SI measurements: speed in m/s, acceleration in m/s²,
+  heading in degrees, and three-axis jerk in m/s³. The legacy `jerk` field is
+  identical to longitudinal `jerk_x`.
 - `steering_vibration` is a non-negative RMS-like steering-wheel acceleration
   amplitude in m/s². It approximates vibration transferred from vertical road
   motion plus lateral steering activity, fades toward zero at low speed, and is

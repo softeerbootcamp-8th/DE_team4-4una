@@ -153,6 +153,7 @@ def load_trips(path: Path) -> list[TripRecord]:
             dropoff_datetime=parse_nyc_datetime(item["dropoff_datetime"]),
             pu_location_id=int(item["pu_location_id"]),
             do_location_id=int(item["do_location_id"]),
+            trip_miles=float(item["trip_miles"]),
         )
         for item in values
     ]
