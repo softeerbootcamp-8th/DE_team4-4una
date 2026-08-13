@@ -35,17 +35,7 @@ DATA_DIR = Path("data")
 
 FEATURE_PATH = DATA_DIR / "processed/zone_profile_features.parquet"
 ZONE_MASTER_PATH = DATA_DIR / "reference/tlc_zone/zone_master.parquet"
-RAW_DIR = DATA_DIR / "raw/zone_score"
 OUTPUT_PATH = DATA_DIR / "processed/zone_scores.parquet"
-
-
-# ============================================================
-# NYS DOH
-# ============================================================
-
-NYC_COUNTIES = {"Bronx", "Kings", "New York", "Queens", "Richmond"}
-
-WGS84 = "EPSG:4326"
 
 
 # ============================================================
@@ -203,128 +193,6 @@ def weighted_score(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
     score.loc[coverage < MIN_FEATURE_COVERAGE] = np.nan
 
     return score
-
-
-# ============================================================
-# NYS DOH
-# ============================================================
-
-def extract_coordinates(df: pd.DataFrame) -> pd.DataFrame:
-    """NYS DOH dataset 버전에 따라 좌표 필드명이 달라도 최대한 자동으로 탐색한다."""
-
-    df = df.copy()
-
-    # 일반적인 latitude / longitude
-    if {"latitude", "longitude"}.issubset(df.columns):
-        df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-        df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-        return df
-
-    # Socrata location object
-    possible_location_cols = ["location", "location_1", "geocoded_column"]
-
-    for col in possible_location_cols:
-        if col not in df.columns:
-            continue
-
-        def get_value(value, key):
-            return value.get(key) if isinstance(value, dict) else None
-
-        df["latitude"] = df[col].apply(lambda x: get_value(x, "latitude"))
-        df["longitude"] = df[col].apply(lambda x: get_value(x, "longitude"))
-
-        if df["latitude"].notna().any() and df["longitude"].notna().any():
-            df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-            df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-            return df
-
-    raise ValueError(
-        "NYS DOH 데이터에서 좌표 컬럼을 찾지 못했습니다.\n"
-        f"columns={df.columns.tolist()}"
-    )
-
-
-def build_doh_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("\n=== NYS DOH ===")
-
-    # download_doh_raw.py로 미리 받아둔 raw 파일을 읽는다.
-    facilities = pd.read_json(RAW_DIR / "doh_facilities.json")
-    certification = pd.read_json(RAW_DIR / "doh_certification.json")
-
-    # NYC만
-    facilities = facilities[facilities["county"].isin(NYC_COUNTIES)].copy()
-    certification = certification[
-        certification["county"].isin(NYC_COUNTIES)
-    ].copy()
-
-    # Hospital
-    facility_text = (
-        facilities["description"].fillna("").astype(str).str.strip().str.lower()
-    )
-
-    # description은 "Hospital", "Hospital Extension Clinic",
-    # "School Based Hospital Extension Clinic", "Mobile Hospital Extension
-    # Clinic" 4종류뿐이다. Extension Clinic은 병원이 아니라 위성 소규모
-    # 클리닉이므로 정확히 "Hospital"인 것만 남긴다.
-    facilities = facilities[facility_text.eq("hospital")].copy()
-
-    # Bed 정보만
-    certification["measure_value"] = pd.to_numeric(
-        certification["measure_value"], errors="coerce",
-    )
-
-    bed_rows = certification[
-        certification["attribute_type"].fillna("").str.lower().eq("bed")
-    ].copy()
-
-    # permanent가 존재하면 permanent만 사용
-    if "sub_type" in bed_rows.columns:
-        permanent = bed_rows[
-            bed_rows["sub_type"].fillna("").str.lower().eq("permanent")
-        ]
-        if not permanent.empty:
-            bed_rows = permanent
-
-    beds = (
-        bed_rows.groupby("fac_id")["measure_value"]
-        .sum()
-        .rename("hospital_bed_count")
-        .reset_index()
-    )
-
-    facilities["fac_id"] = facilities["fac_id"].astype(str)
-    beds["fac_id"] = beds["fac_id"].astype(str)
-
-    facilities = facilities.merge(beds, on="fac_id", how="left")
-    facilities["hospital_bed_count"] = facilities["hospital_bed_count"].fillna(0)
-
-    # 좌표
-    facilities = extract_coordinates(facilities)
-    facilities = facilities.dropna(subset=["latitude", "longitude"])
-
-    hospital_points = gpd.GeoDataFrame(
-        facilities,
-        geometry=gpd.points_from_xy(facilities["longitude"], facilities["latitude"]),
-        crs=WGS84,
-    )
-
-    spatial_zones = zones[zones.geometry.notna()].to_crs(WGS84)
-
-    joined = gpd.sjoin(
-        hospital_points,
-        spatial_zones[["location_id", "geometry"]],
-        how="inner",
-        predicate="within",
-    )
-
-    return (
-        joined.groupby("location_id")
-        .agg(
-            doh_hospital_count=("fac_id", "nunique"),
-            doh_hospital_bed_count=("hospital_bed_count", "sum"),
-        )
-        .reset_index()
-    )
 
 
 # ============================================================
@@ -640,13 +508,7 @@ def main():
     features, zones = load_data()
     print(f"zone features: {features.shape}")
 
-    # NYS DOH
-    doh = build_doh_features(zones)
-    df = features.merge(doh, on="location_id", how="left", validate="one_to_one")
-
-    # 병원이 없는 Zone은 0
-    hospital_cols = ["doh_hospital_count", "doh_hospital_bed_count"]
-    df[hospital_cols] = df[hospital_cols].fillna(0)
+    df = features
 
     # 분석 대상 Zone 선택
     #
@@ -692,8 +554,6 @@ def main():
         "zone_tag",
         "zone_tag_ko",
         "comfort_relevance_score",
-        "doh_hospital_count",  # 확인용
-        "doh_hospital_bed_count",  # 확인용
     ]
 
     result = df[output_cols].copy()
