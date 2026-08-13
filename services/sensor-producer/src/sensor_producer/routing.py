@@ -13,6 +13,10 @@ from shapely.geometry import Point
 from sensor_producer.domain import RoadSegment, RouteLeg, RoutePlan
 from sensor_producer.geo import reversed_line
 
+METERS_PER_MILE = 1609.344
+MAX_ROUTE_CANDIDATES_PER_ZONE = 20
+ACCEPTABLE_DISTANCE_ERROR_RATIO = 0.15
+
 
 @dataclass(frozen=True, slots=True)
 class GraphEdge:
@@ -46,7 +50,10 @@ class RoadRouter:
         planned_at: datetime,
         pickup_zone: object,
         dropoff_zone: object,
+        target_distance_m: float | None = None,
     ) -> RoutePlan:
+        if target_distance_m is not None and target_distance_m <= 0:
+            raise ValueError("target route distance must be positive")
         pickup_nodes = self._nodes_inside(pickup_zone)
         dropoff_nodes = self._nodes_inside(dropoff_zone)
         if not pickup_nodes or not dropoff_nodes:
@@ -58,13 +65,28 @@ class RoadRouter:
         pickup_order = pickup_nodes[pickup_offset:] + pickup_nodes[:pickup_offset]
         dropoff_order = dropoff_nodes[dropoff_offset:] + dropoff_nodes[:dropoff_offset]
 
-        for start_node in pickup_order[:30]:
-            for end_node in dropoff_order[:30]:
+        best: tuple[float, str, str, tuple[GraphEdge, ...]] | None = None
+        for start_node in pickup_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:
+            for end_node in dropoff_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:
                 if start_node == end_node:
                     continue
                 edges = self.shortest_path(start_node, end_node)
-                if edges:
+                if not edges:
+                    continue
+                if target_distance_m is None:
                     return self._to_plan(trip_id, planned_at, start_node, end_node, edges)
+                route_length_m = sum(edge.segment.length_m for edge in edges)
+                error_ratio = abs(route_length_m - target_distance_m) / target_distance_m
+                candidate = (error_ratio, start_node, end_node, edges)
+                if best is None or candidate[:3] < best[:3]:
+                    best = candidate
+                if error_ratio <= ACCEPTABLE_DISTANCE_ERROR_RATIO:
+                    break
+            if best is not None and best[0] <= ACCEPTABLE_DISTANCE_ERROR_RATIO:
+                break
+        if best is not None:
+            _, start_node, end_node, edges = best
+            return self._to_plan(trip_id, planned_at, start_node, end_node, edges)
         raise ValueError("no directed LION route found between deterministic zone points")
 
     def shortest_path(self, start_node: str, end_node: str) -> tuple[GraphEdge, ...]:

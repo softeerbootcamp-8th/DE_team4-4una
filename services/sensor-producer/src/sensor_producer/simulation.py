@@ -23,9 +23,12 @@ from sensor_producer.domain import (
 )
 from sensor_producer.geo import point_and_heading
 from sensor_producer.publisher import EventPublisher
-from sensor_producer.routing import RoadRouter
+from sensor_producer.routing import METERS_PER_MILE, RoadRouter
 
 EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
+MPH_TO_MPS = 0.44704
+DEFAULT_SPEED_LIMIT_MPH = 25.0
+MAX_ACCELERATION_PHASE_SECONDS = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,75 @@ class ReplayResult:
 class SamplePosition:
     leg: RouteLeg
     distance_in_leg_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class MotionState:
+    distance_m: float
+    speed_mps: float
+
+
+@dataclass(frozen=True, slots=True)
+class SpeedProfile:
+    """Smooth accelerate-cruise-decelerate motion over one passenger trip."""
+
+    route_length_m: float
+    duration_seconds: float
+    ramp_seconds: float
+    cruise_speed_mps: float
+    speed_limit_mps: float
+
+    @classmethod
+    def for_route(cls, route: RoutePlan, duration_seconds: float) -> SpeedProfile:
+        limits = [
+            leg.posted_speed_mph
+            for leg in route.legs
+            if leg.posted_speed_mph is not None and leg.posted_speed_mph > 0
+        ]
+        speed_limit_mps = min(limits or [DEFAULT_SPEED_LIMIT_MPH]) * MPH_TO_MPS
+        ramp_seconds = min(MAX_ACCELERATION_PHASE_SECONDS, duration_seconds / 3)
+        cruise_speed_mps = route.total_length_m / (duration_seconds - ramp_seconds)
+        if cruise_speed_mps > speed_limit_mps:
+            raise ValueError(
+                "route cannot be completed within TLC duration and posted speed limit"
+            )
+        return cls(
+            route.total_length_m,
+            duration_seconds,
+            ramp_seconds,
+            cruise_speed_mps,
+            speed_limit_mps,
+        )
+
+    def state_at(self, elapsed_seconds: float) -> MotionState:
+        elapsed = clamp(elapsed_seconds, 0.0, self.duration_seconds)
+        cruise_seconds = self.duration_seconds - 2 * self.ramp_seconds
+        ramp_distance = self.cruise_speed_mps * self.ramp_seconds / 2
+        if elapsed >= self.duration_seconds:
+            return MotionState(self.route_length_m, 0.0)
+        if elapsed < self.ramp_seconds:
+            progress = elapsed / self.ramp_seconds
+            speed = self.cruise_speed_mps * smoothstep(progress)
+            distance = self.cruise_speed_mps * self.ramp_seconds * smoothstep_integral(
+                progress
+            )
+            return MotionState(distance, speed)
+        if elapsed < self.ramp_seconds + cruise_seconds:
+            cruise_elapsed = elapsed - self.ramp_seconds
+            return MotionState(
+                ramp_distance + self.cruise_speed_mps * cruise_elapsed,
+                self.cruise_speed_mps,
+            )
+        progress = (elapsed - self.ramp_seconds - cruise_seconds) / self.ramp_seconds
+        deceleration_distance = self.cruise_speed_mps * self.ramp_seconds * (
+            progress - smoothstep_integral(progress)
+        )
+        return MotionState(
+            ramp_distance
+            + self.cruise_speed_mps * cruise_seconds
+            + deceleration_distance,
+            self.cruise_speed_mps * (1 - smoothstep(progress)),
+        )
 
 
 class MotionSimulator:
@@ -61,12 +133,13 @@ class MotionSimulator:
         previous_accel_z = 0.0
         previous_heading: float | None = None
         phase = deterministic_phase(trip.trip_id, config.seed)
+        speed_profile = SpeedProfile.for_route(route, duration)
 
         for sequence in range(sample_count):
             elapsed = min(duration, sequence * config.interval_seconds)
-            normalized_time = elapsed / duration
-            distance = route.total_length_m * smoothstep(normalized_time)
-            speed = route.total_length_m / duration * smoothstep_derivative(normalized_time)
+            motion = speed_profile.state_at(elapsed)
+            distance = motion.distance_m
+            speed = motion.speed_mps
             position = locate(route, distance)
             fraction = (
                 position.distance_in_leg_m / position.leg.length_m
@@ -210,6 +283,7 @@ class ReplayCoordinator:
                     trip.request_datetime,
                     self.taxi_zones[trip.pu_location_id],
                     self.taxi_zones[trip.do_location_id],
+                    target_distance_m=trip.trip_miles * METERS_PER_MILE,
                 )
                 trips_planned += 1
                 segments.update(route.segment_ids)
@@ -277,8 +351,9 @@ def distance_for_event(
     trip: TripRecord,
 ) -> float:
     elapsed = min(trip.passenger_duration_seconds, trip_seq * config.interval_seconds)
-    normalized_time = elapsed / trip.passenger_duration_seconds
-    return route.total_length_m * smoothstep(normalized_time)
+    return SpeedProfile.for_route(route, trip.passenger_duration_seconds).state_at(
+        elapsed
+    ).distance_m
 
 
 def locate(route: RoutePlan, distance_m: float) -> SamplePosition:
@@ -350,8 +425,8 @@ def smoothstep(value: float) -> float:
     return 3 * value**2 - 2 * value**3
 
 
-def smoothstep_derivative(value: float) -> float:
-    return max(0.0, 6 * value - 6 * value**2)
+def smoothstep_integral(value: float) -> float:
+    return value**3 - value**4 / 2
 
 
 def signed_heading_delta(previous: float, current: float) -> float:

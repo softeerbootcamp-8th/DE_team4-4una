@@ -10,28 +10,33 @@ from sensor_producer.domain import (
     TripRecord,
 )
 from sensor_producer.publisher import MemoryPublisher
-from sensor_producer.simulation import MotionSimulator, ReplayCoordinator
+from sensor_producer.simulation import MotionSimulator, ReplayCoordinator, SpeedProfile
 from shapely.geometry import LineString
 
 
-def trip() -> TripRecord:
+def trip(duration_seconds: int = 2) -> TripRecord:
     pickup = datetime(2024, 2, 1, 10, 5, tzinfo=UTC)
     return TripRecord(
         trip_id="trip-1",
         request_datetime=pickup - timedelta(minutes=5),
         pickup_datetime=pickup,
-        dropoff_datetime=pickup + timedelta(seconds=2),
+        dropoff_datetime=pickup + timedelta(seconds=duration_seconds),
         pu_location_id=181,
         do_location_id=181,
+        trip_miles=0.1,
     )
 
 
-def route(pavement_rating: float, humps: tuple[float, ...] = ()) -> RoutePlan:
+def route(
+    pavement_rating: float,
+    humps: tuple[float, ...] = (),
+    length_m: float = 100.0,
+) -> RoutePlan:
     line = LineString([(-73.99, 40.67), (-73.989, 40.67)])
     leg = RouteLeg(
         segment_id="segment-1",
         geometry=line,
-        length_m=100.0,
+        length_m=length_m,
         posted_speed_mph=25.0,
         curve_radius_m=None,
         pavement_rating=pavement_rating,
@@ -43,7 +48,7 @@ def route(pavement_rating: float, humps: tuple[float, ...] = ()) -> RoutePlan:
         start_node_id="n1",
         end_node_id="n2",
         legs=(leg,),
-        total_length_m=100.0,
+        total_length_m=length_m,
     )
 
 
@@ -79,7 +84,7 @@ def turning_route() -> RoutePlan:
 def simulate(plan: RoutePlan):
     return list(
         MotionSimulator().generate(
-            trip(),
+            trip(duration_seconds=20),
             plan,
             VEHICLE_PROFILES[1],
             SimulationConfig("test-run", sample_hz=10, time_scale=0),
@@ -90,10 +95,10 @@ def simulate(plan: RoutePlan):
 def test_sensor_samples_start_at_pickup_and_have_stable_sequence() -> None:
     events = simulate(route(8.0))
 
-    assert len(events) == 21
+    assert len(events) == 201
     assert events[0].event_time == trip().pickup_datetime
-    assert events[-1].event_time == trip().dropoff_datetime
-    assert [event.trip_seq for event in events] == list(range(21))
+    assert events[-1].event_time == trip(duration_seconds=20).dropoff_datetime
+    assert [event.trip_seq for event in events] == list(range(201))
     assert (events[1].event_time - events[0].event_time).total_seconds() == 0.1
     assert all(event.to_dict().get("segment_id") is None for event in events)
     assert all(abs(event.accel_y or 0) <= 4.0 for event in events)
@@ -101,6 +106,37 @@ def test_sensor_samples_start_at_pickup_and_have_stable_sequence() -> None:
     assert events[0].jerk_y == events[0].jerk_z == 0.0
     assert events[0].steering_vibration == 0.0
     assert all(event.steering_vibration >= 0 for event in events)
+
+
+def test_speed_profile_has_consistent_distance_and_respects_limit() -> None:
+    plan = route(8.0)
+    duration_seconds = 20
+    interval_seconds = 0.1
+    profile = SpeedProfile.for_route(plan, duration_seconds)
+    states = [
+        profile.state_at(sequence * interval_seconds)
+        for sequence in range(duration_seconds * 10 + 1)
+    ]
+
+    integrated_distance = sum(
+        (previous.speed_mps + current.speed_mps) / 2 * interval_seconds
+        for previous, current in pairwise(states)
+    )
+    assert states[0].speed_mps == states[-1].speed_mps == 0.0
+    assert states[0].distance_m == 0.0
+    assert states[-1].distance_m == plan.total_length_m
+    assert integrated_distance == pytest.approx(plan.total_length_m, abs=0.01)
+    assert all(
+        previous.distance_m <= current.distance_m
+        for previous, current in pairwise(states)
+    )
+    assert max(state.speed_mps for state in states) <= profile.speed_limit_mps
+    assert sum(state.speed_mps == profile.cruise_speed_mps for state in states) > 1
+
+
+def test_speed_profile_rejects_route_that_requires_speeding() -> None:
+    with pytest.raises(ValueError, match="posted speed limit"):
+        SpeedProfile.for_route(route(8.0), duration_seconds=2)
 
 
 def test_three_axis_jerk_is_derived_from_published_acceleration() -> None:
@@ -114,6 +150,11 @@ def test_three_axis_jerk_is_derived_from_published_acceleration() -> None:
         assert previous.accel_y is not None
         assert current.accel_x is not None
         assert current.accel_y is not None
+        assert current.accel_x == pytest.approx(
+            (current.speed_mps - previous.speed_mps)
+            / interval_seconds
+            * VEHICLE_PROFILES[1].longitudinal_response
+        )
         assert current.jerk_x == pytest.approx(
             (current.accel_x - previous.accel_x) / interval_seconds
         )
@@ -167,6 +208,9 @@ def test_speed_hump_creates_visible_vertical_impact() -> None:
     assert [event.steering_vibration for event in with_hump] == [
         event.steering_vibration for event in replayed
     ]
+    assert [event.speed_mps for event in with_hump] == [
+        event.speed_mps for event in replayed
+    ]
     assert max(event.steering_vibration for event in with_hump) > max(
         event.steering_vibration for event in smooth
     )
@@ -191,10 +235,11 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
             planned_at: datetime,
             pickup_zone: object,
             dropoff_zone: object,
+            target_distance_m: float | None = None,
         ) -> RoutePlan:
             assert self.clock.times[-1] == planned_at
             self.planned_at = planned_at
-            return route(8.0)
+            return route(8.0, length_m=10.0)
 
     source_trip = trip()
     clock = RecordingClock()
