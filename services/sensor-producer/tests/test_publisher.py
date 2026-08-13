@@ -19,6 +19,7 @@ def event() -> SensorEvent:
         longitude=-73.98,
         speed_mps=1.0,
         heading=0.0,
+        steering_angle=3.5,
         accel_x=0.0,
         accel_y=0.0,
         accel_z=0.0,
@@ -44,6 +45,7 @@ def test_jsonl_publisher_writes_bronze_contract(tmp_path) -> None:
     assert value["jerk"] == value["jerk_x"]
     assert {"jerk_x", "jerk_y", "jerk_z"} <= value.keys()
     assert value["steering_vibration"] == 0.12
+    assert value["steering_angle"] == 3.5
     assert "segment_id" not in value
 
 

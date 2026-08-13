@@ -16,6 +16,7 @@ def make_event(**overrides: object) -> SensorEvent:
         "longitude": -73.98,
         "speed_mps": 4.0,
         "heading": 90.0,
+        "steering_angle": 5.0,
         "accel_x": 0.1,
         "accel_y": 0.2,
         "accel_z": 0.3,
@@ -39,6 +40,7 @@ def test_sensor_event_serializes_agreed_schema() -> None:
     assert event.to_dict()["jerk_x"] == 0.4
     assert event.to_dict()["jerk_y"] == 0.5
     assert event.to_dict()["jerk_z"] == 0.6
+    assert event.to_dict()["steering_angle"] == 5.0
     assert event.to_dict()["steering_vibration"] == 0.7
     assert b'"event_time":"2024-02-01T00:00:00+00:00"' in event.to_json()
 
@@ -56,6 +58,8 @@ def test_sensor_event_requires_legacy_jerk_to_match_jerk_x() -> None:
         ("longitude", -181.0),
         ("speed_mps", -0.1),
         ("heading", 360.0),
+        ("steering_angle", 36.0),
+        ("steering_angle", float("nan")),
         ("steering_vibration", -0.1),
     ],
 )

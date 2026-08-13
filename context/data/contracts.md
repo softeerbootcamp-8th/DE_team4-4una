@@ -84,7 +84,8 @@ Candidate fields:
 - `event_id`, `vehicle_id`, `vehicle_profile_id`, `trip_id`, and `trip_seq`
 - `event_time`, latitude, and longitude
 - speed in meters per second
-- heading and longitudinal, lateral, and vertical acceleration
+- heading, signed front-wheel `steering_angle` in degrees, and longitudinal,
+  lateral, and vertical acceleration
 - longitudinal `jerk_x`, lateral `jerk_y`, and vertical `jerk_z` in m/s³
 - legacy `jerk`, retained as an exact alias of `jerk_x`
 - non-negative RMS-like `steering_vibration` amplitude in m/s²

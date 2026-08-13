@@ -133,6 +133,8 @@ def test_sensor_samples_start_at_pickup_and_have_stable_sequence() -> None:
     assert all(abs(event.accel_y or 0) <= 4.0 for event in events)
     assert events[0].jerk == events[0].jerk_x == 0.0
     assert events[0].jerk_y == events[0].jerk_z == 0.0
+    assert events[0].steering_angle == 0.0
+    assert all(-35.0 <= event.steering_angle <= 35.0 for event in events)
     assert events[0].steering_vibration == 0.0
     assert all(event.steering_vibration >= 0 for event in events)
 
@@ -235,6 +237,14 @@ def test_turning_increases_peak_steering_vibration() -> None:
     assert max(event.steering_vibration for event in turning) > max(
         event.steering_vibration for event in straight
     )
+
+
+def test_steering_angle_reflects_route_direction_change() -> None:
+    straight = simulate(route(8.0))
+    turning = simulate(turning_route())
+
+    assert all(event.steering_angle == pytest.approx(0.0) for event in straight)
+    assert max(abs(event.steering_angle) for event in turning) > 1.0
 
 
 def test_speed_hump_creates_visible_vertical_impact() -> None:

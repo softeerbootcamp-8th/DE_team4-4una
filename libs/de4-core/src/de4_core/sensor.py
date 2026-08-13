@@ -13,9 +13,9 @@ class SensorEvent:
     """One immutable Bronze vehicle sensor measurement.
 
     Timestamps are timezone-aware UTC values. Acceleration and the RMS-like
-    steering vibration amplitude use m/s², speed uses m/s, heading uses degrees,
-    and jerk values use m/s³. ``jerk`` is retained as a compatibility alias for
-    ``jerk_x``.
+    steering vibration amplitude use m/s², speed uses m/s, heading and the
+    signed front-wheel steering angle use degrees, and jerk values use m/s³.
+    ``jerk`` is retained as a compatibility alias for ``jerk_x``.
     """
 
     event_id: str
@@ -28,6 +28,7 @@ class SensorEvent:
     longitude: float
     speed_mps: float
     heading: float | None
+    steering_angle: float
     accel_x: float | None
     accel_y: float | None
     accel_z: float
@@ -56,6 +57,10 @@ class SensorEvent:
             raise ValueError("speed_mps must be finite and non-negative")
         if self.heading is not None and not 0 <= self.heading < 360:
             raise ValueError("heading must be in [0, 360)")
+        if not math.isfinite(self.steering_angle):
+            raise ValueError("steering_angle must be finite")
+        if not -35 <= self.steering_angle <= 35:
+            raise ValueError("steering_angle must be in [-35, 35]")
         for name in (
             "accel_x",
             "accel_y",
