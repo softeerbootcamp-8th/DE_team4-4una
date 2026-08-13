@@ -75,7 +75,7 @@ without a broker.
   is distributed evenly along the nearest LION segment because the source
   geometry identifies the containing road section rather than each hump point.
 - Speed follows smooth acceleration, cruise, and deceleration phases over the
-  routed distance without exceeding the route's lowest posted speed limit.
+  routed distance while applying each segment's posted speed limit.
   Signals are deterministic SI measurements: speed in m/s, acceleration in m/s²,
   heading in degrees, and three-axis jerk in m/s³. The legacy `jerk` field is
   identical to longitudinal `jerk_x`.

@@ -14,7 +14,9 @@ from sensor_producer.domain import RoadSegment, RouteLeg, RoutePlan
 from sensor_producer.geo import reversed_line
 
 METERS_PER_MILE = 1609.344
+# 존별 후보를 제한해 최악의 경우 경로 탐색을 400회로 제한한다.
 MAX_ROUTE_CANDIDATES_PER_ZONE = 20
+# TLC 기록 거리 대비 15% 이내면 시뮬레이션에 사용할 경로로 채택한다.
 ACCEPTABLE_DISTANCE_ERROR_RATIO = 0.15
 
 
@@ -65,6 +67,7 @@ class RoadRouter:
         pickup_order = pickup_nodes[pickup_offset:] + pickup_nodes[:pickup_offset]
         dropoff_order = dropoff_nodes[dropoff_offset:] + dropoff_nodes[:dropoff_offset]
 
+        # TLC 주행거리와 가장 가까운 결정론적 경로를 유지한다.
         best: tuple[float, str, str, tuple[GraphEdge, ...]] | None = None
         for start_node in pickup_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:
             for end_node in dropoff_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:

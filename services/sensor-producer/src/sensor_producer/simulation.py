@@ -54,64 +54,120 @@ class MotionState:
 
 @dataclass(frozen=True, slots=True)
 class SpeedProfile:
-    """Smooth accelerate-cruise-decelerate motion over one passenger trip."""
+    """승객 운행 한 건의 가속·정속·감속 프로파일."""
 
     route_length_m: float
     duration_seconds: float
     ramp_seconds: float
-    cruise_speed_mps: float
-    speed_limit_mps: float
+    leg_lengths_m: tuple[float, ...]
+    leg_speeds_mps: tuple[float, ...]
+    leg_speed_limits_mps: tuple[float, ...]
 
     @classmethod
     def for_route(cls, route: RoutePlan, duration_seconds: float) -> SpeedProfile:
-        limits = [
-            leg.posted_speed_mph
+        leg_lengths_m = tuple(leg.length_m for leg in route.legs)
+        leg_speed_limits_mps = tuple(
+            (
+                leg.posted_speed_mph
+                if leg.posted_speed_mph is not None and leg.posted_speed_mph > 0
+                else DEFAULT_SPEED_LIMIT_MPH
+            )
+            * MPH_TO_MPS
             for leg in route.legs
-            if leg.posted_speed_mph is not None and leg.posted_speed_mph > 0
-        ]
-        speed_limit_mps = min(limits or [DEFAULT_SPEED_LIMIT_MPH]) * MPH_TO_MPS
-        ramp_seconds = min(MAX_ACCELERATION_PHASE_SECONDS, duration_seconds / 3)
-        cruise_speed_mps = route.total_length_m / (duration_seconds - ramp_seconds)
-        if cruise_speed_mps > speed_limit_mps:
+        )
+        ramp_distance_limit = (
+            leg_lengths_m[0] / leg_speed_limits_mps[0]
+            if len(leg_lengths_m) == 1
+            else min(
+                2 * leg_lengths_m[0] / leg_speed_limits_mps[0],
+                2 * leg_lengths_m[-1] / leg_speed_limits_mps[-1],
+            )
+        )
+        ramp_seconds = min(
+            MAX_ACCELERATION_PHASE_SECONDS,
+            duration_seconds / 3,
+            ramp_distance_limit,
+        )
+        cruise_seconds = duration_seconds - ramp_seconds
+        if sum(
+            length / limit
+            for length, limit in zip(leg_lengths_m, leg_speed_limits_mps, strict=True)
+        ) > cruise_seconds:
             raise ValueError(
                 "route cannot be completed within TLC duration and posted speed limit"
             )
+
+        lower_speed = 0.0
+        upper_speed = max(leg_speed_limits_mps)
+        # 각 구간의 제한속도를 지키면서 TLC 운행 시간을 맞출 목표속도를 찾는다.
+        for _ in range(60):
+            target_speed = (lower_speed + upper_speed) / 2
+            travel_seconds = sum(
+                length / min(target_speed, limit)
+                for length, limit in zip(
+                    leg_lengths_m, leg_speed_limits_mps, strict=True
+                )
+            )
+            if travel_seconds > cruise_seconds:
+                lower_speed = target_speed
+            else:
+                upper_speed = target_speed
+        leg_speeds_mps = tuple(
+            min(upper_speed, limit) for limit in leg_speed_limits_mps
+        )
         return cls(
             route.total_length_m,
             duration_seconds,
             ramp_seconds,
-            cruise_speed_mps,
-            speed_limit_mps,
+            leg_lengths_m,
+            leg_speeds_mps,
+            leg_speed_limits_mps,
         )
 
     def state_at(self, elapsed_seconds: float) -> MotionState:
         elapsed = clamp(elapsed_seconds, 0.0, self.duration_seconds)
-        cruise_seconds = self.duration_seconds - 2 * self.ramp_seconds
-        ramp_distance = self.cruise_speed_mps * self.ramp_seconds / 2
+        first_speed = self.leg_speeds_mps[0]
+        last_speed = self.leg_speeds_mps[-1]
+        acceleration_distance = first_speed * self.ramp_seconds / 2
+        deceleration_distance = last_speed * self.ramp_seconds / 2
         if elapsed >= self.duration_seconds:
             return MotionState(self.route_length_m, 0.0)
         if elapsed < self.ramp_seconds:
             progress = elapsed / self.ramp_seconds
-            speed = self.cruise_speed_mps * smoothstep(progress)
-            distance = self.cruise_speed_mps * self.ramp_seconds * smoothstep_integral(
+            speed = first_speed * smoothstep(progress)
+            # smoothstep 적분값을 사용해 속도와 누적 이동거리를 일치시킨다.
+            distance = first_speed * self.ramp_seconds * smoothstep_integral(
                 progress
             )
             return MotionState(distance, speed)
-        if elapsed < self.ramp_seconds + cruise_seconds:
-            cruise_elapsed = elapsed - self.ramp_seconds
-            return MotionState(
-                ramp_distance + self.cruise_speed_mps * cruise_elapsed,
-                self.cruise_speed_mps,
-            )
-        progress = (elapsed - self.ramp_seconds - cruise_seconds) / self.ramp_seconds
-        deceleration_distance = self.cruise_speed_mps * self.ramp_seconds * (
+        if elapsed < self.duration_seconds - self.ramp_seconds:
+            remaining_seconds = elapsed - self.ramp_seconds
+            distance = acceleration_distance
+            last_index = len(self.leg_lengths_m) - 1
+            for index, (length, speed) in enumerate(
+                zip(self.leg_lengths_m, self.leg_speeds_mps, strict=True)
+            ):
+                traversable = length
+                if index == 0:
+                    traversable -= acceleration_distance
+                if index == last_index:
+                    traversable -= deceleration_distance
+                phase_seconds = traversable / speed
+                if remaining_seconds <= phase_seconds:
+                    return MotionState(distance + remaining_seconds * speed, speed)
+                distance += traversable
+                remaining_seconds -= phase_seconds
+            return MotionState(self.route_length_m - deceleration_distance, last_speed)
+
+        progress = (
+            elapsed - (self.duration_seconds - self.ramp_seconds)
+        ) / self.ramp_seconds
+        distance_in_phase = last_speed * self.ramp_seconds * (
             progress - smoothstep_integral(progress)
         )
         return MotionState(
-            ramp_distance
-            + self.cruise_speed_mps * cruise_seconds
-            + deceleration_distance,
-            self.cruise_speed_mps * (1 - smoothstep(progress)),
+            self.route_length_m - deceleration_distance + distance_in_phase,
+            last_speed * (1 - smoothstep(progress)),
         )
 
 

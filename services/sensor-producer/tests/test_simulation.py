@@ -81,6 +81,35 @@ def turning_route() -> RoutePlan:
     )
 
 
+def mixed_speed_route() -> RoutePlan:
+    first = RouteLeg(
+        segment_id="segment-slow",
+        geometry=LineString([(-73.99, 40.67), (-73.9898, 40.67)]),
+        length_m=20.0,
+        posted_speed_mph=10.0,
+        curve_radius_m=None,
+        pavement_rating=8.0,
+        hump_distances_m=(),
+    )
+    second = RouteLeg(
+        segment_id="segment-fast",
+        geometry=LineString([(-73.9898, 40.67), (-73.988, 40.67)]),
+        length_m=180.0,
+        posted_speed_mph=30.0,
+        curve_radius_m=None,
+        pavement_rating=8.0,
+        hump_distances_m=(),
+    )
+    return RoutePlan(
+        trip_id="trip-1",
+        planned_at=trip().request_datetime,
+        start_node_id="n1",
+        end_node_id="n3",
+        legs=(first, second),
+        total_length_m=200.0,
+    )
+
+
 def simulate(plan: RoutePlan):
     return list(
         MotionSimulator().generate(
@@ -130,8 +159,20 @@ def test_speed_profile_has_consistent_distance_and_respects_limit() -> None:
         previous.distance_m <= current.distance_m
         for previous, current in pairwise(states)
     )
-    assert max(state.speed_mps for state in states) <= profile.speed_limit_mps
-    assert sum(state.speed_mps == profile.cruise_speed_mps for state in states) > 1
+    assert max(state.speed_mps for state in states) <= profile.leg_speed_limits_mps[0]
+    assert sum(state.speed_mps == profile.leg_speeds_mps[0] for state in states) > 1
+
+
+def test_speed_profile_applies_limits_per_segment() -> None:
+    profile = SpeedProfile.for_route(mixed_speed_route(), duration_seconds=30)
+    states = [profile.state_at(sequence * 0.1) for sequence in range(301)]
+    slow_limit, fast_limit = profile.leg_speed_limits_mps
+    slow_segment = [state for state in states if state.distance_m < 20.0]
+    fast_segment = [state for state in states if 20.0 < state.distance_m < 200.0]
+
+    assert max(state.speed_mps for state in slow_segment) <= slow_limit
+    assert max(state.speed_mps for state in fast_segment) > slow_limit
+    assert max(state.speed_mps for state in fast_segment) <= fast_limit
 
 
 def test_speed_profile_rejects_route_that_requires_speeding() -> None:
