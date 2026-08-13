@@ -79,7 +79,7 @@ docs/31-write-data-contract
 3. 작업 내용을 커밋하고 원격 저장소에 push합니다.
 4. 작업 브랜치에서 `develop`을 대상으로 PR을 생성합니다.
 5. CI, 리뷰 및 필수 검증을 통과한 후 Squash merge합니다.
-6. 병합이 끝난 작업 브랜치는 삭제합니다.
+6. 병합한 사람이 작업 브랜치를 삭제합니다.
 
 ```bash
 git switch develop
@@ -240,7 +240,6 @@ PR에는 최소한 다음 내용을 포함합니다.
 - 작업 브랜치에서 `develop`으로 병합할 때는 **Squash merge**를 사용합니다.
 - Squash merge 시 최종 커밋 제목은 `<type>: <subject>` 형식의 커밋 컨벤션에 맞게 수정합니다.
 - 배포 또는 릴리스 시 `develop`에서 `main`으로 병합할 때는 **Merge commit**을 사용합니다.
-- 병합이 끝난 작업 브랜치는 삭제합니다.
 - `main`은 항상 배포 가능한 상태를 유지합니다.
 
 ### 충돌 해결 가이드
