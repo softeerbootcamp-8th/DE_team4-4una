@@ -19,7 +19,7 @@ design and must not be invented silently.
 | `street_pavement_rating` | TBD | Source/Bronze reference | One source-defined pavement section observation |
 | `speed_hump_reference` | TBD | Source/Bronze reference | One speed-hump road-section record |
 | `osm_traffic_signal` | TBD | Source/Bronze reference | One OSM traffic-signal node |
-| `taxi_zone_lookup` | `dim_taxi_zone` | Reference dimension | One TLC taxi zone |
+| `taxi_zone_lookup` | `taxi_zone_lookup` | Reference dimension | One TLC taxi zone |
 | `vehicle_profile` | `vehicle_profile` | Bronze reference (PostgreSQL) | One vehicle profile |
 | `sensor_event` | `sensor_event` | Bronze on S3 | One vehicle sensor measurement (at-least-once; duplicates possible) |
 | `road_segment` | `road_segment` | Normalized reference | One LION segment per snapshot date |
@@ -46,8 +46,8 @@ path using `YYYYMM` format.
 | On-scene time | `on_scene_datetime` | `on_scene_datetime` | TIMESTAMP | Y | Driver arrival at pickup location |
 | Pickup time | `pickup_datetime` | `pickup_datetime` | TIMESTAMP | N | Passenger journey start |
 | Drop-off time | `dropoff_datetime` | `dropoff_datetime` | TIMESTAMP | N | Passenger journey end |
-| Pickup zone | `pu_location_id` | `PULocationID` | INTEGER | N | FK to `dim_taxi_zone.location_id` |
-| Drop-off zone | `do_location_id` | `DOLocationID` | INTEGER | N | FK to `dim_taxi_zone.location_id` |
+| Pickup zone | `pu_location_id` | `PULocationID` | INTEGER | N | FK to `taxi_zone_lookup.location_id` |
+| Drop-off zone | `do_location_id` | `DOLocationID` | INTEGER | N | FK to `taxi_zone_lookup.location_id` |
 | Trip distance | `trip_miles` | `trip_miles` | DOUBLE | N | Miles |
 | Trip duration | `trip_time` | `trip_time` | BIGINT | N | Seconds |
 | Base fare | `base_passenger_fare` | `base_passenger_fare` | DOUBLE | N | Excludes tolls, tips, and taxes |
@@ -126,7 +126,7 @@ extract contains only nodes whose `highway` value is `traffic_signals`.
 | Extracted time | `overpass_timestamp` | File-header `timestamp` | TIMESTAMP | N | Example `2026-08-03T09:02:51Z` |
 | Snapshot date | `snapshot_date` | Derived from `overpass_timestamp` | STRING | N | `YYYYMMDD`, for example `20260803` |
 
-## `dim_taxi_zone`
+## `taxi_zone_lookup`
 
 | Attribute | Column | Source column | Type | Nullable | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -394,14 +394,14 @@ one TLC taxi zone.
 | Attribute | Column | Source column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
 | Zone ID | `location_id` | `LocationID` | INTEGER | N | PK | TLC zone code, 1-265 |
-| Borough | `borough` | `Borough` | STRING | Y | | Same category set as `dim_taxi_zone.borough` |
-| Zone name | `zone` | `Zone` | STRING | Y | | Display name; not unique. Note the column is `zone`, not `zone_name` as in `dim_taxi_zone` |
-| Service zone | `service_zone` | `service_zone` | STRING | Y | | Same category set as `dim_taxi_zone.service_zone` |
+| Borough | `borough` | `Borough` | STRING | Y | | Same category set as `taxi_zone_lookup.borough` |
+| Zone name | `zone` | `Zone` | STRING | Y | | Display name; not unique. Note the column is `zone`, not `zone_name` as in `taxi_zone_lookup` |
+| Service zone | `service_zone` | `service_zone` | STRING | Y | | Same category set as `taxi_zone_lookup.service_zone` |
 | Geometry | `geometry` | `taxi_zones.shp` polygon | GEOMETRY (WKB) | Y | | Zone polygon in `EPSG:4326`; null only for `location_id` 264 and 265 |
 
 `zone_profile_features` and `zone_scores` are 1:1 extensions of this table,
 keyed by the same `location_id`. `zone_master` overlaps with the
-already-catalogued `dim_taxi_zone` but is a separate physical table; whether
+already-catalogued `taxi_zone_lookup` but is a separate physical table; whether
 to unify them is open (OQ-029).
 
 ## `zone_profile_features`
