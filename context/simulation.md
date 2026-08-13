@@ -86,6 +86,7 @@ their sources and units are accepted.
 - longitudinal acceleration and jerk
 - lateral acceleration and jerk
 - vertical acceleration and jerk
+- signed front-wheel steering angle
 - steering-wheel vibration amplitude
 - yaw rate or heading change
 - pitch and roll proxies
@@ -93,9 +94,10 @@ their sources and units are accepted.
 - bump or hump impact magnitude
 
 The Bronze `sensor_event` contract retains speed, heading, three acceleration
-axes, the corresponding three jerk axes, and `steering_vibration`. The legacy
-`jerk` field remains an exact alias of `jerk_x`. Other candidate measurements
-above require a contract change before publication.
+axes, the corresponding three jerk axes, `steering_angle`, and
+`steering_vibration`. The legacy `jerk` field remains an exact alias of
+`jerk_x`. Other candidate measurements above require a contract change before
+publication.
 
 ## Sensor sequence and map matching
 
@@ -132,6 +134,12 @@ vibration amplitude, while a mapped hump adds a localized Gaussian impact and a
 damped oscillation scaled by speed and vehicle profile. Lateral acceleration is
 derived from heading change and bounded to 4 m/s² to avoid discontinuities in
 simplified source geometry producing impossible spikes.
+
+`steering_angle` is a signed front-wheel angle in degrees derived from speed and
+heading change with a simplified bicycle model using a representative 2.8 m
+wheelbase. It is bounded to -35 through 35 degrees; positive values represent
+right turns and negative values represent left turns. Near-zero speed is
+reported as zero because a heading-derived estimate is unstable there.
 
 `steering_vibration` is a non-negative RMS-like amplitude in m/s² rather than a
 steering angle. It combines road-induced vertical acceleration and lateral

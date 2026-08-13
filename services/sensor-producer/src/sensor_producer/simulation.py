@@ -29,6 +29,11 @@ EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
 MPH_TO_MPS = 0.44704
 DEFAULT_SPEED_LIMIT_MPH = 25.0
 MAX_ACCELERATION_PHASE_SECONDS = 8.0
+# 차량별 보정값이 없는 PoC용 bicycle model 가정이다.
+REPRESENTATIVE_WHEELBASE_M = 2.8
+MIN_STEERING_SPEED_MPS = 0.5
+MAX_STEERING_ANGLE_DEG = 35.0
+STEERING_ANGLE_DEADBAND_DEG = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,15 +212,18 @@ class MotionSimulator:
             if sequence == 0:
                 accel_x = 0.0
                 accel_y = 0.0
+                steering_angle = 0.0
             else:
                 accel_x = (
                     (speed - previous_speed)
                     / config.interval_seconds
                     * profile.longitudinal_response
                 )
-                heading_delta = signed_heading_delta(previous_heading or heading, heading)
+                assert previous_heading is not None
+                heading_delta = signed_heading_delta(previous_heading, heading)
                 yaw_rate = math.radians(heading_delta) / config.interval_seconds
                 accel_y = clamp(speed * yaw_rate * profile.lateral_response, -4.0, 4.0)
+                steering_angle = steering_angle_degrees(speed, yaw_rate)
 
             accel_z, _near_hump = vertical_acceleration(
                 position,
@@ -259,6 +267,7 @@ class MotionSimulator:
                 longitude=point.x,
                 speed_mps=max(0.0, speed),
                 heading=heading,
+                steering_angle=steering_angle,
                 accel_x=accel_x,
                 accel_y=accel_y,
                 accel_z=accel_z,
@@ -475,6 +484,23 @@ def steering_vibration_amplitude(
     return profile.steering_vibration_response * (
         road_component + steering_component
     ) * carrier
+
+
+def steering_angle_degrees(speed_mps: float, yaw_rate_rad_s: float) -> float:
+    """간단한 bicycle model로 부호가 있는 전륜 조향각을 근사한다.
+
+    heading은 시계 방향으로 증가하므로 양수는 우회전, 음수는 좌회전이다.
+    """
+
+    # 정지에 가까우면 heading 기반 조향각이 불안정하므로 중립값을 사용한다.
+    if speed_mps < MIN_STEERING_SPEED_MPS:
+        return 0.0
+    angle = math.degrees(
+        math.atan(REPRESENTATIVE_WHEELBASE_M * yaw_rate_rad_s / speed_mps)
+    )
+    if abs(angle) < STEERING_ANGLE_DEADBAND_DEG:
+        return 0.0
+    return clamp(angle, -MAX_STEERING_ANGLE_DEG, MAX_STEERING_ANGLE_DEG)
 
 
 def smoothstep(value: float) -> float:

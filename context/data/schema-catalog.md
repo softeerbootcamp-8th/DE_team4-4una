@@ -154,6 +154,7 @@ superseded by this version.
 | Longitude | `longitude` | Generated | DOUBLE | N |  | GPS longitude |
 | Speed | `speed_mps` | Generated | DOUBLE | N |  | Meters per second |
 | Heading | `heading` | Generated | DOUBLE | Y |  | Direction from 0 through 360 degrees |
+| Steering angle | `steering_angle` | Generated | DOUBLE | N |  | Signed front-wheel angle in degrees, -35 through 35; positive is right |
 | Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration in m/s² |
 | Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration in m/s² |
 | Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact in m/s² |
@@ -244,6 +245,7 @@ classification. Unmatched and ambiguous observations are retained.
 | Longitude | `longitude` | `longitude` | DOUBLE | N |  | Validated longitude |
 | Speed | `speed_mps` | `speed_mps` | DOUBLE | N |  | Validated meters per second |
 | Heading | `heading` | `heading` | DOUBLE | Y |  | Direction in degrees |
+| Steering angle | `steering_angle` | `steering_angle` | DOUBLE | N |  | Validated signed front-wheel angle in degrees, -35 through 35 |
 | Longitudinal acceleration | `accel_x` | `accel_x` | DOUBLE | Y |  | Forward/backward acceleration |
 | Lateral acceleration | `accel_y` | `accel_y` | DOUBLE | Y |  | Side-to-side acceleration |
 | Vertical acceleration | `accel_z` | `accel_z` | DOUBLE | N |  | Vertical impact or vibration |

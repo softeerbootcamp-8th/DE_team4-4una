@@ -77,8 +77,9 @@ without a broker.
 - Speed follows smooth acceleration, cruise, and deceleration phases over the
   routed distance while applying each segment's posted speed limit.
   Signals are deterministic SI measurements: speed in m/s, acceleration in m/s²,
-  heading in degrees, and three-axis jerk in m/s³. The legacy `jerk` field is
-  identical to longitudinal `jerk_x`.
+  heading in degrees, and three-axis jerk in m/s³. `steering_angle` is a
+  signed front-wheel angle in degrees, bounded to -35 through 35; positive is a
+  right turn. The legacy `jerk` field is identical to longitudinal `jerk_x`.
 - `steering_vibration` is a non-negative RMS-like steering-wheel acceleration
   amplitude in m/s². It approximates vibration transferred from vertical road
   motion plus lateral steering activity, fades toward zero at low speed, and is
