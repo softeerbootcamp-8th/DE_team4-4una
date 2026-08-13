@@ -24,9 +24,7 @@ import pandas as pd
 
 DATA_DIR = Path("data")
 
-ZONE_MASTER_PATH = (
-    DATA_DIR / "reference/tlc_zone/zone_master.parquet"
-)
+ZONE_MASTER_PATH = DATA_DIR / "reference/tlc_zone/zone_master.parquet"
 
 RAW_DIR = DATA_DIR / "raw/zone_profile"
 
@@ -34,9 +32,7 @@ MAPPLUTO_PATH = RAW_DIR / "mappluto.csv"
 ACS_PATH = RAW_DIR / "acs_block_group.csv"
 ACS_BG_PATH = RAW_DIR / "tl_2024_36_bg.zip"
 
-LODES_WAC_PATH = (
-    RAW_DIR / "ny_wac_S000_JT00_2023.csv.gz"
-)
+LODES_WAC_PATH = RAW_DIR / "ny_wac_S000_JT00_2023.csv.gz"
 LODES_XWALK_PATH = RAW_DIR / "ny_xwalk.csv.gz"
 
 OSM_POI_PATH = RAW_DIR / "osm_poi.json"
@@ -44,12 +40,9 @@ MTA_PATH = RAW_DIR / "mta_stations.geojson"
 FACILITIES_PATH = RAW_DIR / "facilities.json"
 PARKS_PATH = RAW_DIR / "parks.geojson"
 
-OUTPUT_PATH = (
-    DATA_DIR / "processed/zone_profile_features.parquet"
-)
+OUTPUT_PATH = DATA_DIR / "processed/zone_profile_features.parquet"
 
-# 저장은 4326,
-# 면적 계산할 때만 projected CRS 사용
+# 저장은 4326, 면적 계산할 때만 projected CRS 사용
 PROJECTED_CRS = "EPSG:2263"
 WGS84 = "EPSG:4326"
 
@@ -74,61 +67,36 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def safe_ratio(
-    numerator: pd.Series,
-    denominator: pd.Series,
-) -> pd.Series:
+def safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denominator = denominator.replace(0, np.nan)
-
     return numerator / denominator
 
 
 def load_zone_master() -> gpd.GeoDataFrame:
     zones = gpd.read_parquet(ZONE_MASTER_PATH)
-
     zones["location_id"] = zones["location_id"].astype("int64")
-
     return zones
 
 
-def get_spatial_zones(
-    zones: gpd.GeoDataFrame,
-) -> gpd.GeoDataFrame:
+def get_spatial_zones(zones: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """geometry가 존재하는 Zone만 반환한다."""
-    return zones[
-        zones.geometry.notna()
-    ].copy()
+    return zones[zones.geometry.notna()].copy()
 
 
-def get_zone_area(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-    zones_proj = (
-        get_spatial_zones(zones)
-        .to_crs(PROJECTED_CRS)
-    )
+def get_zone_area(zones: gpd.GeoDataFrame) -> pd.DataFrame:
+    zones_proj = get_spatial_zones(zones).to_crs(PROJECTED_CRS)
 
-    result = zones_proj[
-        ["location_id", "geometry"]
-    ].copy()
+    result = zones_proj[["location_id", "geometry"]].copy()
+    result["zone_area_km2"] = result.geometry.area * SQ_FT_TO_SQ_KM
 
-    result["zone_area_km2"] = (
-        result.geometry.area * SQ_FT_TO_SQ_KM
-    )
-
-    return result[
-        ["location_id", "zone_area_km2"]
-    ]
+    return result[["location_id", "zone_area_km2"]]
 
 
 # ============================================================
 # 1. PLUTO
 # ============================================================
 
-def build_pluto_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_pluto_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[1/7] PLUTO")
 
     df = pd.read_csv(MAPPLUTO_PATH)
@@ -146,34 +114,21 @@ def build_pluto_features(
     ]
 
     for col in numeric_cols:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce",
-        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.dropna(
-        subset=["latitude", "longitude"]
-    )
+    df = df.dropna(subset=["latitude", "longitude"])
 
     pluto = gpd.GeoDataFrame(
         df,
-        geometry=gpd.points_from_xy(
-            df["longitude"],
-            df["latitude"],
-        ),
+        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
         crs=WGS84,
     )
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(WGS84)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
 
     joined = gpd.sjoin(
         pluto,
-        spatial_zones[
-            ["location_id", "geometry"]
-        ],
+        spatial_zones[["location_id", "geometry"]],
         how="inner",
         predicate="within",
     )
@@ -187,44 +142,18 @@ def build_pluto_features(
         "residential_units",
     ]
 
-    agg = (
-        joined
-        .groupby("location_id")[sum_cols]
-        .sum()
-        .reset_index()
-    )
+    agg = joined.groupby("location_id")[sum_cols].sum().reset_index()
 
-    agg["residential_area_ratio"] = safe_ratio(
-        agg["res_area"],
-        agg["bldg_area"],
-    )
-
-    agg["office_area_ratio"] = safe_ratio(
-        agg["office_area"],
-        agg["bldg_area"],
-    )
-
-    agg["commercial_area_ratio"] = safe_ratio(
-        agg["commercial_area"],
-        agg["bldg_area"],
-    )
-
-    agg["retail_area_ratio"] = safe_ratio(
-        agg["retail_area"],
-        agg["bldg_area"],
-    )
+    agg["residential_area_ratio"] = safe_ratio(agg["res_area"], agg["bldg_area"])
+    agg["office_area_ratio"] = safe_ratio(agg["office_area"], agg["bldg_area"])
+    agg["commercial_area_ratio"] = safe_ratio(agg["commercial_area"], agg["bldg_area"])
+    agg["retail_area_ratio"] = safe_ratio(agg["retail_area"], agg["bldg_area"])
 
     zone_area = get_zone_area(zones)
-
-    agg = agg.merge(
-        zone_area,
-        on="location_id",
-        how="left",
-    )
+    agg = agg.merge(zone_area, on="location_id", how="left")
 
     agg["residential_unit_density"] = safe_ratio(
-        agg["residential_units"],
-        agg["zone_area_km2"],
+        agg["residential_units"], agg["zone_area_km2"],
     )
 
     return agg[
@@ -243,16 +172,10 @@ def build_pluto_features(
 # 2. ACS
 # ============================================================
 
-def build_acs_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_acs_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[2/7] ACS")
 
-    acs = pd.read_csv(
-        ACS_PATH,
-        dtype=str,
-    )
+    acs = pd.read_csv(ACS_PATH, dtype=str)
 
     rename_map = {
         "B01003_001E": "population",
@@ -282,27 +205,15 @@ def build_acs_features(
         "B01001_049E",
     ]
 
-    numeric_cols = (
-        list(rename_map.values())
-        + senior_columns
-    )
+    numeric_cols = list(rename_map.values()) + senior_columns
 
     for col in numeric_cols:
-        acs[col] = pd.to_numeric(
-            acs[col],
-            errors="coerce",
-        )
+        acs[col] = pd.to_numeric(acs[col], errors="coerce")
 
         # ACS의 음수 special value 제거
-        acs.loc[
-            acs[col] < 0,
-            col,
-        ] = np.nan
+        acs.loc[acs[col] < 0, col] = np.nan
 
-    acs["senior_count"] = (
-        acs[senior_columns]
-        .sum(axis=1, min_count=1)
-    )
+    acs["senior_count"] = acs[senior_columns].sum(axis=1, min_count=1)
 
     # Census Block Group GEOID
     acs["geoid"] = (
@@ -313,44 +224,29 @@ def build_acs_features(
     )
 
     # TIGER Block Group Geometry
-    bg = gpd.read_file(
-        f"zip://{ACS_BG_PATH}"
-    )
-
+    bg = gpd.read_file(f"zip://{ACS_BG_PATH}")
     bg = normalize_columns(bg)
-
     bg["geoid"] = bg["geoid"].astype(str)
 
-    bg = bg[
-        ["geoid", "geometry"]
-    ].merge(
-        acs,
-        on="geoid",
-        how="inner",
-        validate="one_to_one",
+    bg = bg[["geoid", "geometry"]].merge(
+        acs, on="geoid", how="inner", validate="one_to_one",
     )
 
     bg = bg.to_crs(PROJECTED_CRS)
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(PROJECTED_CRS)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(PROJECTED_CRS)
 
     bg["source_area"] = bg.geometry.area
 
     intersection = gpd.overlay(
         bg,
-        spatial_zones[
-            ["location_id", "geometry"]
-        ],
+        spatial_zones[["location_id", "geometry"]],
         how="intersection",
         keep_geom_type=False,
     )
 
     intersection["area_weight"] = safe_ratio(
-        intersection.geometry.area,
-        intersection["source_area"],
+        intersection.geometry.area, intersection["source_area"],
     )
 
     # ------------------------------
@@ -367,43 +263,28 @@ def build_acs_features(
 
     for col in count_cols:
         intersection[f"{col}_weighted"] = (
-            intersection[col]
-            * intersection["area_weight"]
+            intersection[col] * intersection["area_weight"]
         )
 
-    weighted_cols = [
-        f"{col}_weighted"
-        for col in count_cols
-    ]
+    weighted_cols = [f"{col}_weighted" for col in count_cols]
 
     counts = (
-        intersection
-        .groupby("location_id")[weighted_cols]
-        .sum()
-        .reset_index()
+        intersection.groupby("location_id")[weighted_cols].sum().reset_index()
     )
 
     counts = counts.rename(
-        columns={
-            f"{col}_weighted": col
-            for col in count_cols
-        }
+        columns={f"{col}_weighted": col for col in count_cols}
     )
 
     counts["family_household_ratio"] = safe_ratio(
-        counts["family_household_count"],
-        counts["household_count"],
+        counts["family_household_count"], counts["household_count"],
     )
 
     counts["children_household_ratio"] = safe_ratio(
-        counts["children_household_count"],
-        counts["household_count"],
+        counts["children_household_count"], counts["household_count"],
     )
 
-    counts["senior_ratio"] = safe_ratio(
-        counts["senior_count"],
-        counts["population"],
-    )
+    counts["senior_ratio"] = safe_ratio(counts["senior_count"], counts["population"])
 
     # ------------------------------
     # Median 계열
@@ -413,68 +294,30 @@ def build_acs_features(
     # ------------------------------
 
     intersection["effective_households"] = (
-        intersection["household_count"]
-        * intersection["area_weight"]
+        intersection["household_count"] * intersection["area_weight"]
     )
 
-    median_cols = [
-        "median_household_income",
-        "median_home_value",
-        "median_gross_rent",
-    ]
+    median_cols = ["median_household_income", "median_home_value", "median_gross_rent"]
 
     median_result = pd.DataFrame(
-        {
-            "location_id":
-                intersection["location_id"]
-                .unique()
-        }
+        {"location_id": intersection["location_id"].unique()}
     )
 
     for col in median_cols:
-
         valid = intersection[
-            intersection[col].notna()
-            & (
-                intersection["effective_households"]
-                > 0
-            )
+            intersection[col].notna() & (intersection["effective_households"] > 0)
         ].copy()
 
-        valid["weighted_value"] = (
-            valid[col]
-            * valid["effective_households"]
-        )
+        valid["weighted_value"] = valid[col] * valid["effective_households"]
 
-        numerator = (
-            valid
-            .groupby("location_id")["weighted_value"]
-            .sum()
-        )
+        numerator = valid.groupby("location_id")["weighted_value"].sum()
+        denominator = valid.groupby("location_id")["effective_households"].sum()
 
-        denominator = (
-            valid
-            .groupby("location_id")[
-                "effective_households"
-            ]
-            .sum()
-        )
+        value = (numerator / denominator).rename(col)
 
-        value = (
-            numerator / denominator
-        ).rename(col)
+        median_result = median_result.merge(value, on="location_id", how="left")
 
-        median_result = median_result.merge(
-            value,
-            on="location_id",
-            how="left",
-        )
-
-    result = counts.merge(
-        median_result,
-        on="location_id",
-        how="left",
-    )
+    result = counts.merge(median_result, on="location_id", how="left")
 
     return result[
         [
@@ -495,19 +338,10 @@ def build_acs_features(
 # 3. LODES WAC
 # ============================================================
 
-def build_lodes_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_lodes_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[3/7] LODES")
 
-    wac = pd.read_csv(
-        LODES_WAC_PATH,
-        dtype={
-            "w_geocode": str,
-        },
-    )
-
+    wac = pd.read_csv(LODES_WAC_PATH, dtype={"w_geocode": str})
     wac = normalize_columns(wac)
 
     # WAC industry columns
@@ -527,102 +361,47 @@ def build_lodes_features(
     ]
 
     for col in industry_cols:
-        wac[col] = pd.to_numeric(
-            wac[col],
-            errors="coerce",
-        ).fillna(0)
+        wac[col] = pd.to_numeric(wac[col], errors="coerce").fillna(0)
 
     # Crosswalk 컬럼을 먼저 확인
-    header = pd.read_csv(
-        LODES_XWALK_PATH,
-        nrows=0,
-    ).columns.tolist()
+    header = pd.read_csv(LODES_XWALK_PATH, nrows=0).columns.tolist()
 
-    block_col = next(
-        col
-        for col in header
-        if col.lower().startswith("tabblk")
-    )
-
-    lat_col = next(
-        col
-        for col in header
-        if col.lower() == "blklatdd"
-    )
-
-    lon_col = next(
-        col
-        for col in header
-        if col.lower() == "blklondd"
-    )
+    block_col = next(col for col in header if col.lower().startswith("tabblk"))
+    lat_col = next(col for col in header if col.lower() == "blklatdd")
+    lon_col = next(col for col in header if col.lower() == "blklondd")
 
     xwalk = pd.read_csv(
         LODES_XWALK_PATH,
-        usecols=[
-            block_col,
-            lat_col,
-            lon_col,
-        ],
-        dtype={
-            block_col: str,
-        },
+        usecols=[block_col, lat_col, lon_col],
+        dtype={block_col: str},
     )
 
     xwalk = xwalk.rename(
-        columns={
-            block_col: "w_geocode",
-            lat_col: "latitude",
-            lon_col: "longitude",
-        }
+        columns={block_col: "w_geocode", lat_col: "latitude", lon_col: "longitude"}
     )
 
-    wac["w_geocode"] = (
-        wac["w_geocode"]
-        .astype(str)
-        .str.zfill(15)
-    )
+    wac["w_geocode"] = wac["w_geocode"].astype(str).str.zfill(15)
+    xwalk["w_geocode"] = xwalk["w_geocode"].astype(str).str.zfill(15)
 
-    xwalk["w_geocode"] = (
-        xwalk["w_geocode"]
-        .astype(str)
-        .str.zfill(15)
-    )
-
-    df = wac.merge(
-        xwalk,
-        on="w_geocode",
-        how="inner",
-        validate="one_to_one",
-    )
+    df = wac.merge(xwalk, on="w_geocode", how="inner", validate="one_to_one")
 
     points = gpd.GeoDataFrame(
         df,
-        geometry=gpd.points_from_xy(
-            df["longitude"],
-            df["latitude"],
-        ),
+        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
         crs=WGS84,
     )
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(WGS84)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
 
     joined = gpd.sjoin(
         points,
-        spatial_zones[
-            ["location_id", "geometry"]
-        ],
+        spatial_zones[["location_id", "geometry"]],
         how="inner",
         predicate="within",
     )
 
     # 전문서비스 + 기업관리
-    joined["professional_jobs"] = (
-        joined["cns12"]
-        + joined["cns13"]
-    )
+    joined["professional_jobs"] = joined["cns12"] + joined["cns13"]
 
     rename_jobs = {
         "c000": "total_jobs",
@@ -637,9 +416,7 @@ def build_lodes_features(
         "cns20": "public_admin_jobs",
     }
 
-    joined = joined.rename(
-        columns=rename_jobs
-    )
+    joined = joined.rename(columns=rename_jobs)
 
     job_cols = [
         "total_jobs",
@@ -659,8 +436,7 @@ def build_lodes_features(
     # 맞으므로 결측 대신 0을 채운다. safe_ratio가 분모 0을 NaN으로
     # 처리하므로 *_job_ratio는 여전히 정의되지 않은 값(NaN)으로 남는다.
     agg = (
-        joined
-        .groupby("location_id")[job_cols]
+        joined.groupby("location_id")[job_cols]
         .sum()
         .reindex(spatial_zones["location_id"], fill_value=0)
         .reset_index()
@@ -670,35 +446,15 @@ def build_lodes_features(
 
     for col in ratio_cols:
         name = col.replace("_jobs", "_job_ratio")
-
-        agg[name] = safe_ratio(
-            agg[col],
-            agg["total_jobs"],
-        )
+        agg[name] = safe_ratio(agg[col], agg["total_jobs"])
 
     zone_area = get_zone_area(zones)
+    agg = agg.merge(zone_area, on="location_id", how="left")
 
-    agg = agg.merge(
-        zone_area,
-        on="location_id",
-        how="left",
-    )
+    agg["job_density"] = safe_ratio(agg["total_jobs"], agg["zone_area_km2"])
 
-    agg["job_density"] = safe_ratio(
-        agg["total_jobs"],
-        agg["zone_area_km2"],
-    )
-
-    output_cols = [
-        "location_id",
-        "total_jobs",
-        "job_density",
-    ]
-
-    output_cols += [
-        col.replace("_jobs", "_job_ratio")
-        for col in ratio_cols
-    ]
+    output_cols = ["location_id", "total_jobs", "job_density"]
+    output_cols += [col.replace("_jobs", "_job_ratio") for col in ratio_cols]
 
     return agg[output_cols]
 
@@ -707,10 +463,7 @@ def build_lodes_features(
 # 4. OSM POI
 # ============================================================
 
-def get_osm_categories(
-    tags: dict,
-) -> list[str]:
-
+def get_osm_categories(tags: dict) -> list[str]:
     result = []
 
     if tags.get("shop"):
@@ -718,17 +471,10 @@ def get_osm_categories(
 
     amenity = tags.get("amenity")
 
-    if amenity in {
-        "restaurant",
-        "cafe",
-    }:
+    if amenity in {"restaurant", "cafe"}:
         result.append("restaurant")
 
-    if amenity in {
-        "bar",
-        "pub",
-        "nightclub",
-    }:
+    if amenity in {"bar", "pub", "nightclub"}:
         result.append("nightlife")
 
     tourism = tags.get("tourism")
@@ -745,21 +491,15 @@ def get_osm_categories(
     return result
 
 
-def build_osm_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_osm_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[4/7] OSM POI")
 
-    with OSM_POI_PATH.open(
-        encoding="utf-8"
-    ) as file:
+    with OSM_POI_PATH.open(encoding="utf-8") as file:
         data = json.load(file)
 
     rows = []
 
     for element in data.get("elements", []):
-
         tags = element.get("tags", {})
 
         lon = element.get("lon")
@@ -776,61 +516,34 @@ def build_osm_features(
         categories = get_osm_categories(tags)
 
         for category in categories:
-            rows.append(
-                {
-                    "longitude": lon,
-                    "latitude": lat,
-                    "category": category,
-                }
-            )
+            rows.append({"longitude": lon, "latitude": lat, "category": category})
 
-    expected = [
-        "shop",
-        "restaurant",
-        "nightlife",
-        "hotel",
-        "museum",
-        "attraction",
-    ]
+    expected = ["shop", "restaurant", "nightlife", "hotel", "museum", "attraction"]
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(WGS84)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
 
     if rows:
         df = pd.DataFrame(rows)
 
         poi = gpd.GeoDataFrame(
             df,
-            geometry=gpd.points_from_xy(
-                df["longitude"],
-                df["latitude"],
-            ),
+            geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
             crs=WGS84,
         )
 
         joined = gpd.sjoin(
             poi,
-            spatial_zones[
-                ["location_id", "geometry"]
-            ],
+            spatial_zones[["location_id", "geometry"]],
             how="inner",
             predicate="within",
         )
 
         counts = (
-            joined
-            .groupby(
-                ["location_id", "category"]
-            )
-            .size()
-            .unstack(fill_value=0)
+            joined.groupby(["location_id", "category"]).size().unstack(fill_value=0)
         )
     else:
         counts = pd.DataFrame(
-            columns=expected,
-            index=pd.Index([], name="location_id"),
+            columns=expected, index=pd.Index([], name="location_id"),
         )
 
     for category in expected:
@@ -844,44 +557,25 @@ def build_osm_features(
         .reset_index()
     )
 
-    counts = counts.rename(
-        columns={
-            col: f"poi_{col}_count"
-            for col in expected
-        }
-    )
+    counts = counts.rename(columns={col: f"poi_{col}_count" for col in expected})
 
     zone_area = get_zone_area(zones)
-
-    counts = counts.merge(
-        zone_area,
-        on="location_id",
-        how="left",
-    )
+    counts = counts.merge(zone_area, on="location_id", how="left")
 
     for category in expected:
-
         count_col = f"poi_{category}_count"
         density_col = f"poi_{category}_density"
 
-        counts[density_col] = safe_ratio(
-            counts[count_col],
-            counts["zone_area_km2"],
-        )
+        counts[density_col] = safe_ratio(counts[count_col], counts["zone_area_km2"])
 
-    return counts.drop(
-        columns="zone_area_km2"
-    )
+    return counts.drop(columns="zone_area_km2")
 
 
 # ============================================================
 # 5. MTA
 # ============================================================
 
-def build_mta_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_mta_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[5/7] MTA")
 
     mta = gpd.read_file(MTA_PATH)
@@ -896,8 +590,7 @@ def build_mta_features(
         mta = gpd.GeoDataFrame(
             mta.drop(columns="geometry"),
             geometry=gpd.points_from_xy(
-                pd.to_numeric(mta["longitude"]),
-                pd.to_numeric(mta["latitude"]),
+                pd.to_numeric(mta["longitude"]), pd.to_numeric(mta["latitude"]),
             ),
             crs=WGS84,
         )
@@ -907,40 +600,24 @@ def build_mta_features(
 
     mta = mta.to_crs(WGS84)
 
-    mta["number_of_stations_in_complex"] = (
-        pd.to_numeric(
-            mta["number_of_stations_in_complex"],
-            errors="coerce",
-        )
-        .fillna(1)
-    )
+    mta["number_of_stations_in_complex"] = pd.to_numeric(
+        mta["number_of_stations_in_complex"], errors="coerce",
+    ).fillna(1)
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(WGS84)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
 
     joined = gpd.sjoin(
         mta,
-        spatial_zones[
-            ["location_id", "geometry"]
-        ],
+        spatial_zones[["location_id", "geometry"]],
         how="inner",
         predicate="within",
     )
 
     result = (
-        joined
-        .groupby("location_id")
+        joined.groupby("location_id")
         .agg(
-            subway_complex_count=(
-                "location_id",
-                "size",
-            ),
-            subway_station_count=(
-                "number_of_stations_in_complex",
-                "sum",
-            ),
+            subway_complex_count=("location_id", "size"),
+            subway_station_count=("number_of_stations_in_complex", "sum"),
         )
         # 지하철역이 없는 Zone은 결측이 아니라 진짜 0건이다.
         .reindex(spatial_zones["location_id"], fill_value=0)
@@ -954,32 +631,20 @@ def build_mta_features(
 # 6. NYC Facilities
 # ============================================================
 
-def build_facility_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_facility_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[6/7] NYC Facilities")
 
     # facilities.json은 GeoJSON이 아니라 위경도 컬럼을 가진 평범한 레코드 배열이다.
     facilities = pd.read_json(FACILITIES_PATH)
     facilities = normalize_columns(facilities)
 
-    facilities["latitude"] = pd.to_numeric(
-        facilities["latitude"], errors="coerce",
-    )
-    facilities["longitude"] = pd.to_numeric(
-        facilities["longitude"], errors="coerce",
-    )
-    facilities = facilities.dropna(
-        subset=["latitude", "longitude"],
-    )
+    facilities["latitude"] = pd.to_numeric(facilities["latitude"], errors="coerce")
+    facilities["longitude"] = pd.to_numeric(facilities["longitude"], errors="coerce")
+    facilities = facilities.dropna(subset=["latitude", "longitude"])
 
     facilities = gpd.GeoDataFrame(
         facilities,
-        geometry=gpd.points_from_xy(
-            facilities["longitude"],
-            facilities["latitude"],
-        ),
+        geometry=gpd.points_from_xy(facilities["longitude"], facilities["latitude"]),
         crs=WGS84,
     )
 
@@ -996,11 +661,7 @@ def build_facility_features(
         "opname",
     ]
 
-    text_cols = [
-        col
-        for col in candidate_cols
-        if col in facilities.columns
-    ]
+    text_cols = [col for col in candidate_cols if col in facilities.columns]
 
     if not text_cols:
         raise ValueError(
@@ -1009,93 +670,50 @@ def build_facility_features(
         )
 
     facilities["facility_text"] = (
-        facilities[text_cols]
-        .fillna("")
-        .astype(str)
-        .agg(" ".join, axis=1)
-        .str.lower()
+        facilities[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
     )
 
     rules = {
-        "education": (
-            r"school|education|college|university|academy"
-        ),
-        "medical": (
-            r"hospital|health|clinic|medical|nursing"
-        ),
+        "education": r"school|education|college|university|academy",
+        "medical": r"hospital|health|clinic|medical|nursing",
         "government": (
             r"government|administration|administrative|"
             r"courthouse|police|fire station|city hall"
         ),
         "cultural": (
-            r"museum|library|cultural|theater|theatre|"
-            r"performing arts"
+            r"museum|library|cultural|theater|theatre|performing arts"
         ),
     }
 
     rows = []
 
     for category, pattern in rules.items():
-
-        mask = facilities[
-            "facility_text"
-        ].str.contains(
-            pattern,
-            regex=True,
-            na=False,
+        mask = facilities["facility_text"].str.contains(
+            pattern, regex=True, na=False,
         )
 
-        part = facilities[
-            mask
-        ].copy()
-
+        part = facilities[mask].copy()
         part["facility_category"] = category
 
         rows.append(part)
 
-    classified = pd.concat(
-        rows,
-        ignore_index=True,
-    )
+    classified = pd.concat(rows, ignore_index=True)
+    classified = gpd.GeoDataFrame(classified, geometry="geometry", crs=WGS84)
 
-    classified = gpd.GeoDataFrame(
-        classified,
-        geometry="geometry",
-        crs=WGS84,
-    )
-
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(WGS84)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
 
     joined = gpd.sjoin(
         classified,
-        spatial_zones[
-            ["location_id", "geometry"]
-        ],
+        spatial_zones[["location_id", "geometry"]],
         how="inner",
         predicate="within",
     )
 
     result = (
-        joined
-        .groupby(
-            [
-                "location_id",
-                "facility_category",
-            ]
-        )
-        .size()
-        .unstack(fill_value=0)
+        joined.groupby(["location_id", "facility_category"]).size().unstack(fill_value=0)
     )
 
-    expected = [
-        "education",
-        "medical",
-        "government",
-        "cultural",
-    ]
+    expected = ["education", "medical", "government", "cultural"]
 
     for col in expected:
         if col not in result.columns:
@@ -1108,12 +726,7 @@ def build_facility_features(
         .reset_index()
     )
 
-    result = result.rename(
-        columns={
-            col: f"facility_{col}_count"
-            for col in expected
-        }
-    )
+    result = result.rename(columns={col: f"facility_{col}_count" for col in expected})
 
     return result
 
@@ -1122,30 +735,17 @@ def build_facility_features(
 # 7. Parks
 # ============================================================
 
-def build_park_features(
-    zones: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-
+def build_park_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
     print("[7/7] NYC Parks")
 
-    parks = gpd.read_file(
-        PARKS_PATH
-    )
+    parks = gpd.read_file(PARKS_PATH)
 
     if parks.crs is None:
         parks = parks.set_crs(WGS84)
 
-    parks = (
-        parks[
-            parks.geometry.notna()
-        ]
-        .to_crs(PROJECTED_CRS)
-    )
+    parks = parks[parks.geometry.notna()].to_crs(PROJECTED_CRS)
 
-    spatial_zones = (
-        get_spatial_zones(zones)
-        .to_crs(PROJECTED_CRS)
-    )
+    spatial_zones = get_spatial_zones(zones).to_crs(PROJECTED_CRS)
 
     # 중복 polygon으로 면적이 이중 계산되는 것을 막기 위해 union
     try:
@@ -1156,31 +756,16 @@ def build_park_features(
     rows = []
 
     for _, zone in spatial_zones.iterrows():
-
-        intersection_area = (
-            zone.geometry
-            .intersection(park_union)
-            .area
-        )
-
+        intersection_area = zone.geometry.intersection(park_union).area
         zone_area = zone.geometry.area
 
         rows.append(
             {
-                "location_id":
-                    zone["location_id"],
-
-                "park_area_km2":
-                    intersection_area
-                    * SQ_FT_TO_SQ_KM,
-
-                "park_area_ratio":
-                    (
-                        intersection_area
-                        / zone_area
-                        if zone_area > 0
-                        else np.nan
-                    ),
+                "location_id": zone["location_id"],
+                "park_area_km2": intersection_area * SQ_FT_TO_SQ_KM,
+                "park_area_ratio": (
+                    intersection_area / zone_area if zone_area > 0 else np.nan
+                ),
             }
         )
 
@@ -1192,13 +777,10 @@ def build_park_features(
 # ============================================================
 
 def build_zone_profile_features() -> pd.DataFrame:
-
     zones = load_zone_master()
 
     # 최종 테이블의 기준은 zone_master
-    result = zones[
-        ["location_id"]
-    ].copy()
+    result = zones[["location_id"]].copy()
 
     feature_tables = [
         build_pluto_features(zones),
@@ -1211,21 +793,14 @@ def build_zone_profile_features() -> pd.DataFrame:
     ]
 
     for features in feature_tables:
-
         if features.empty:
             continue
 
         if features["location_id"].duplicated().any():
-            raise ValueError(
-                "Feature table에 "
-                "location_id 중복이 있습니다."
-            )
+            raise ValueError("Feature table에 location_id 중복이 있습니다.")
 
         result = result.merge(
-            features,
-            on="location_id",
-            how="left",
-            validate="one_to_one",
+            features, on="location_id", how="left", validate="one_to_one",
         )
 
     return result
@@ -1235,91 +810,43 @@ def build_zone_profile_features() -> pd.DataFrame:
 # Validation
 # ============================================================
 
-def validate(
-    df: pd.DataFrame,
-    zones: gpd.GeoDataFrame,
-) -> None:
-
+def validate(df: pd.DataFrame, zones: gpd.GeoDataFrame) -> None:
     if df["location_id"].isna().any():
-        raise ValueError(
-            "location_id에 null이 있습니다."
-        )
+        raise ValueError("location_id에 null이 있습니다.")
 
     if df["location_id"].duplicated().any():
-        raise ValueError(
-            "location_id가 중복되었습니다."
-        )
+        raise ValueError("location_id가 중복되었습니다.")
 
-    expected_ids = set(
-        zones["location_id"]
-    )
-
-    actual_ids = set(
-        df["location_id"]
-    )
+    expected_ids = set(zones["location_id"])
+    actual_ids = set(df["location_id"])
 
     if expected_ids != actual_ids:
-        raise ValueError(
-            "zone_master와 location_id가 일치하지 않습니다."
-        )
+        raise ValueError("zone_master와 location_id가 일치하지 않습니다.")
 
     # ratio 범위 검증
-    ratio_cols = [
-        col
-        for col in df.columns
-        if col.endswith("_ratio")
-    ]
+    ratio_cols = [col for col in df.columns if col.endswith("_ratio")]
 
     for col in ratio_cols:
-
         values = df[col].dropna()
-
-        invalid = ~values.between(
-            0,
-            1.000001,
-        )
+        invalid = ~values.between(0, 1.000001)
 
         if invalid.any():
-            print(
-                f"[WARNING] "
-                f"{col}: [0, 1] 범위 밖 값 "
-                f"{invalid.sum()}건"
-            )
+            print(f"[WARNING] {col}: [0, 1] 범위 밖 값 {invalid.sum()}건")
 
     # 음수가 있으면 안 되는 컬럼
-    nonnegative_keywords = (
-        "_count",
-        "_density",
-        "_jobs",
-        "_area_km2",
-    )
+    nonnegative_keywords = ("_count", "_density", "_jobs", "_area_km2")
 
     for col in df.columns:
-
-        if any(
-            keyword in col
-            for keyword in nonnegative_keywords
-        ):
-            values = (
-                pd.to_numeric(
-                    df[col],
-                    errors="coerce",
-                )
-                .dropna()
-            )
+        if any(keyword in col for keyword in nonnegative_keywords):
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
 
             if (values < 0).any():
-                raise ValueError(
-                    f"{col}에 음수 값이 있습니다."
-                )
+                raise ValueError(f"{col}에 음수 값이 있습니다.")
 
     print("\n=== Validation ===")
     print(f"rows: {len(df)}")
     print(f"columns: {len(df.columns)}")
-    print(
-        f"duplicate location_id: "
-        f"{df['location_id'].duplicated().sum()}"
-    )
+    print(f"duplicate location_id: {df['location_id'].duplicated().sum()}")
 
 
 COVERAGE_GROUPS = {
@@ -1357,10 +884,7 @@ COVERAGE_GROUPS = {
 }
 
 
-def report_missing_coverage(
-    df: pd.DataFrame,
-    zones: gpd.GeoDataFrame,
-) -> None:
+def report_missing_coverage(df: pd.DataFrame, zones: gpd.GeoDataFrame) -> None:
     """
     소스 join이 하나도 안 붙은(전체 컬럼이 NaN인) Zone을 보고한다.
     PLUTO/ACS/LODES는 count/density를 0으로 채우면 안 되는 값(median 등)이
@@ -1372,10 +896,7 @@ def report_missing_coverage(
     print("\n=== Missing Source Coverage ===")
 
     for source, cols in COVERAGE_GROUPS.items():
-        missing_ids = df.loc[
-            df[cols].isna().all(axis=1),
-            "location_id",
-        ]
+        missing_ids = df.loc[df[cols].isna().all(axis=1), "location_id"]
 
         if missing_ids.empty:
             print(f"{source}: 없음")
@@ -1388,10 +909,7 @@ def report_missing_coverage(
         print(f"{source}: {len(missing_ids)}개 zone — {', '.join(labels)}")
 
 
-def print_summary(
-    df: pd.DataFrame,
-) -> None:
-
+def print_summary(df: pd.DataFrame) -> None:
     print("\n=== Output Columns ===")
 
     for col in df.columns:
@@ -1399,26 +917,11 @@ def print_summary(
 
     print("\n=== Null Rate ===")
 
-    null_rate = (
-        df.isna()
-        .mean()
-        .sort_values(
-            ascending=False
-        )
-    )
-
-    print(
-        null_rate
-        .head(30)
-        .to_string()
-    )
+    null_rate = df.isna().mean().sort_values(ascending=False)
+    print(null_rate.head(30).to_string())
 
     print("\n=== Sample ===")
-
-    print(
-        df.head(10)
-        .to_string(index=False)
-    )
+    print(df.head(10).to_string(index=False))
 
 
 # ============================================================
@@ -1426,32 +929,19 @@ def print_summary(
 # ============================================================
 
 def main() -> None:
-
     zones = load_zone_master()
 
     result = build_zone_profile_features()
 
-    validate(
-        result,
-        zones,
-    )
+    validate(result, zones)
 
     report_missing_coverage(result, zones)
     print_summary(result)
 
-    OUTPUT_PATH.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    result.to_parquet(OUTPUT_PATH, index=False)
 
-    result.to_parquet(
-        OUTPUT_PATH,
-        index=False,
-    )
-
-    print(
-        f"\nSaved: {OUTPUT_PATH}"
-    )
+    print(f"\nSaved: {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
