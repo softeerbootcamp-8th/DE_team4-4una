@@ -39,12 +39,16 @@ OSM_POI_PATH = RAW_DIR / "osm_poi.json"
 MTA_PATH = RAW_DIR / "mta_stations.geojson"
 FACILITIES_PATH = RAW_DIR / "facilities.json"
 PARKS_PATH = RAW_DIR / "parks.geojson"
+DOH_FACILITY_PATH = RAW_DIR / "doh_facilities.json"
+DOH_CERT_PATH = RAW_DIR / "doh_certification.json"
 
 OUTPUT_PATH = DATA_DIR / "processed/zone_profile_features.parquet"
 
 # 저장은 4326, 면적 계산할 때만 projected CRS 사용
 PROJECTED_CRS = "EPSG:2263"
 WGS84 = "EPSG:4326"
+
+NYC_COUNTIES = {"Bronx", "Kings", "New York", "Queens", "Richmond"}
 
 SQ_FT_TO_SQ_KM = 0.09290304 / 1_000_000
 
@@ -97,7 +101,7 @@ def get_zone_area(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_pluto_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[1/7] PLUTO")
+    print("[1/8] PLUTO")
 
     df = pd.read_csv(MAPPLUTO_PATH)
     df = normalize_columns(df)
@@ -173,7 +177,7 @@ def build_pluto_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_acs_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[2/7] ACS")
+    print("[2/8] ACS")
 
     acs = pd.read_csv(ACS_PATH, dtype=str)
 
@@ -339,7 +343,7 @@ def build_acs_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_lodes_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[3/7] LODES")
+    print("[3/8] LODES")
 
     wac = pd.read_csv(LODES_WAC_PATH, dtype={"w_geocode": str})
     wac = normalize_columns(wac)
@@ -492,7 +496,7 @@ def get_osm_categories(tags: dict) -> list[str]:
 
 
 def build_osm_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[4/7] OSM POI")
+    print("[4/8] OSM POI")
 
     with OSM_POI_PATH.open(encoding="utf-8") as file:
         data = json.load(file)
@@ -576,7 +580,7 @@ def build_osm_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_mta_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[5/7] MTA")
+    print("[5/8] MTA")
 
     mta = gpd.read_file(MTA_PATH)
     mta = normalize_columns(mta)
@@ -632,7 +636,7 @@ def build_mta_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_facility_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[6/7] NYC Facilities")
+    print("[6/8] NYC Facilities")
 
     # facilities.json은 GeoJSON이 아니라 위경도 컬럼을 가진 평범한 레코드 배열이다.
     facilities = pd.read_json(FACILITIES_PATH)
@@ -736,7 +740,7 @@ def build_facility_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 # ============================================================
 
 def build_park_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
-    print("[7/7] NYC Parks")
+    print("[7/8] NYC Parks")
 
     parks = gpd.read_file(PARKS_PATH)
 
@@ -773,6 +777,127 @@ def build_park_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+# 8. NYS DOH
+# ============================================================
+
+def extract_doh_coordinates(df: pd.DataFrame) -> pd.DataFrame:
+    """NYS DOH dataset 버전에 따라 좌표 필드명이 달라도 최대한 자동으로 탐색한다."""
+
+    df = df.copy()
+
+    # 일반적인 latitude / longitude
+    if {"latitude", "longitude"}.issubset(df.columns):
+        df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+        df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+        return df
+
+    # Socrata location object
+    possible_location_cols = ["location", "location_1", "geocoded_column"]
+
+    for col in possible_location_cols:
+        if col not in df.columns:
+            continue
+
+        def get_value(value, key):
+            return value.get(key) if isinstance(value, dict) else None
+
+        df["latitude"] = df[col].apply(lambda x: get_value(x, "latitude"))
+        df["longitude"] = df[col].apply(lambda x: get_value(x, "longitude"))
+
+        if df["latitude"].notna().any() and df["longitude"].notna().any():
+            df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+            df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+            return df
+
+    raise ValueError(
+        "NYS DOH 데이터에서 좌표 컬럼을 찾지 못했습니다.\n"
+        f"columns={df.columns.tolist()}"
+    )
+
+
+def build_doh_features(zones: gpd.GeoDataFrame) -> pd.DataFrame:
+    print("[8/8] NYS DOH")
+
+    facilities = pd.read_json(DOH_FACILITY_PATH)
+    certification = pd.read_json(DOH_CERT_PATH)
+
+    # NYC만
+    facilities = facilities[facilities["county"].isin(NYC_COUNTIES)].copy()
+    certification = certification[
+        certification["county"].isin(NYC_COUNTIES)
+    ].copy()
+
+    # Hospital
+    facility_text = (
+        facilities["description"].fillna("").astype(str).str.strip().str.lower()
+    )
+
+    # description은 "Hospital", "Hospital Extension Clinic",
+    # "School Based Hospital Extension Clinic", "Mobile Hospital Extension
+    # Clinic" 4종류뿐이다. Extension Clinic은 병원이 아니라 위성 소규모
+    # 클리닉이므로 정확히 "Hospital"인 것만 남긴다.
+    facilities = facilities[facility_text.eq("hospital")].copy()
+
+    # Bed 정보만
+    certification["measure_value"] = pd.to_numeric(
+        certification["measure_value"], errors="coerce",
+    )
+
+    bed_rows = certification[
+        certification["attribute_type"].fillna("").str.lower().eq("bed")
+    ].copy()
+
+    # permanent가 존재하면 permanent만 사용
+    if "sub_type" in bed_rows.columns:
+        permanent = bed_rows[
+            bed_rows["sub_type"].fillna("").str.lower().eq("permanent")
+        ]
+        if not permanent.empty:
+            bed_rows = permanent
+
+    beds = (
+        bed_rows.groupby("fac_id")["measure_value"]
+        .sum()
+        .rename("hospital_bed_count")
+        .reset_index()
+    )
+
+    facilities["fac_id"] = facilities["fac_id"].astype(str)
+    beds["fac_id"] = beds["fac_id"].astype(str)
+
+    facilities = facilities.merge(beds, on="fac_id", how="left")
+    facilities["hospital_bed_count"] = facilities["hospital_bed_count"].fillna(0)
+
+    # 좌표
+    facilities = extract_doh_coordinates(facilities)
+    facilities = facilities.dropna(subset=["latitude", "longitude"])
+
+    hospital_points = gpd.GeoDataFrame(
+        facilities,
+        geometry=gpd.points_from_xy(facilities["longitude"], facilities["latitude"]),
+        crs=WGS84,
+    )
+
+    spatial_zones = get_spatial_zones(zones).to_crs(WGS84)
+
+    result = (
+        gpd.sjoin(
+            hospital_points,
+            spatial_zones[["location_id", "geometry"]],
+            how="inner",
+            predicate="within",
+        )
+        .groupby("location_id")
+        .agg(doh_hospital_bed_count=("hospital_bed_count", "sum"))
+        # 매칭된 병원이 없는 Zone은 결측이 아니라 진짜 0건이다.
+        .reindex(spatial_zones["location_id"], fill_value=0)
+        .reset_index()
+    )
+
+    return result
+
+
+# ============================================================
 # Integration
 # ============================================================
 
@@ -790,6 +915,7 @@ def build_zone_profile_features() -> pd.DataFrame:
         build_mta_features(zones),
         build_facility_features(zones),
         build_park_features(zones),
+        build_doh_features(zones),
     ]
 
     for features in feature_tables:
