@@ -1,8 +1,8 @@
 """
-Download raw NYS DOH health facility data for zone score features.
+Download raw NYS DOH health facility data for zone profile features.
 
 Outputs:
-data/raw/zone_score/
+data/raw/zone_profile/
 ├── doh_facilities.json
 └── doh_certification.json
 """
@@ -14,7 +14,7 @@ import requests
 
 from zone_profile.download_raw import request_with_retry
 
-RAW_DIR = Path("data/raw/zone_score")
+RAW_DIR = Path("data/raw/zone_profile")
 
 DOH_FACILITY_URL = "https://health.data.ny.gov/resource/vn5v-hh5r.json"
 DOH_CERT_URL = "https://health.data.ny.gov/resource/2g9y-7kqm.json"
