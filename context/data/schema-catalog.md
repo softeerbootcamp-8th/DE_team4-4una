@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 ---
 
 # Table Schema Catalog
@@ -20,11 +20,14 @@ design and must not be invented silently.
 | `speed_hump_reference` | TBD | Source/Bronze reference | One speed-hump road-section record |
 | `osm_traffic_signal` | TBD | Source/Bronze reference | One OSM traffic-signal node |
 | `taxi_zone_lookup` | `dim_taxi_zone` | Reference dimension | One TLC taxi zone |
-| `sensor_event` | `sensor_event` | Bronze on S3 | One vehicle sensor measurement |
+| `vehicle_profile` | `vehicle_profile` | Bronze reference (PostgreSQL) | One vehicle profile |
+| `sensor_event` | `sensor_event` | Bronze on S3 | One vehicle sensor measurement (at-least-once; duplicates possible) |
 | `road_segment` | `road_segment` | Normalized reference | One LION segment per snapshot date |
-| `enriched_segment_reference` | `enriched_segment_reference` | Enriched reference | One segment per integrated reference date |
-| `sensor_events_matched` | `sensor_events_matched` | Silver | One row per Bronze sensor event |
-| `segment_comfort_score` | TBD | Gold | One segment x vehicle profile x score month |
+| `enriched_segment_reference` | `enriched_segment_reference` | Silver reference (PostgreSQL) | One segment per integrated reference date |
+| `processed_sensor_event` | `processed_sensor_event` | Silver on S3 | One row per Bronze `sensor_event` row |
+| `hourly_segment_features` | `hourly_segment_features` | Silver | One hour x segment x vehicle profile feature row |
+| `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
+| `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period |
 
 ## `hvfhv_trip_input`
 
@@ -134,22 +137,44 @@ extract contains only nodes whose `highway` value is `traffic_signals`.
 The required taxi-zone geometry contract has not yet been supplied. The lookup
 alone cannot support deterministic road-point selection.
 
+## `vehicle_profile`
+
+**Layer:** Bronze reference. **Storage:** PostgreSQL. **Grain:** one vehicle profile.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Vehicle profile ID | `vehicle_profile_id` | INTEGER | N | PK | Unique vehicle profile identifier |
+| Profile name | `profile_name` | STRING | N |  | For example `standard_sedan`, `suv` |
+| Vehicle class | `vehicle_class` | STRING | N |  | Sedan, SUV, and so on |
+| Manufacturer | `manufacturer` | STRING | Y |  | Manufacturer |
+| Model name | `model_name` | STRING | Y |  | Vehicle model |
+| Mass | `mass_kg` | DOUBLE | Y |  | Vehicle mass |
+| Wheelbase | `wheelbase_mm` | DOUBLE | Y |  | Wheelbase |
+| Suspension type | `suspension_type` | STRING | Y |  | Suspension type |
+| Vertical sensitivity | `vertical_weight` | DOUBLE | N |  | Weight applied to `accel_z` |
+| Longitudinal sensitivity | `longitudinal_weight` | DOUBLE | N |  | Weight applied to hard braking/acceleration |
+| Lateral sensitivity | `lateral_weight` | DOUBLE | N |  | Weight applied to turning/lateral acceleration |
+| Active flag | `is_active` | BOOLEAN | N |  | Whether the profile is currently in use |
+| Created time | `created_at` | TIMESTAMP | N |  | Profile creation time |
+| Updated time | `updated_at` | TIMESTAMP | N |  | Last modification time |
+
 ## `sensor_event`
 
-**Layer:** Bronze. **Storage:** S3. **Grain:** one sensor measurement.
+**Layer:** Bronze. **Storage:** S3. **Grain:** one sensor measurement. Delivery
+is at-least-once: no data is lost, but duplicates are possible.
 
-`segment_id` is intentionally absent. GPS-to-LION matching occurs in Spark and
-is stored in `sensor_events_matched`. The earlier draft without `trip_seq` is
-superseded by this version.
+`segment_id` is intentionally absent. GPS-to-LION matching occurs downstream and
+is stored in `processed_sensor_event`. `vehicle_id` and the legacy `jerk` alias
+from the earlier draft have been dropped from this version.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | Generated | STRING | N | PK | Deterministic UUID-formatted event identifier |
-| Vehicle ID | `vehicle_id` | Generated | STRING | N |  | Vehicle instance identifier |
+| Sensor event ID | `event_id` | Generated | STRING/UUID | N | PK | Deterministic UUID-formatted event identifier |
 | Vehicle profile | `vehicle_profile_id` | Generated | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | Generated | STRING | N |  | Simulated journey identifier |
 | Trip sequence | `trip_seq` | Generated | BIGINT | N |  | Zero-based sample order within a trip |
 | Event time | `event_time` | Generated | TIMESTAMP | N |  | Sensor measurement time |
+| Event date | `event_date` | Derived from `event_time` | DATE | N | Partition key | S3 daily partitioning and period queries |
 | Latitude | `latitude` | Generated | DOUBLE | N |  | GPS latitude |
 | Longitude | `longitude` | Generated | DOUBLE | N |  | GPS longitude |
 | Speed | `speed_mps` | Generated | DOUBLE | N |  | Meters per second |
@@ -157,11 +182,11 @@ superseded by this version.
 | Longitudinal acceleration | `accel_x` | Generated | DOUBLE | Y |  | Forward/backward acceleration in m/s² |
 | Lateral acceleration | `accel_y` | Generated | DOUBLE | Y |  | Side-to-side acceleration in m/s² |
 | Vertical acceleration | `accel_z` | Generated | DOUBLE | N |  | Vertical vibration or impact in m/s² |
-| Legacy jerk | `jerk` | Generated | DOUBLE | N |  | Compatibility alias of `jerk_x` in m/s³ |
-| Longitudinal jerk | `jerk_x` | Generated | DOUBLE | N |  | Change in `accel_x` per second in m/s³ |
-| Lateral jerk | `jerk_y` | Generated | DOUBLE | N |  | Change in `accel_y` per second in m/s³ |
-| Vertical jerk | `jerk_z` | Generated | DOUBLE | N |  | Change in `accel_z` per second in m/s³ |
-| Steering vibration | `steering_vibration` | Generated | DOUBLE | N |  | Non-negative RMS-like steering-wheel acceleration amplitude in m/s² |
+| Longitudinal jerk | `jerk_x` | Generated | DOUBLE | Y |  | Change in `accel_x` per second in m/s³; hard-accel/brake characteristic |
+| Lateral jerk | `jerk_y` | Generated | DOUBLE | Y |  | Change in `accel_y` per second in m/s³; turning/lane-change characteristic |
+| Vertical jerk | `jerk_z` | Generated | DOUBLE | Y |  | Change in `accel_z` per second in m/s³; speed-hump/pavement-impact characteristic |
+| Steering vibration | `steering_vibration` | Generated | DOUBLE | Y |  | Steering-wheel vibration amplitude in m/s² |
+| Steering angle | `steering_angle` | Generated | DOUBLE | Y |  | Steering-wheel angle in degrees; left (−) / right (+) |
 | Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Bronze load time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Simulation and ingestion run identifier |
 
@@ -198,7 +223,8 @@ decision in `open-questions.md`.
 
 ## `enriched_segment_reference`
 
-**Grain:** one road segment per integrated `reference_date`.
+**Layer:** Silver. **Storage:** PostgreSQL. **Grain:** one road segment per
+integrated `reference_date`.
 
 **Primary key:** `(segment_id, reference_date)`.
 
@@ -225,21 +251,26 @@ A corrected rebuild for the same `reference_date` updates the existing primary-k
 row and advances `updated_at`; it does not create a new effective date merely
 because processing occurred later. Audit history requirements remain open.
 
-## `sensor_events_matched`
+## `processed_sensor_event`
 
-**Layer:** Silver. **Grain:** exactly one row for every Bronze `sensor_event` row.
+**Layer:** Silver. **Storage:** S3 (Transform 1 output). **Grain:** exactly one
+row for every Bronze `sensor_event` row (1:1).
 
-It performs GPS-to-LION map matching and versioned threshold-based event
-classification. Unmatched and ambiguous observations are retained.
+Cleans and validates the Bronze sensor signal. The supplied column list below
+does **not** include GPS-to-LION map matching or threshold-based event
+classification (no `segment_id`, match, or brake/accel/discomfort-flag
+columns), even though those are mentioned as part of this table's purpose.
+Whether matching/classification lands here, in a separate contract, or later in
+this table is an **open question** — do not assume a location for it.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING | N | PK | UUID-formatted Bronze event identifier |
-| Vehicle ID | `vehicle_id` | `vehicle_id` | STRING | N |  | Vehicle instance |
+| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING/UUID | N | PK | Bronze event identifier |
 | Vehicle profile | `vehicle_profile_id` | `vehicle_profile_id` | INTEGER | N | FK | References `vehicle_profile` |
 | Trip ID | `trip_id` | `trip_id` | STRING | N |  | Simulated journey |
 | Trip sequence | `trip_seq` | `trip_seq` | BIGINT | N |  | Sample order within the trip |
 | Event time | `event_time` | `event_time` | TIMESTAMP | N |  | Sensor measurement time |
+| Event date | `event_date` | Derived from `event_time` | DATE | N |  | Sensor measurement date |
 | Latitude | `latitude` | `latitude` | DOUBLE | N |  | Validated latitude |
 | Longitude | `longitude` | `longitude` | DOUBLE | N |  | Validated longitude |
 | Speed | `speed_mps` | `speed_mps` | DOUBLE | N |  | Validated meters per second |
@@ -247,63 +278,110 @@ classification. Unmatched and ambiguous observations are retained.
 | Longitudinal acceleration | `accel_x` | `accel_x` | DOUBLE | Y |  | Forward/backward acceleration |
 | Lateral acceleration | `accel_y` | `accel_y` | DOUBLE | Y |  | Side-to-side acceleration |
 | Vertical acceleration | `accel_z` | `accel_z` | DOUBLE | N |  | Vertical impact or vibration |
-| Legacy jerk | `jerk` | `jerk` | DOUBLE | N |  | Compatibility alias of `jerk_x`; nullability conflict is open |
-| Longitudinal jerk | `jerk_x` | `jerk_x` | DOUBLE | N |  | Change in `accel_x` per second; nullability conflict is open |
-| Lateral jerk | `jerk_y` | `jerk_y` | DOUBLE | N |  | Change in `accel_y` per second; nullability conflict is open |
-| Vertical jerk | `jerk_z` | `jerk_z` | DOUBLE | N |  | Change in `accel_z` per second; nullability conflict is open |
-| Steering vibration | `steering_vibration` | `steering_vibration` | DOUBLE | N |  | Validated non-negative RMS-like steering-wheel acceleration amplitude in m/s² |
-| Road segment | `segment_id` | GPS-LION match | STRING | Y | FK | Matched canonical LION segment |
-| LION snapshot date | `road_snapshot_date` | Matching reference | DATE | N | FK | `road_segment` version used |
-| Match status | `match_status` | Derived | STRING | N |  | For example `MATCHED`, `UNMATCHED`, or `AMBIGUOUS` |
-| Match distance | `match_distance_m` | Derived | DOUBLE | Y |  | Distance from point to matched segment |
-| Match method | `match_method` | Derived | STRING | Y |  | For example nearest or distance+heading |
-| Heading difference | `heading_diff_deg` | Derived | DOUBLE | Y |  | Difference between vehicle and road direction |
-| Candidate count | `candidate_count` | Derived | INTEGER | N |  | Segments inside the matching radius |
-| Hard-brake flag | `brake_flag` | `accel_x`, `jerk_x` | BOOLEAN | N |  | Versioned threshold result |
-| Hard-acceleration flag | `accel_flag` | `accel_x`, `jerk_x` | BOOLEAN | N |  | Versioned threshold result |
-| Discomfort flag | `discomfort_flag` | Sensor values | BOOLEAN | N |  | Versioned discomfort classification |
-| Scoring version | `scoring_version` | Derived | STRING | N |  | Threshold and classification rule version |
+| Longitudinal jerk | `jerk_x` | `jerk_x` | DOUBLE | Y |  | Change in `accel_x` per second; hard-accel/brake characteristic |
+| Lateral jerk | `jerk_y` | `jerk_y` | DOUBLE | Y |  | Change in `accel_y` per second; turning/lane-change characteristic |
+| Vertical jerk | `jerk_z` | `jerk_z` | DOUBLE | Y |  | Change in `accel_z` per second; speed-hump/pavement-impact characteristic |
+| Steering vibration | `steering_vibration` | `steering_vibration` | DOUBLE | Y |  | Steering-wheel vibration amplitude in m/s² |
+| Steering angle | `steering_angle` | `steering_angle` | DOUBLE | Y |  | Steering-wheel angle |
 | Processed time | `_processed_at` | Derived | TIMESTAMP | N |  | Silver completion time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Spark/Airflow ETL run identifier |
 
+## `hourly_segment_features`
+
+**Layer:** Silver. **Grain:** one row per hour x LION segment x vehicle
+profile — sensor events aggregated into comfort-score input features.
+
+**Primary key:** `(data_period_start, segment_id, vehicle_profile_id)`.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Road segment | `segment_id` | STRING | N | PK, FK | LION-based road segment |
+| Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile` |
+| Data-period start | `data_period_start` | TIMESTAMP | N | PK | Start of the one-hour window used for the score |
+| Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the one-hour window used for the score |
+| LION snapshot date | `road_snapshot_date` | DATE | N | FK | `road_segment` version used for map matching |
+| Average speed | `avg_speed_mps` | DOUBLE | Y |  | Average speed during the hour |
+| Longitudinal acceleration RMS | `rms_accel_x` | DOUBLE | Y |  | RMS of longitudinal acceleration; sustained accel/brake intensity |
+| Lateral acceleration RMS | `rms_accel_y` | DOUBLE | Y |  | RMS of lateral acceleration; sustained side-to-side intensity |
+| Vertical acceleration RMS | `rms_accel_z` | DOUBLE | Y |  | RMS of vertical acceleration; sustained road-vibration intensity |
+| Longitudinal acceleration P95 | `p95_abs_accel_x` | DOUBLE | Y |  | 95th percentile of absolute longitudinal acceleration |
+| Lateral acceleration P95 | `p95_abs_accel_y` | DOUBLE | Y |  | 95th percentile of absolute lateral acceleration |
+| Vertical acceleration P95 | `p95_abs_accel_z` | DOUBLE | Y |  | 95th percentile of absolute vertical acceleration; recurring strong-impact level |
+| Longitudinal jerk RMS | `rms_jerk_x` | DOUBLE | Y |  | RMS of longitudinal jerk |
+| Lateral jerk RMS | `rms_jerk_y` | DOUBLE | Y |  | RMS of lateral jerk |
+| Vertical jerk RMS | `rms_jerk_z` | DOUBLE | Y |  | RMS of vertical jerk |
+| Longitudinal jerk P95 | `p95_abs_jerk_x` | DOUBLE | Y |  | 95th percentile of absolute longitudinal jerk |
+| Lateral jerk P95 | `p95_abs_jerk_y` | DOUBLE | Y |  | 95th percentile of absolute lateral jerk |
+| Vertical jerk P95 | `p95_abs_jerk_z` | DOUBLE | Y |  | 95th percentile of absolute vertical jerk |
+| Hard-brake count | `hard_brake_count` | INTEGER | N |  | Hard-braking events judged during the hour |
+| Hard-acceleration count | `hard_accel_count` | INTEGER | N |  | Hard-acceleration events judged during the hour |
+| Sharp-steer count | `sharp_steer_count` | INTEGER | N |  | Sharp-steering events by steering angle/rate thresholds |
+| Steering-reversal count | `steer_reversal_count` | INTEGER | N |  | Meaningful `steering_angle` direction reversals |
+| Steering-rate RMS | `rms_steering_rate` | DOUBLE | Y |  | RMS of `steering_angle` rate of change; expresses steering abruptness |
+| Steering-vibration RMS | `rms_steering_vibration` | DOUBLE | Y |  | Steering-system vibration intensity during the hour |
+| Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used to compute the features |
+| Trip count | `trip_count` | BIGINT | N |  | Distinct trips passing through this segment/hour; feature-reliability signal |
+| Feature rule version | `feature_version` | STRING | N |  | Hard-brake/accel/steer threshold and feature-calculation rule version |
+| Processed time | `_processed_at` | TIMESTAMP | N |  | Feature generation completion time |
+| Run ID | `_run_id` | STRING | N |  | Spark/Airflow run identifier |
+
+## `hourly_comfort_score`
+
+**Layer:** Silver. **Grain:** one row per hour x LION segment x vehicle
+profile.
+
+**Primary key:** `(segment_id, vehicle_profile_id, data_period_start)`.
+Whether `scoring_version` also belongs in the primary key is an open question.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Road segment | `segment_id` | STRING | N | PK, FK | LION-based road segment |
+| Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile` |
+| Data-period start | `data_period_start` | TIMESTAMP | N | PK | Start of the one-hour scoring window |
+| Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the one-hour scoring window |
+| LION snapshot date | `road_snapshot_date` | DATE | N | FK | `road_segment` version used for map matching |
+| Vertical comfort score | `vertical_score` | DOUBLE | N |  | Computed from vertical acceleration/jerk |
+| Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Computed from accel/brake and longitudinal jerk |
+| Lateral comfort score | `lateral_score` | DOUBLE | N |  | Computed from lateral acceleration/jerk and steering characteristics |
+| Comfort score | `comfort_score` | DOUBLE | N |  | Final sensor-based score combining the three directional scores |
+| Scoring version | `scoring_version` | STRING | N | Possible PK (open) | Score formula, weighting, and rule version |
+| Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used to compute the score |
+| Run ID | `_run_id` | STRING | N |  | Spark/Airflow ETL run identifier |
+| Processed time | `_processed_at` | TIMESTAMP | N |  | Processing completion time |
+
 ## `segment_comfort_score`
 
-The physical table name is not yet confirmed.
+The physical table name is not yet confirmed. **Layer:** Gold. **Storage:**
+PostgreSQL.
 
-**Grain:** one LION segment x vehicle profile x score month.
+**Grain:** one LION segment x vehicle profile x score period, rolled up from
+`hourly_comfort_score`.
 
-**Primary key:** `(segment_id, vehicle_profile_id, score_month)`.
+**Primary key:** the supplied design marks only `(segment_id,
+vehicle_profile_id)` as key columns. Despite the per-period grain, neither
+`data_period_start`/`data_period_end` nor `reference_date` is marked as part of
+the key — this is an **open question**; do not assume a period-based key
+without confirmation.
 
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Road segment | `segment_id` | STRING | N | PK, FK | Canonical LION segment |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile` |
-| Score month | `score_month` | DATE | N | PK | Month to which the score applies, stored as the first day |
-| Data-period start | `data_period_start` | DATE | N |  | First included driving-data date |
-| Data-period end | `data_period_end` | DATE | N |  | Last included driving-data date |
+| Data-period start | `data_period_start` | DATE | N |  | Start date of the driving-data period used for the score |
+| Data-period end | `data_period_end` | DATE | N |  | End date of the driving-data period used for the score |
 | Reference date | `reference_date` | DATE | N | FK | `enriched_segment_reference` version used |
 | Comfort score | `comfort_score` | DOUBLE | N |  | Final score from 0 through 100 |
-| Vertical score | `vertical_score` | DOUBLE | N |  | Based on `accel_z`, pavement, and humps |
-| Longitudinal score | `longitudinal_score` | DOUBLE | N |  | Based on acceleration, braking, and jerk |
-| Lateral score | `lateral_score` | DOUBLE | Y |  | Based on lateral acceleration and curve features |
-| Pavement score | `pavement_score` | DOUBLE | Y |  | Pavement contribution to comfort |
-| Average speed | `avg_speed_mps` | DOUBLE | Y |  | Average segment speed in the driving-data period |
-| Vertical acceleration P95 | `p95_accel_z` | DOUBLE | Y |  | 95th percentile of vertical acceleration |
-| Jerk P95 | `p95_jerk` | DOUBLE | Y |  | 95th percentile of jerk |
-| Hard-brake count | `hard_brake_count` | INTEGER | N |  | Hard-braking events in the driving-data period |
-| Hard-acceleration count | `hard_accel_count` | INTEGER | N |  | Hard-acceleration events in the driving-data period |
-| Discomfort-event count | `discomfort_event_count` | INTEGER | N |  | All discomfort events in the driving-data period |
 | Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used by the score |
 | Confidence score | `confidence_score` | DOUBLE | N |  | Coverage and data-quality confidence |
 | Score version | `score_version` | STRING | N |  | Comfort formula version |
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Gold calculation time |
+| Speed band | TBD | TBD | TBD |  | Which speed band the row belongs to; column name and type not yet supplied |
 
 ## Required but missing contracts
 
 The following referenced entities need schemas before dependent contracts can be
 implemented completely:
 
-- `vehicle_profile`
 - taxi-zone geometry keyed by `location_id`
 - source snapshot and pipeline-run metadata
 - rejection and quarantine records
