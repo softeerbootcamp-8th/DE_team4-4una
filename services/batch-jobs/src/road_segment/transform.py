@@ -13,9 +13,11 @@ FEET_TO_METERS = 0.3048
 
 PROFILE_COLUMNS = ("FeatureTyp", "SegmentTyp", "RW_TYPE", "Status")
 
-# 차량 주행 후보 FeatureTyp. "A"/"C"는 현재 LION snapshot에서
-# 차량용 RW_TYPE과의 조합을 확인하여 포함한다.
 VEHICLE_FEATURE_TYPES = frozenset({"0", "6", "A", "C"})
+"""
+차량 주행 후보 FeatureTyp. "A"/"C"는 현재 LION snapshot에서
+차량용 RW_TYPE과의 조합을 확인하여 포함한다.
+"""
 
 CONSTRUCTED_STATUS = "2"
 
@@ -104,9 +106,11 @@ def is_vehicle_segment(row: dict[str, object]) -> bool:
 def select_representative_rows(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Keep exactly one row per SegmentID."""
-    # 중복 SegmentID는 Street 별칭만 다르고 나머지 값은 동일하므로
-    # OBJECTID가 가장 작은 행을 대표로 남긴다.
+    """Keep exactly one row per SegmentID.
+
+    중복 SegmentID는 Street 별칭만 다르고 나머지 값은 동일하므로
+    OBJECTID가 가장 작은 행을 대표로 남긴다.
+    """
     best: dict[str, dict[str, object]] = {}
     for row in rows:
         segment_id = row.get("SegmentID")
