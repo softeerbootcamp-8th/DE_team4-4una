@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 from batch_jobs.bronze_reader import read_bronze_sensor_events
-from batch_jobs.schemas import BRONZE_SENSOR_EVENT_SCHEMA, CORRUPT_RECORD_COLUMN
+from batch_jobs.schemas import (
+    BRONZE_SENSOR_EVENT_SCHEMA,
+    PARSE_FAILED_COLUMN,
+    RAW_RECORD_COLUMN,
+)
 from pyspark.sql import SparkSession
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
@@ -37,8 +41,8 @@ VALID_EVENT = {
     "_run_id": "nyc-actual-20240201-v4",
 }
 
-# 중괄호와 문자열이 닫히지 않은 채 잘린 줄
-MALFORMED_LINE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
+# 중괄호와 문자열이 닫히지 않은 채 잘린 값
+MALFORMED_VALUE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
 
 
 @pytest.fixture(scope="session")
@@ -55,42 +59,63 @@ def spark():
     session.stop()
 
 
-def write_jsonl(directory: Path, *lines: str) -> Path:
-    path = directory / "sensor_event.jsonl"
-    path.write_text("\n".join(lines) + "\n")
+def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:
+    """stream-processor가 적재하는 형태로 Parquet을 쓴다."""
+    path = directory / "bronze"
+    rows = [(value,) for value in values]
+    spark.createDataFrame(rows, "value string").write.parquet(str(path))
     return path
 
 
-def valid_line(**overrides: object) -> str:
+def valid_value(**overrides: object) -> str:
     return json.dumps(VALID_EVENT | overrides)
 
 
 def test_reads_every_row_with_the_declared_columns(spark, tmp_path):
-    # 입력 두 줄이 두 행으로 읽히고, 컬럼이 선언한 스키마와 정확히 같은지 확인한다.
-    path = write_jsonl(tmp_path, valid_line(trip_seq=47), valid_line(trip_seq=48))
+    # 입력 두 행이 두 행으로 읽히고, 스키마 컬럼에 원본과 파싱 실패 컬럼이 붙는지 확인한다.
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(trip_seq=47), valid_value(trip_seq=48)
+    )
 
     df = read_bronze_sensor_events(spark, path)
 
     assert df.count() == 2
-    assert df.columns == [field.name for field in BRONZE_SENSOR_EVENT_SCHEMA.fields]
+    assert df.columns == [
+        *[field.name for field in BRONZE_SENSOR_EVENT_SCHEMA.fields],
+        RAW_RECORD_COLUMN,
+        PARSE_FAILED_COLUMN,
+    ]
 
 
-def test_malformed_line_does_not_raise_and_keeps_the_row(spark, tmp_path):
-    # 깨진 줄이 섞여도 예외 없이 읽히고, 그 줄도 버려지지 않고 행으로 남는지 확인한다.
-    # read()는 계획만 세우므로 collect()까지 해야 파싱이 실제로 실행된다.
-    path = write_jsonl(tmp_path, valid_line(), MALFORMED_LINE, valid_line(trip_seq=48))
+def test_malformed_value_does_not_raise_and_keeps_the_row(spark, tmp_path):
+    # 깨진 값이 섞여도 예외 없이 읽히고, 그 행이 버려지지 않는지 확인한다.
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(), MALFORMED_VALUE, valid_value(trip_seq=48)
+    )
 
     rows = read_bronze_sensor_events(spark, path).collect()
 
     assert len(rows) == 3
 
 
-def test_malformed_line_is_preserved_in_the_corrupt_record_column(spark, tmp_path):
-    # 깨진 줄의 원본 문자열이 corrupt record 컬럼에 그대로 보존되는지 확인한다.
-    path = write_jsonl(tmp_path, valid_line(), MALFORMED_LINE)
+def test_malformed_value_is_flagged_and_kept_as_raw_record(spark, tmp_path):
+    # 깨진 값이 파싱 실패로 표시되고 원본 문자열이 그대로 남는지 확인한다.
+    path = write_bronze_parquet(spark, tmp_path, valid_value(), MALFORMED_VALUE)
 
     rows = read_bronze_sensor_events(spark, path).collect()
 
-    corrupt = [row for row in rows if row[CORRUPT_RECORD_COLUMN] is not None]
-    assert len(corrupt) == 1
-    assert corrupt[0][CORRUPT_RECORD_COLUMN] == MALFORMED_LINE
+    failed = [row for row in rows if row[PARSE_FAILED_COLUMN]]
+    assert len(failed) == 1
+    assert failed[0][RAW_RECORD_COLUMN] == MALFORMED_VALUE
+
+
+def test_parsed_row_keeps_its_original_value_as_raw_record(spark, tmp_path):
+    # 파싱에 성공한 행도 적재된 원본 문자열을 그대로 들고 있는지 확인한다.
+    value = valid_value()
+    path = write_bronze_parquet(spark, tmp_path, value)
+
+    row = read_bronze_sensor_events(spark, path).collect()[0]
+
+    assert row[PARSE_FAILED_COLUMN] is False
+    assert row[RAW_RECORD_COLUMN] == value
+    assert row["event_id"] == VALID_EVENT["event_id"]

@@ -52,13 +52,15 @@ def spark():
     session.stop()
 
 
-def write_jsonl(directory: Path, *lines: str) -> Path:
-    path = directory / "sensor_event.jsonl"
-    path.write_text("\n".join(lines) + "\n")
+def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:
+    """stream-processor가 적재하는 형태로 Parquet을 쓴다."""
+    path = directory / "bronze"
+    rows = [(value,) for value in values]
+    spark.createDataFrame(rows, "value string").write.parquet(str(path))
     return path
 
 
-def valid_line(**overrides: object) -> str:
+def valid_value(**overrides: object) -> str:
     return json.dumps(VALID_EVENT | overrides)
 
 
@@ -69,7 +71,7 @@ def split(spark, path):
 
 def test_value_above_its_maximum_is_quarantined(spark, tmp_path):
     # 상한을 넘은 속도가 OUT_OF_RANGE 사유로 격리되는지 확인한다.
-    path = write_jsonl(tmp_path, valid_line(), valid_line(speed_mps=99.0))
+    path = write_bronze_parquet(spark, tmp_path, valid_value(), valid_value(speed_mps=99.0))
 
     result = split(spark, path)
 
@@ -79,9 +81,12 @@ def test_value_above_its_maximum_is_quarantined(spark, tmp_path):
 
 def test_negative_direction_values_are_not_quarantined(spark, tmp_path):
     # 가속도, jerk, 조향각, 경도의 음수는 방향을 담은 정상 값이라 격리되지 않는다.
-    path = write_jsonl(
+    path = write_bronze_parquet(
+        spark,
         tmp_path,
-        valid_line(accel_x=-29.9, accel_y=-2.9, accel_z=-0.01, jerk_x=-299.0, steering_angle=-35.0),
+        valid_value(
+            accel_x=-29.9, accel_y=-2.9, accel_z=-0.01, jerk_x=-299.0, steering_angle=-35.0
+        ),
     )
 
     result = split(spark, path)
@@ -92,21 +97,21 @@ def test_negative_direction_values_are_not_quarantined(spark, tmp_path):
 
 def test_zero_speed_is_not_quarantined(spark, tmp_path):
     # 정차 상태의 속도 0은 하한과 같은 값이라 격리되지 않는다.
-    path = write_jsonl(tmp_path, valid_line(speed_mps=0.0))
+    path = write_bronze_parquet(spark, tmp_path, valid_value(speed_mps=0.0))
 
     assert split(spark, path).quarantined.collect() == []
 
 
 def test_null_optional_value_is_not_quarantined(spark, tmp_path):
     # 필수가 아닌 컬럼이 비어 있는 것은 범위 위반이 아니다.
-    path = write_jsonl(tmp_path, valid_line(heading=None, accel_x=None))
+    path = write_bronze_parquet(spark, tmp_path, valid_value(heading=None, accel_x=None))
 
     assert split(spark, path).quarantined.collect() == []
 
 
 def test_reject_detail_names_the_violating_columns_and_values(spark, tmp_path):
     # 판정 상세에 위반한 컬럼과 실제 값이 설정 순서대로 들어가는지 확인한다.
-    path = write_jsonl(tmp_path, valid_line(latitude=10.0, speed_mps=99.0))
+    path = write_bronze_parquet(spark, tmp_path, valid_value(latitude=10.0, speed_mps=99.0))
 
     rows = split(spark, path).quarantined.collect()
 
