@@ -1,4 +1,4 @@
-"""Environment-driven configuration for the Kafka console-sink stream."""
+"""Environment-driven configuration for the Kafka-to-Bronze stream."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ class StreamConfig:
     bootstrap_servers: str
     topic: str
     trigger_interval_seconds: float
-    checkpoint_location: str
+    bronze_output_path: str
+    bronze_checkpoint_location: str
     starting_offsets: str
 
     @classmethod
@@ -28,8 +29,12 @@ class StreamConfig:
             bootstrap_servers=source.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
             topic=source.get("KAFKA_SENSOR_TOPIC", "sensor-events"),
             trigger_interval_seconds=float(source.get("STREAM_TRIGGER_INTERVAL_SECONDS", "5")),
-            checkpoint_location=source.get(
-                "STREAM_CHECKPOINT_LOCATION", "checkpoints/stream-processor"
+            bronze_output_path=source.get(
+                "STREAM_BRONZE_OUTPUT_PATH", "data/local-lake/bronze/sensor-events"
+            ),
+            bronze_checkpoint_location=source.get(
+                "STREAM_BRONZE_CHECKPOINT_LOCATION",
+                "checkpoints/bronze-sensor-events",
             ),
             # 체크포인트가 없을 때만 적용되며, 체크포인트가 있으면 이 값과 무관하게
             # Spark가 체크포인트 기준으로 재개한다 (재시작 시 재개 조건 충족).
