@@ -1,13 +1,13 @@
-"""Entry point: subscribe to `sensor-events` and print records to the console."""
+"""Entry point for the Kafka-to-local-Bronze streaming job."""
 
 from __future__ import annotations
 
 import logging
-import sys
 
 import pyspark
 from pyspark.sql import SparkSession
 
+from stream_processor.bronze_sink import write_bronze_stream
 from stream_processor.config import StreamConfig
 from stream_processor.kafka_source import read_kafka_stream
 from stream_processor.progress import ProgressLogger
@@ -21,6 +21,7 @@ def build_spark_session() -> SparkSession:
     return (
         SparkSession.builder.appName("stream-processor")
         .config("spark.jars.packages", KAFKA_PACKAGE)
+        .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
     )
 
@@ -35,18 +36,5 @@ def main() -> None:
     spark.streams.addListener(ProgressLogger())
 
     stream_df = read_kafka_stream(spark, config)
-    # 완료 조건 검증용: 실제 출력 스키마를 stdout에 남겨 PR에 그대로 첨부할 수 있게 한다.
-    # stdout이 파일로 리다이렉트되면 완전 버퍼링되어, 종료 시그널을 받으면 이 출력이
-    # flush되지 못하고 사라질 수 있어 즉시 flush한다.
-    stream_df.printSchema()
-    sys.stdout.flush()
-
-    query = (
-        stream_df.writeStream.format("console")
-        .option("truncate", "false")
-        .option("checkpointLocation", config.checkpoint_location)
-        .trigger(processingTime=f"{config.trigger_interval_seconds} seconds")
-        .outputMode("append")
-        .start()
-    )
+    query = write_bronze_stream(stream_df, config)
     query.awaitTermination()
