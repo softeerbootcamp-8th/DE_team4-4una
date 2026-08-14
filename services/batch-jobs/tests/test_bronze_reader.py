@@ -36,6 +36,9 @@ VALID_EVENT = {
     "_run_id": "nyc-actual-20240201-v4",
 }
 
+# 중괄호와 문자열이 닫히지 않은 채 잘린 줄
+MALFORMED_LINE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
+
 
 @pytest.fixture(scope="session")
 def spark():
@@ -69,3 +72,24 @@ def test_reads_every_row_with_the_declared_columns(spark, tmp_path):
 
     assert df.count() == 2
     assert df.columns == [field.name for field in BRONZE_SENSOR_EVENT_SCHEMA.fields]
+
+
+def test_malformed_line_does_not_raise_and_keeps_the_row(spark, tmp_path):
+    # 깨진 줄이 섞여도 예외 없이 읽히고, 그 줄도 버려지지 않고 행으로 남는지 확인한다.
+    # read()는 계획만 세우므로 collect()까지 해야 파싱이 실제로 실행된다.
+    path = write_jsonl(tmp_path, valid_line(), MALFORMED_LINE, valid_line(trip_seq=48))
+
+    rows = read_bronze_sensor_events(spark, path).collect()
+
+    assert len(rows) == 3
+
+
+def test_malformed_line_is_preserved_in_the_corrupt_record_column(spark, tmp_path):
+    # 깨진 줄의 원본 문자열이 corrupt record 컬럼에 그대로 보존되는지 확인한다.
+    path = write_jsonl(tmp_path, valid_line(), MALFORMED_LINE)
+
+    rows = read_bronze_sensor_events(spark, path).collect()
+
+    corrupt = [row for row in rows if row[CORRUPT_RECORD_COLUMN] is not None]
+    assert len(corrupt) == 1
+    assert corrupt[0][CORRUPT_RECORD_COLUMN] == MALFORMED_LINE
