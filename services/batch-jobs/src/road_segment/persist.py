@@ -1,4 +1,8 @@
-"""Write validated road_segment records to Parquet and verify the result.
+"""Write validated road_segment records to snapshot-partitioned Parquet.
+
+Storage layout: `<base_dir>/snapshot_date=<date>/data.parquet`. One partition
+per snapshot_date; rerunning the same snapshot_date overwrites only that
+partition's single file, leaving every other partition untouched.
 
 ingested_at은 항상 UTC(timezone-aware)라는 계약이며, DuckDB의 plain
 TIMESTAMP는 세션 타임존으로 재해석해 값을 조용히 바꿔버리므로
@@ -8,7 +12,7 @@ TIMESTAMPTZ를 사용해 실제 시각(instant)이 보존되게 한다.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -49,10 +53,18 @@ class ParquetSummary:
     columns: tuple[tuple[str, str], ...]
 
 
-def write_road_segment_parquet(records: list[RoadSegmentRecord], path: Path) -> None:
+def write_road_segment_snapshot(records: list[RoadSegmentRecord], base_dir: Path) -> Path:
+    if not records:
+        raise ValueError("no records to write")
     for record in records:
         require_utc(record)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_date = require_single_snapshot_date(records)
+    require_unique_segment_ids(records)
+
+    partition_dir = base_dir / f"snapshot_date={snapshot_date.isoformat()}"
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    path = partition_dir / "data.parquet"
+
     connection = duckdb.connect()
     try:
         connection.execute(CREATE_TABLE_SQL)
@@ -60,6 +72,26 @@ def write_road_segment_parquet(records: list[RoadSegmentRecord], path: Path) -> 
         copy_to_parquet(connection, path)
     finally:
         connection.close()
+    return path
+
+
+def require_single_snapshot_date(records: list[RoadSegmentRecord]) -> date:
+    snapshot_dates = {record.snapshot_date for record in records}
+    if len(snapshot_dates) > 1:
+        raise ValueError(
+            f"records span multiple snapshot_date values: {sorted(snapshot_dates)}; "
+            "a partition holds exactly one snapshot_date"
+        )
+    return next(iter(snapshot_dates))
+
+
+def require_unique_segment_ids(records: list[RoadSegmentRecord]) -> None:
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.segment_id] = counts.get(record.segment_id, 0) + 1
+    duplicates = sorted(segment_id for segment_id, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"duplicate segment_id within snapshot: {duplicates}")
 
 
 def require_utc(record: RoadSegmentRecord) -> None:
@@ -105,7 +137,10 @@ def _as_row(record: RoadSegmentRecord) -> tuple[object, ...]:
     )
 
 
-def read_road_segment_parquet(path: Path) -> ParquetSummary:
+def read_road_segment_parquet(path: Path | str) -> ParquetSummary:
+    # path는 단일 partition 파일(Path)이거나, 전체 history를 한 데이터셋으로
+    # 조회하기 위한 glob 문자열(예: "<base_dir>/snapshot_date=*/data.parquet")
+    # 둘 다 될 수 있다.
     connection = duckdb.connect()
     try:
         escaped_path = str(path).replace("'", "''")
