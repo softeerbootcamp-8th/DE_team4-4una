@@ -19,8 +19,8 @@ DUPLICATE_EVENT = "DUPLICATE_EVENT"
 # 중복 판정을 위해 잠시 붙였다가 결과에서 다시 떼어내는 컬럼
 _DUPLICATE_RANK = "_duplicate_rank"
 
-# 설정의 deduplication.priority 값과 잔존 행을 고르는 정렬 기준의 대응
-_DEDUPLICATION_ORDERS = {"latest_ingested_at": F.col("_ingested_at").desc()}
+# 설정의 deduplication.priority 값과 잔존 행을 고를 때 내림차순 정렬할 컬럼의 대응
+_DEDUPLICATION_ORDER_COLUMNS = {"latest_ingested_at": "_ingested_at"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +138,9 @@ def split_duplicate_events(
 
 
 def _deduplication_order(priority: str) -> Column:
-    if priority not in _DEDUPLICATION_ORDERS:
+    if priority not in _DEDUPLICATION_ORDER_COLUMNS:
         raise ValueError(f"unsupported deduplication priority: {priority}")
-    return _DEDUPLICATION_ORDERS[priority]
+    return F.col(_DEDUPLICATION_ORDER_COLUMNS[priority]).desc()
 
 
 def _range_violations(config: CleansingConfig) -> Column:
