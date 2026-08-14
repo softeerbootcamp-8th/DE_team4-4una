@@ -53,13 +53,22 @@ def lion_feature(row: dict[str, object]) -> dict[str, object]:
     return {"type": "Feature", "properties": properties, "geometry": row["_geometry"]}
 
 
-def test_reproject_to_target_crs_converts_wgs84_to_state_plane_feet() -> None:
+def test_reproject_to_target_crs_converts_wgs84_to_state_plane_meters() -> None:
     point = shapely.Point(-73.99, 40.67)
 
     projected = reproject_to_target_crs(point)
 
-    assert projected.x > 100_000
-    assert projected.y > 100_000
+    assert projected.x > 10_000
+    assert projected.y > 10_000
+
+
+def test_reproject_to_target_crs_distance_is_reasonable_in_meters() -> None:
+    # 위도 0.001도 차이는 어디서나 약 111m. feet 단위였다면 약 364ft로
+    # 이 범위를 크게 벗어나므로, meter 단위로 나온다는 걸 확인하는 회귀 테스트.
+    point_a = reproject_to_target_crs(shapely.Point(-73.99, 40.700))
+    point_b = reproject_to_target_crs(shapely.Point(-73.99, 40.701))
+
+    assert 100 < point_a.distance(point_b) < 120
 
 
 def test_normalize_line_geometry_returns_none_for_missing_geometry() -> None:
@@ -186,6 +195,6 @@ def test_build_segment_geometries_excludes_non_vehicle_and_null_geometry(
     assert report.excluded_geometry_count == 1
 
 
-def test_crs_constants_are_wgs84_source_and_state_plane_target() -> None:
+def test_crs_constants_are_wgs84_source_and_state_plane_meters_target() -> None:
     assert SOURCE_CRS == "EPSG:4326"
-    assert TARGET_CRS == "EPSG:2263"
+    assert TARGET_CRS == "EPSG:32118"
