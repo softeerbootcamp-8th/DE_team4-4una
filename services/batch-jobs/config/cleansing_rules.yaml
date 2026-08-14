@@ -22,7 +22,6 @@ required_columns:
   - longitude
   - speed_mps
   - accel_z
-  - _ingested_at
   - _run_id
 
 # 컬럼별 유효 범위(OUT_OF_RANGE 판정 대상).
@@ -95,8 +94,8 @@ negative_allowed:
   steering_vibration: false
   steering_angle: true
 
-# 중복 제거 키와 우선순위. event_id 중복 시 _ingested_at이 가장 최신인 행만 남긴다.
+# 중복 제거 키와 우선순위. event_id 중복 시 아무 행이나 하나만 남긴다.
 deduplication:
   key:
     - event_id
-  priority: latest_ingested_at
+  priority: any
