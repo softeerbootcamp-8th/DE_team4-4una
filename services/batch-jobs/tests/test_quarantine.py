@@ -114,7 +114,8 @@ def test_no_row_is_lost_and_quarantine_matches_its_schema(spark, tmp_path):
 
     result = split(spark, path)
 
-    assert result.passed.count() + result.quarantined.count() == 4
+    assert len(result.passed.collect()) == 2
+    assert len(result.quarantined.collect()) == 2
     assert result.quarantined.columns == [
         field.name for field in SENSOR_EVENT_QUARANTINE_SCHEMA.fields
     ]
