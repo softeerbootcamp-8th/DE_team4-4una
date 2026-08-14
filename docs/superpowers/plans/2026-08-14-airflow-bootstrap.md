@@ -446,6 +446,36 @@ Refs #70"
 
 ---
 
+## 실행 중 발견한 차이 (실제 구현 기준으로 읽을 것)
+
+Airflow 3.3.1 실제 동작을 검증하는 과정에서 아래 사실이 위 태스크 예시 코드와
+달라졌다. 실제 파일(`infra/compose/airflow.yaml`, `Makefile`)이 최종 진실이며,
+아래는 왜 달라졌는지 기록만 남긴다.
+
+- `networks.default.name`은 서비스 안이 아니라 최상위 `networks:` 섹션에 와야
+  한다 (Compose 스키마상 서비스별 `networks:`는 `name` 키를 허용하지 않음).
+- Airflow 3.x는 `airflow webserver` 커맨드를 제거하고 `airflow api-server`로
+  대체했다 (UI도 API 서버가 같이 서빙). 서비스명은 `airflow-webserver`로 그대로
+  두고 `command: api-server`만 바꿨다.
+- Airflow 3.x부터 스케줄러가 DAG를 직접 파싱하지 않는다(`standalone_dag_processor`
+  설정 자체가 사라짐, 항상 분리됨). `airflow-dag-processor` 서비스를 추가로
+  띄워야 DAG가 로드된다.
+- task 서브프로세스가 api-server에 붙는 기본 URL(`AIRFLOW__CORE__EXECUTION_API_SERVER_URL`,
+  기본값 `http://localhost:8080/execution/`)은 단일 호스트 전제라 멀티 컨테이너
+  구성에서는 서비스명으로 명시해야 한다: `http://airflow-webserver:8080/execution/`.
+- scheduler/api-server 간 내부 통신은 JWT로 인증하는데, `AIRFLOW__API_AUTH__JWT_SECRET`을
+  안 주면 컨테이너마다 다른 값이 생성돼 `Invalid auth token`으로 task가 실패한다.
+  `.env`에 `AIRFLOW_JWT_SECRET` 키를 추가하고 모든 컴포넌트가 공유하게 했다.
+- 웹 UI 로그인은 기본 `SimpleAuthManager`가 담당하며, `admin` 비밀번호를 매
+  기동 시 무작위 생성해 `airflow-webserver` 로그에 출력한다(고정 불가). 로컬
+  개발 용도로 그대로 두기로 했다 — README에 로그에서 확인하는 방법을 적었다.
+- `airflow dags list-runs`는 `-d <dag_id>`가 아니라 위치 인자
+  `airflow dags list-runs <dag_id>`를 쓴다.
+- Makefile의 `up-*` 타겟은 `--env-file`을 명시하지 않으면 `infra/compose/`
+  기준으로 `.env`를 찾아 실패한다(저장소 루트 `.env`를 못 찾음). `$(COMPOSE)`
+  호출에 `--env-file "$(CURDIR)/.env"`를 추가했다 — `up-kafka`/`up-monitoring`
+  포함 모든 `up-*` 타겟에 적용되는 기존 버그였다.
+
 ## 이 계획에서 하지 않는 것 (스펙의 범위 밖 항목과 동일)
 
 - 실제 파이프라인 DAG, Celery/K8s executor, 운영 배포/인증
