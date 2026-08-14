@@ -89,8 +89,8 @@ def fetch_lion(
             "where": "1=1",
             "outFields": (
                 "SegmentID,NodeIDFrom,NodeIDTo,TrafDir,SegmentTyp,FeatureTyp,"
-                "RB_Layer,NodeLevelF,NodeLevelT,POSTED_SPEED,CurveFlag,Radius,"
-                "Street,OBJECTID"
+                "RW_TYPE,Status,RB_Layer,NodeLevelF,NodeLevelT,POSTED_SPEED,"
+                "CurveFlag,Radius,Shape__Length,Street,OBJECTID"
             ),
             "returnGeometry": "true",
             "outSR": "4326",
