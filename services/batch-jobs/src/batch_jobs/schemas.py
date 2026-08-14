@@ -13,8 +13,11 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-# JSON 파싱 자체가 실패한 행을 담는 Spark PERMISSIVE 모드 전용 컬럼명
-CORRUPT_RECORD_COLUMN = "_corrupt_record"
+# 적재된 원본 JSON 문자열을 담는 컬럼명
+RAW_RECORD_COLUMN = "_raw_record"
+
+# 원본 JSON의 파싱 실패 여부를 담는 컬럼명
+PARSE_FAILED_COLUMN = "_parse_failed"
 
 # event_time은 포맷 불일치 시 값이 조용히 NULL되는 것을 막기 위해 STRING으로 선언, 캐스팅은 Silver에서 수행
 BRONZE_SENSOR_EVENT_SCHEMA = StructType(
@@ -38,7 +41,6 @@ BRONZE_SENSOR_EVENT_SCHEMA = StructType(
         StructField("steering_angle", DoubleType(), nullable=True),
         StructField("_ingested_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
-        StructField(CORRUPT_RECORD_COLUMN, StringType(), nullable=True),
     ]
 )
 
