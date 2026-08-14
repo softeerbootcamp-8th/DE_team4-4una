@@ -30,6 +30,7 @@ EXPECTED_COLUMNS = [
     "geometry_wkb",
     "source_version",
     "ingested_at",
+    "location_id",
 ]
 
 

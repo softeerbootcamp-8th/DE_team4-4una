@@ -44,6 +44,7 @@ class RoadSegmentRecord:
     geometry_wkb: bytes | None
     source_version: str
     ingested_at: datetime
+    location_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
