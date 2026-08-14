@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 from batch_jobs.bronze_reader import read_bronze_sensor_events
-from batch_jobs.cleansing_config import load_cleansing_config
-from batch_jobs.quarantine import (
+from batch_jobs.cleansing import (
     DUPLICATE_EVENT,
     MISSING_REQUIRED_FIELD,
     cleanse_sensor_events,
 )
+from batch_jobs.cleansing_config import load_cleansing_config
 from pyspark.sql import SparkSession
 
 os.environ["TZ"] = "UTC"

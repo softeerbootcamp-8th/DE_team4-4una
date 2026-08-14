@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 from batch_jobs.bronze_reader import read_bronze_sensor_events
-from batch_jobs.cleansing_config import load_cleansing_config
-from batch_jobs.quarantine import (
+from batch_jobs.cleansing import (
     MALFORMED_JSON,
     MISSING_REQUIRED_FIELD,
     split_required_field_failures,
 )
+from batch_jobs.cleansing_config import load_cleansing_config
 from batch_jobs.schemas import SENSOR_EVENT_QUARANTINE_SCHEMA
 from pyspark.sql import SparkSession
 

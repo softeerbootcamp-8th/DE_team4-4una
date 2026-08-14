@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 from batch_jobs.bronze_reader import read_bronze_sensor_events
+from batch_jobs.cleansing import OUT_OF_RANGE, split_out_of_range_values
 from batch_jobs.cleansing_config import load_cleansing_config
-from batch_jobs.quarantine import OUT_OF_RANGE, split_out_of_range_values
 from pyspark.sql import SparkSession
 
 os.environ["TZ"] = "UTC"
