@@ -1,5 +1,5 @@
 """Streaming ride-comfort event processor."""
 
+from stream_processor.cli import main
 
-def main() -> None:
-    print("stream-processor")
+__all__ = ["main"]

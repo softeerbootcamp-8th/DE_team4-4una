@@ -45,6 +45,7 @@ metastore_db/
 derby.log
 *.crc
 _SUCCESS
+checkpoints/
 
 # --- Airflow ---
 airflow.cfg
