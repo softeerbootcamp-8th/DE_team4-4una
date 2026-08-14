@@ -42,6 +42,9 @@ def cleanse_sensor_events(
     중복 판정은 키가 NULL인 행을 한 그룹으로 묶으므로 필수 컬럼 검증
     뒤에 와야 한다.
     """
+    # 캐시하지 않으면 세 단계가 컬럼을 참조할 때마다 value의 JSON 파싱을 다시 하고,
+    # 그 표현식이 실행 계획에 계속 복제되어 드라이버 메모리를 넘긴다.
+    bronze_df = bronze_df.cache()
     required = split_required_field_failures(bronze_df, config, run_id, rejected_at)
     ranges = split_out_of_range_values(required.passed, config, run_id, rejected_at)
     duplicates = split_duplicate_events(ranges.passed, config, run_id, rejected_at)
