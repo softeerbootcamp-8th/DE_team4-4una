@@ -2,7 +2,7 @@ UV := uv
 COMPOSE := docker compose
 COMPOSE_DIR := infra/compose
 
-.PHONY: help sync lock lint test package-jobs migrate up-kafka up-postgres up-monitoring
+.PHONY: help sync lock lint test package-jobs migrate up-kafka up-postgres up-airflow up-monitoring
 
 help:
 	@echo "sync             워크스페이스 의존성 동기화"
@@ -28,9 +28,9 @@ test:
 package-jobs:
 	$(UV) build --package batch-jobs --out-dir dist
 
-up-kafka up-postgres up-monitoring:
+up-kafka up-postgres up-airflow up-monitoring:
 	@test -f "$(COMPOSE_DIR)/$(@:up-%=%).yaml" || { echo "$(COMPOSE_DIR)/$(@:up-%=%).yaml 파일이 필요합니다."; exit 1; }
-	$(COMPOSE) -f "$(COMPOSE_DIR)/$(@:up-%=%).yaml" up -d
+	$(COMPOSE) --env-file "$(CURDIR)/.env" -f "$(COMPOSE_DIR)/$(@:up-%=%).yaml" up -d
 
 migrate:
 	@test -n "$(MIGRATE_CMD)" || { echo "MIGRATE_CMD를 지정해 주세요."; exit 1; }
