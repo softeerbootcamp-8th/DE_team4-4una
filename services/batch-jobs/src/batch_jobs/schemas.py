@@ -36,7 +36,6 @@ BRONZE_SENSOR_EVENT_SCHEMA = StructType(
         StructField("jerk_z", DoubleType(), nullable=True),
         StructField("steering_vibration", DoubleType(), nullable=True),
         StructField("steering_angle", DoubleType(), nullable=True),
-        StructField("_ingested_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
         StructField(CORRUPT_RECORD_COLUMN, StringType(), nullable=True),
     ]
