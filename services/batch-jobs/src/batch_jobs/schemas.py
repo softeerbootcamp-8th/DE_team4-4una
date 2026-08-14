@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pyspark.sql.types import (
+    DateType,
     DoubleType,
     IntegerType,
     LongType,
@@ -38,5 +39,31 @@ BRONZE_SENSOR_EVENT_SCHEMA = StructType(
         StructField("_ingested_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
         StructField(CORRUPT_RECORD_COLUMN, StringType(), nullable=True),
+    ]
+)
+
+# jerk_x/y/z는 Bronze 값을 그대로 넘기지 않고 Silver에서 가속도로 재계산한 값(OQ-035)
+PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
+    [
+        StructField("event_id", StringType(), nullable=False),
+        StructField("vehicle_profile_id", IntegerType(), nullable=False),
+        StructField("trip_id", StringType(), nullable=False),
+        StructField("trip_seq", LongType(), nullable=False),
+        StructField("event_time", TimestampType(), nullable=False),
+        StructField("event_date", DateType(), nullable=False),
+        StructField("latitude", DoubleType(), nullable=False),
+        StructField("longitude", DoubleType(), nullable=False),
+        StructField("speed_mps", DoubleType(), nullable=False),
+        StructField("heading", DoubleType(), nullable=True),
+        StructField("accel_x", DoubleType(), nullable=True),
+        StructField("accel_y", DoubleType(), nullable=True),
+        StructField("accel_z", DoubleType(), nullable=False),
+        StructField("jerk_x", DoubleType(), nullable=True),
+        StructField("jerk_y", DoubleType(), nullable=True),
+        StructField("jerk_z", DoubleType(), nullable=True),
+        StructField("steering_vibration", DoubleType(), nullable=True),
+        StructField("steering_angle", DoubleType(), nullable=False),
+        StructField("_processed_at", TimestampType(), nullable=False),
+        StructField("_run_id", StringType(), nullable=False),
     ]
 )
