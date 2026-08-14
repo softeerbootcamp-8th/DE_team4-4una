@@ -67,3 +67,17 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("_run_id", StringType(), nullable=False),
     ]
 )
+
+# event_id/trip_id/event_date는 파싱 실패 시 추출 자체가 안 될 수 있어 nullable, event_date로 파티셔닝
+SENSOR_EVENT_QUARANTINE_SCHEMA = StructType(
+    [
+        StructField("event_id", StringType(), nullable=True),
+        StructField("trip_id", StringType(), nullable=True),
+        StructField("event_date", DateType(), nullable=True),
+        StructField("reject_reason", StringType(), nullable=False),
+        StructField("reject_detail", StringType(), nullable=True),
+        StructField("raw_record", StringType(), nullable=False),
+        StructField("_run_id", StringType(), nullable=False),
+        StructField("_rejected_at", TimestampType(), nullable=False),
+    ]
+)
