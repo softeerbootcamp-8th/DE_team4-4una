@@ -105,6 +105,33 @@ def test_normalize_line_geometry_merges_connected_multilinestring_parts() -> Non
     assert line.geom_type == "LineString"
 
 
+def test_normalize_line_geometry_rejects_disconnected_multilinestring() -> None:
+    raw = mapping(MultiLineString([LINE_A, [(-73.95, 40.70), (-73.94, 40.71)]]))
+
+    assert normalize_line_geometry(raw) is None
+
+
+def test_normalize_line_geometry_preserves_coordinate_order_for_linestring() -> None:
+    raw = mapping(LineString(LINE_A))
+
+    line = normalize_line_geometry(raw)
+
+    expected = reproject_to_target_crs(LineString(LINE_A))
+    assert line.coords[0] == expected.coords[0]
+    assert line.coords[-1] == expected.coords[-1]
+
+
+def test_normalize_line_geometry_preserves_direction_when_merging_parts() -> None:
+    raw = mapping(MultiLineString([LINE_A, LINE_B]))
+
+    line = normalize_line_geometry(raw)
+
+    expected_start = reproject_to_target_crs(Point(LINE_A[0]))
+    expected_end = reproject_to_target_crs(Point(LINE_B[-1]))
+    assert line.coords[0] == expected_start.coords[0]
+    assert line.coords[-1] == expected_end.coords[0]
+
+
 def test_load_lion_rows_with_geometry_keeps_geometry_alongside_properties(
     tmp_path,
 ) -> None:

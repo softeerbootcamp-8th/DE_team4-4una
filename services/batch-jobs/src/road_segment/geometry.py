@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import shapely
-from batch_jobs.geo import as_line
 from pyproj import Transformer
-from shapely.geometry import shape
+from shapely.geometry import LineString, MultiLineString, shape
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import linemerge
 from shapely.ops import transform as reproject_geometry
 
 from road_segment.transform import (
@@ -77,13 +77,20 @@ def normalize_line_geometry(raw_geometry: object) -> BaseGeometry | None:
     if geometry.is_empty or not geometry.is_valid:
         return None
     projected = reproject_to_target_crs(geometry)
-    try:
-        line = as_line(projected)
-    except ValueError:
-        return None
-    if line.is_empty or not line.is_valid:
+    line = merge_to_single_line(projected)
+    if line is None or line.is_empty or not line.is_valid:
         return None
     return line
+
+
+def merge_to_single_line(geometry: BaseGeometry) -> LineString | None:
+    """MultiLineString의 여러 part가 하나로 이어지지 않으면 None을 반환한다."""
+    if isinstance(geometry, LineString):
+        return geometry
+    if isinstance(geometry, MultiLineString):
+        merged = linemerge(geometry)
+        return merged if isinstance(merged, LineString) else None
+    return None
 
 
 def build_segment_geometry(row: dict[str, object]) -> SegmentGeometry | None:
