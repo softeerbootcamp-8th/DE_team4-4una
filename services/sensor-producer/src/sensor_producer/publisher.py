@@ -1,4 +1,4 @@
-"""Kafka and test publishers for Bronze sensor events."""
+"""Kafka and test publishers for sensor-event messages."""
 
 from __future__ import annotations
 
@@ -57,7 +57,6 @@ class KafkaPublisher:
             self.topic,
             key=event.message_key,
             value=event.to_json(),
-            timestamp_ms=int(event._ingested_at.timestamp() * 1000),
         )
 
     def flush(self) -> None:

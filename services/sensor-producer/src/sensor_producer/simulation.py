@@ -8,7 +8,7 @@ import math
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from de4_core import SensorEvent
@@ -276,7 +276,6 @@ class MotionSimulator:
                 jerk_y=jerk_y,
                 jerk_z=jerk_z,
                 steering_vibration=steering_vibration,
-                _ingested_at=datetime.now(UTC),
                 _run_id=config.run_id,
             )
             previous_speed = speed
@@ -369,7 +368,6 @@ class ReplayCoordinator:
                 assert isinstance(event, SensorEvent)
                 assert isinstance(route, RoutePlan)
                 assert isinstance(trip, TripRecord)
-                event = replace(event, _ingested_at=datetime.now(UTC))
                 self.publisher.publish(event)
                 events_published += 1
                 try:

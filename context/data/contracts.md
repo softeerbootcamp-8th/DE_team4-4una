@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-14
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -23,7 +23,7 @@ live in `libs/de4-core`.
 | `vehicle_profile_id` | FK to the not-yet-supplied `vehicle_profile` contract |
 | `segment_id` | Canonical LION `SegmentID`; intentionally absent from Bronze sensor events |
 | `event_time` | Simulated sensor measurement time |
-| `_ingested_at` | Wall-clock time at which a record entered a Bronze/source layer |
+| `_ingested_at` | Wall-clock time at which Spark loaded a record into Bronze |
 | `_processed_at` | Wall-clock time at which a Silver record completed processing |
 
 ## Road segment reference
@@ -89,7 +89,7 @@ Candidate fields:
 - longitudinal `jerk_x`, lateral `jerk_y`, and vertical `jerk_z` in m/s³
 - legacy `jerk`, retained as an exact alias of `jerk_x`
 - non-negative RMS-like `steering_vibration` amplitude in m/s²
-- `_ingested_at` and `_run_id`
+- `_run_id`; Spark adds `_ingested_at` when it writes the Bronze record
 
 Bronze does not carry `segment_id`, road attributes, or threshold-derived event
 flags. Those appear in `sensor_events_matched` after Spark map matching.
