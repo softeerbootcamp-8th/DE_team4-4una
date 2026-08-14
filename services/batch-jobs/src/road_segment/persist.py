@@ -35,11 +35,12 @@ CREATE TABLE road_segment (
     length_m DOUBLE NOT NULL,
     geometry_wkb BLOB NOT NULL,
     source_version VARCHAR NOT NULL,
-    ingested_at TIMESTAMPTZ NOT NULL
+    ingested_at TIMESTAMPTZ NOT NULL,
+    location_id INTEGER
 )
 """
 
-INSERT_SQL = "INSERT INTO road_segment VALUES ({})".format(", ".join(["?"] * 19))
+INSERT_SQL = "INSERT INTO road_segment VALUES ({})".format(", ".join(["?"] * 20))
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,7 @@ def _as_row(record: RoadSegmentRecord) -> tuple[object, ...]:
         record.geometry_wkb,
         record.source_version,
         record.ingested_at,
+        record.location_id,
     )
 
 
