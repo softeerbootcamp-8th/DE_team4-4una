@@ -16,7 +16,7 @@ with DAG(
     dag_id="hello_world",
     description="Airflow LocalExecutor 부트스트랩 동작 확인용 최소 DAG",
     schedule=None,
-    start_date=datetime.datetime(2026, 8, 14),
+    start_date=datetime.datetime(2026, 8, 14, tzinfo=datetime.UTC),
     catchup=False,
     tags=["bootstrap"],
 ) as dag:
