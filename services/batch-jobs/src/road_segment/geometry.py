@@ -1,4 +1,4 @@
-"""Standardize NYC LION geometry into EPSG:2263 LineString WKB."""
+"""Standardize NYC LION geometry into EPSG:32118 LineString WKB."""
 
 from __future__ import annotations
 
@@ -20,7 +20,10 @@ from road_segment.transform import (
 )
 
 SOURCE_CRS = "EPSG:4326"
-TARGET_CRS = "EPSG:2263"
+# EPSG:2263(NY Long Island, feet)와 동일한 투영이되 단위만 meter인 CRS.
+# downstream 거리 계산(Map Matching, threshold)이 전부 meter 기준이라
+# geometry도 feet 변환 없이 바로 meter로 쓸 수 있게 이걸 쓴다.
+TARGET_CRS = "EPSG:32118"
 
 # Transformer 생성 비용이 있어 모듈 로드 시 한 번만 만들어 재사용한다.
 _TRANSFORMER = Transformer.from_crs(SOURCE_CRS, TARGET_CRS, always_xy=True)
@@ -28,6 +31,12 @@ _TRANSFORMER = Transformer.from_crs(SOURCE_CRS, TARGET_CRS, always_xy=True)
 
 @dataclass(frozen=True, slots=True)
 class SegmentGeometry:
+    """segment_id paired with a WKB-encoded EPSG:32118 LineString.
+
+    WKB 자체엔 CRS 정보가 없으므로, geometry_wkb는 항상 EPSG:32118(meter)
+    기준이라는 계약을 여기 명시한다.
+    """
+
     segment_id: str
     geometry_wkb: bytes
 
@@ -63,10 +72,10 @@ def reproject_to_target_crs(geometry: BaseGeometry) -> BaseGeometry:
 
 
 def normalize_line_geometry(raw_geometry: object) -> BaseGeometry | None:
-    """Reproject to EPSG:2263 and collapse to a single LineString.
+    """Reproject to EPSG:32118 and collapse to a single LineString.
 
     LION 소스 기하는 fetch_lion()의 outSR=4326으로 이미 WGS84이므로,
-    LineString 정규화 전에 EPSG:2263으로 먼저 투영한다.
+    LineString 정규화 전에 EPSG:32118로 먼저 투영한다.
     """
     if not raw_geometry:
         return None
