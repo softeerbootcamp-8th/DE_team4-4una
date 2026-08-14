@@ -25,7 +25,6 @@ def make_event(**overrides: object) -> SensorEvent:
         "jerk_y": 0.5,
         "jerk_z": 0.6,
         "steering_vibration": 0.7,
-        "_ingested_at": datetime(2024, 2, 1, tzinfo=UTC),
         "_run_id": "run-1",
     }
     values.update(overrides)
@@ -42,6 +41,7 @@ def test_sensor_event_serializes_agreed_schema() -> None:
     assert event.to_dict()["jerk_z"] == 0.6
     assert event.to_dict()["steering_angle"] == 5.0
     assert event.to_dict()["steering_vibration"] == 0.7
+    assert "_ingested_at" not in event.to_dict()
     assert b'"event_time":"2024-02-01T00:00:00+00:00"' in event.to_json()
 
 

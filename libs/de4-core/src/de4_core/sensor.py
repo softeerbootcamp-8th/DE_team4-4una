@@ -10,7 +10,7 @@ from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class SensorEvent:
-    """One immutable Bronze vehicle sensor measurement.
+    """One immutable vehicle sensor measurement sent through Kafka.
 
     Timestamps are timezone-aware UTC values. Acceleration and the RMS-like
     steering vibration amplitude use m/s², speed uses m/s, heading and the
@@ -37,7 +37,6 @@ class SensorEvent:
     jerk_y: float
     jerk_z: float
     steering_vibration: float
-    _ingested_at: datetime
     _run_id: str
 
     def __post_init__(self) -> None:
@@ -47,8 +46,8 @@ class SensorEvent:
             raise ValueError("vehicle_profile_id must be positive")
         if self.trip_seq < 0:
             raise ValueError("trip_seq must be non-negative")
-        if self.event_time.utcoffset() is None or self._ingested_at.utcoffset() is None:
-            raise ValueError("sensor timestamps must be timezone-aware")
+        if self.event_time.utcoffset() is None:
+            raise ValueError("event_time must be timezone-aware")
         if not -90 <= self.latitude <= 90:
             raise ValueError("latitude must be between -90 and 90")
         if not -180 <= self.longitude <= 180:
@@ -90,7 +89,6 @@ class SensorEvent:
 
         value = asdict(self)
         value["event_time"] = self.event_time.isoformat()
-        value["_ingested_at"] = self._ingested_at.isoformat()
         return value
 
     def to_json(self) -> bytes:

@@ -54,8 +54,8 @@ without a broker.
   uses zero-based contiguous `trip_seq` values.
 - Kafka values follow `de4_core.SensorEvent`; the message key is `trip_id`, so
   one trip stays ordered within one partition.
-- Kafka record time is `_ingested_at`, not the historical TLC `event_time`. This
-  prevents normal Kafka retention from immediately deleting replayed records.
+- Kafka assigns the record timestamp independently from the historical TLC
+  `event_time`. Spark adds `_ingested_at` only when the record enters Bronze.
 - Bronze contains GPS but intentionally omits `segment_id`. The later Spark job
   remains the authoritative GPS-to-LION map matcher.
 - `event_id` is a deterministic UUID string based on run, trip, vehicle profile,
