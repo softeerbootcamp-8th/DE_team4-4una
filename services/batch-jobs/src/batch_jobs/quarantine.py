@@ -1,4 +1,4 @@
-"""Split Bronze rows that fail parsing or required-field checks into quarantine rows."""
+"""Split Bronze rows that fail parsing, required-field, or value-range checks."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from datetime import datetime
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
-from batch_jobs.cleansing_config import CleansingConfig
+from batch_jobs.cleansing_config import CleansingConfig, ValueRange
 from batch_jobs.schemas import CORRUPT_RECORD_COLUMN
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
+OUT_OF_RANGE = "OUT_OF_RANGE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,55 @@ def split_required_field_failures(
         passed=parsed.filter(F.size(null_columns) == 0),
         quarantined=malformed_rows.unionByName(missing_rows),
     )
+
+
+def split_out_of_range_values(
+    df: DataFrame,
+    config: CleansingConfig,
+    run_id: str,
+    rejected_at: datetime,
+) -> CleansingResult:
+    """Quarantine rows whose columns fall outside their configured range."""
+    violations = _range_violations(config)
+    return CleansingResult(
+        passed=df.filter(F.size(violations) == 0),
+        quarantined=_quarantine_rows(
+            df.filter(F.size(violations) > 0),
+            reject_reason=OUT_OF_RANGE,
+            reject_detail=F.concat_ws(", ", violations),
+            raw_record=_reserialized_record(df),
+            run_id=run_id,
+            rejected_at=rejected_at,
+        ),
+    )
+
+
+def _range_violations(config: CleansingConfig) -> Column:
+    """범위를 벗어난 컬럼을 "이름=값" 형태로 담은 배열."""
+    entries = [
+        F.when(
+            _violates_range(name, value_range, config.negative_allowed.get(name, True)),
+            F.concat(F.lit(f"{name}="), F.col(name).cast("string")),
+        )
+        for name, value_range in config.value_ranges.items()
+    ]
+    return F.array_compact(F.array(*entries))
+
+
+def _violates_range(name: str, value_range: ValueRange, negative_allowed: bool) -> Column:
+    """컬럼 하나가 범위를 벗어났는지 판정하는 조건식."""
+    violated = F.lit(False)
+    if value_range.minimum is not None:
+        violated = violated | (F.col(name) < value_range.minimum)
+    if value_range.maximum is not None:
+        violated = violated | (
+            F.col(name) >= value_range.maximum
+            if value_range.max_exclusive
+            else F.col(name) > value_range.maximum
+        )
+    if not negative_allowed:
+        violated = violated | (F.col(name) < 0)
+    return violated
 
 
 def _null_required_columns(required_columns: tuple[str, ...]) -> Column:
