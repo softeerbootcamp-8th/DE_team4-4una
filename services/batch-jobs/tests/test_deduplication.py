@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 from batch_jobs.bronze_reader import read_bronze_sensor_events
-from batch_jobs.cleansing_config import load_cleansing_config
-from batch_jobs.quarantine import (
+from batch_jobs.cleansing import (
     DUPLICATE_EVENT,
     MISSING_REQUIRED_FIELD,
     cleanse_sensor_events,
 )
+from batch_jobs.cleansing_config import load_cleansing_config
 from pyspark.sql import SparkSession
 
 os.environ["TZ"] = "UTC"
@@ -59,13 +59,15 @@ def spark():
     session.stop()
 
 
-def write_jsonl(directory: Path, *lines: str) -> Path:
-    path = directory / "sensor_event.jsonl"
-    path.write_text("\n".join(lines) + "\n")
+def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:
+    """stream-processor가 적재하는 형태로 Parquet을 쓴다."""
+    path = directory / "bronze"
+    rows = [(value,) for value in values]
+    spark.createDataFrame(rows, "value string").write.parquet(str(path))
     return path
 
 
-def valid_line(**overrides: object) -> str:
+def valid_value(**overrides: object) -> str:
     return json.dumps(VALID_EVENT | overrides)
 
 
@@ -76,10 +78,11 @@ def cleanse(spark, path):
 
 def test_only_the_latest_ingested_duplicate_survives(spark, tmp_path):
     # event_id가 같은 두 행 중 _ingested_at이 최신인 행(trip_seq=2)만 남는지 확인한다.
-    path = write_jsonl(
+    path = write_bronze_parquet(
+        spark,
         tmp_path,
-        valid_line(_ingested_at=EARLIER, trip_seq=1),
-        valid_line(_ingested_at=LATER, trip_seq=2),
+        valid_value(_ingested_at=EARLIER, trip_seq=1),
+        valid_value(_ingested_at=LATER, trip_seq=2),
     )
 
     result = cleanse(spark, path)
@@ -91,7 +94,9 @@ def test_only_the_latest_ingested_duplicate_survives(spark, tmp_path):
 
 def test_dropped_duplicate_is_quarantined_with_its_reason(spark, tmp_path):
     # 탈락한 행이 DUPLICATE_EVENT 사유로 격리되고 판정 상세에 키가 남는지 확인한다.
-    path = write_jsonl(tmp_path, valid_line(_ingested_at=EARLIER), valid_line(_ingested_at=LATER))
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(_ingested_at=EARLIER), valid_value(_ingested_at=LATER)
+    )
 
     rows = cleanse(spark, path).quarantined.collect()
 
@@ -101,7 +106,9 @@ def test_dropped_duplicate_is_quarantined_with_its_reason(spark, tmp_path):
 
 def test_distinct_event_ids_are_all_kept(spark, tmp_path):
     # event_id가 다르면 중복이 아니므로 두 행 모두 남는다.
-    path = write_jsonl(tmp_path, valid_line(), valid_line(event_id="other-event-id"))
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(), valid_value(event_id="other-event-id")
+    )
 
     result = cleanse(spark, path)
 
@@ -111,7 +118,9 @@ def test_distinct_event_ids_are_all_kept(spark, tmp_path):
 
 def test_null_event_ids_are_not_treated_as_duplicates(spark, tmp_path):
     # event_id가 NULL인 두 행은 서로 중복이 아니라 각각 필수 컬럼 위반으로 격리된다.
-    path = write_jsonl(tmp_path, valid_line(event_id=None), valid_line(event_id=None))
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(event_id=None), valid_value(event_id=None)
+    )
 
     rows = cleanse(spark, path).quarantined.collect()
 

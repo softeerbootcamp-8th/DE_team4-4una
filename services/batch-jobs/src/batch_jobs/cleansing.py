@@ -9,7 +9,7 @@ from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from batch_jobs.cleansing_config import CleansingConfig, ValueRange
-from batch_jobs.schemas import CORRUPT_RECORD_COLUMN
+from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
@@ -42,6 +42,9 @@ def cleanse_sensor_events(
     중복 판정은 키가 NULL인 행을 한 그룹으로 묶으므로 필수 컬럼 검증
     뒤에 와야 한다.
     """
+    # 캐시하지 않으면 세 단계가 컬럼을 참조할 때마다 value의 JSON 파싱을 다시 하고,
+    # 그 표현식이 실행 계획에 계속 복제되어 드라이버 메모리를 넘긴다.
+    bronze_df = bronze_df.cache()
     required = split_required_field_failures(bronze_df, config, run_id, rejected_at)
     ranges = split_out_of_range_values(required.passed, config, run_id, rejected_at)
     duplicates = split_duplicate_events(ranges.passed, config, run_id, rejected_at)
@@ -60,7 +63,7 @@ def split_required_field_failures(
     rejected_at: datetime,
 ) -> CleansingResult:
     """Quarantine unparseable rows and rows whose required columns are NULL."""
-    is_malformed = F.col(CORRUPT_RECORD_COLUMN).isNotNull()
+    is_malformed = F.col(PARSE_FAILED_COLUMN)
     null_columns = _null_required_columns(config.required_columns)
 
     parsed = bronze_df.filter(~is_malformed)
@@ -68,7 +71,7 @@ def split_required_field_failures(
         bronze_df.filter(is_malformed),
         reject_reason=MALFORMED_JSON,
         reject_detail=F.lit(None).cast("string"),
-        raw_record=F.col(CORRUPT_RECORD_COLUMN),
+        raw_record=F.col(RAW_RECORD_COLUMN),
         run_id=run_id,
         rejected_at=rejected_at,
     )
@@ -76,7 +79,7 @@ def split_required_field_failures(
         parsed.filter(F.size(null_columns) > 0),
         reject_reason=MISSING_REQUIRED_FIELD,
         reject_detail=F.concat_ws(", ", null_columns),
-        raw_record=_reserialized_record(bronze_df),
+        raw_record=F.col(RAW_RECORD_COLUMN),
         run_id=run_id,
         rejected_at=rejected_at,
     )
@@ -100,7 +103,7 @@ def split_out_of_range_values(
             df.filter(F.size(violations) > 0),
             reject_reason=OUT_OF_RANGE,
             reject_detail=F.concat_ws(", ", violations),
-            raw_record=_reserialized_record(df),
+            raw_record=F.col(RAW_RECORD_COLUMN),
             run_id=run_id,
             rejected_at=rejected_at,
         ),
@@ -130,7 +133,7 @@ def split_duplicate_events(
                 ", ",
                 *[F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in key],
             ),
-            raw_record=_reserialized_record(df),
+            raw_record=F.col(RAW_RECORD_COLUMN),
             run_id=run_id,
             rejected_at=rejected_at,
         ),
@@ -176,12 +179,6 @@ def _null_required_columns(required_columns: tuple[str, ...]) -> Column:
     return F.array_compact(
         F.array(*[F.when(F.col(name).isNull(), F.lit(name)) for name in required_columns])
     )
-
-
-def _reserialized_record(bronze_df: DataFrame) -> Column:
-    """파싱에 성공한 행에는 원본 문자열이 없어 선언된 컬럼만으로 다시 직렬화한다."""
-    columns = [name for name in bronze_df.columns if name != CORRUPT_RECORD_COLUMN]
-    return F.to_json(F.struct(*columns), {"ignoreNullFields": "false"})
 
 
 def _quarantine_rows(
