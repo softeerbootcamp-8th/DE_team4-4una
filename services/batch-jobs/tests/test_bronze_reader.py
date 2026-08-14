@@ -33,6 +33,7 @@ VALID_EVENT = {
     "jerk_z": 0.416818166875222,
     "steering_vibration": 0.2797693197309389,
     "steering_angle": -35.0,
+    "_ingested_at": "2026-08-13T10:23:24.730637+00:00",
     "_run_id": "nyc-actual-20240201-v4",
 }
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from pyspark.sql import Column, DataFrame
+from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from batch_jobs.cleansing_config import CleansingConfig, ValueRange
@@ -14,6 +14,13 @@ from batch_jobs.schemas import CORRUPT_RECORD_COLUMN
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
 OUT_OF_RANGE = "OUT_OF_RANGE"
+DUPLICATE_EVENT = "DUPLICATE_EVENT"
+
+# 중복 판정을 위해 잠시 붙였다가 결과에서 다시 떼어내는 컬럼
+_DUPLICATE_RANK = "_duplicate_rank"
+
+# 설정의 deduplication.priority 값과 잔존 행을 고를 때 내림차순 정렬할 컬럼의 대응
+_DEDUPLICATION_ORDER_COLUMNS = {"latest_ingested_at": "_ingested_at"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +29,28 @@ class CleansingResult:
 
     passed: DataFrame
     quarantined: DataFrame
+
+
+def cleanse_sensor_events(
+    bronze_df: DataFrame,
+    config: CleansingConfig,
+    run_id: str,
+    rejected_at: datetime,
+) -> CleansingResult:
+    """Run every cleansing stage in order and collect the quarantined rows.
+
+    중복 판정은 키가 NULL인 행을 한 그룹으로 묶으므로 필수 컬럼 검증
+    뒤에 와야 한다.
+    """
+    required = split_required_field_failures(bronze_df, config, run_id, rejected_at)
+    ranges = split_out_of_range_values(required.passed, config, run_id, rejected_at)
+    duplicates = split_duplicate_events(ranges.passed, config, run_id, rejected_at)
+    return CleansingResult(
+        passed=duplicates.passed,
+        quarantined=required.quarantined.unionByName(ranges.quarantined).unionByName(
+            duplicates.quarantined
+        ),
+    )
 
 
 def split_required_field_failures(
@@ -76,6 +105,42 @@ def split_out_of_range_values(
             rejected_at=rejected_at,
         ),
     )
+
+
+def split_duplicate_events(
+    df: DataFrame,
+    config: CleansingConfig,
+    run_id: str,
+    rejected_at: datetime,
+) -> CleansingResult:
+    """Keep one row per deduplication key and quarantine the rest.
+
+    키 컬럼이 NULL인 행은 서로 같은 그룹으로 묶이므로, 필수 컬럼 검증을
+    통과한 행만 넘겨야 한다.
+    """
+    key = config.deduplication.key
+    window = Window.partitionBy(*key).orderBy(_deduplication_order(config.deduplication.priority))
+    ranked = df.withColumn(_DUPLICATE_RANK, F.row_number().over(window))
+    return CleansingResult(
+        passed=ranked.filter(F.col(_DUPLICATE_RANK) == 1).drop(_DUPLICATE_RANK),
+        quarantined=_quarantine_rows(
+            ranked.filter(F.col(_DUPLICATE_RANK) > 1),
+            reject_reason=DUPLICATE_EVENT,
+            reject_detail=F.concat_ws(
+                ", ",
+                *[F.concat(F.lit(f"{name}="), F.col(name).cast("string")) for name in key],
+            ),
+            raw_record=_reserialized_record(df),
+            run_id=run_id,
+            rejected_at=rejected_at,
+        ),
+    )
+
+
+def _deduplication_order(priority: str) -> Column:
+    if priority not in _DEDUPLICATION_ORDER_COLUMNS:
+        raise ValueError(f"unsupported deduplication priority: {priority}")
+    return F.col(_DEDUPLICATION_ORDER_COLUMNS[priority]).desc()
 
 
 def _range_violations(config: CleansingConfig) -> Column:
