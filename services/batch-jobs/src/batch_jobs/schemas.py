@@ -35,14 +35,14 @@ BRONZE_SENSOR_EVENT_SCHEMA = StructType(
         StructField("jerk_y", DoubleType(), nullable=True),
         StructField("jerk_z", DoubleType(), nullable=True),
         StructField("steering_vibration", DoubleType(), nullable=True),
-        StructField("steering_angle", DoubleType(), nullable=False),
+        StructField("steering_angle", DoubleType(), nullable=True),
         StructField("_ingested_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
         StructField(CORRUPT_RECORD_COLUMN, StringType(), nullable=True),
     ]
 )
 
-# jerk_x/y/z는 Bronze 값을 그대로 넘기지 않고 Silver에서 가속도로 재계산한 값(OQ-035)
+# jerk_x/y/z는 이 클렌징 단계에서 재계산하지 않고 Bronze 값을 그대로 통과시킨다
 PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
     [
         StructField("event_id", StringType(), nullable=False),
@@ -62,7 +62,7 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("jerk_y", DoubleType(), nullable=True),
         StructField("jerk_z", DoubleType(), nullable=True),
         StructField("steering_vibration", DoubleType(), nullable=True),
-        StructField("steering_angle", DoubleType(), nullable=False),
+        StructField("steering_angle", DoubleType(), nullable=True),
         StructField("_processed_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
     ]
