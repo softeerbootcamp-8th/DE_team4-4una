@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 
 from cleansing.config import CleansingJobConfig
 from cleansing.reader import read_bronze_sensor_events
@@ -15,6 +17,8 @@ from cleansing.sink import (
     write_quarantined_events,
 )
 from cleansing.validate import cleanse_sensor_events
+
+logger = logging.getLogger(__name__)
 
 
 def build_spark_session() -> SparkSession:
@@ -32,6 +36,12 @@ def run_cleansing_job(
     processed_at: datetime,
 ) -> None:
     """Read Bronze, cleanse it, and store the passed and quarantined rows."""
+    started = time.monotonic()
+    logger.info("cleansing started run_id=%s", run_id)
+    logger.info("  input=%s", config.bronze_input_path)
+    logger.info("  processed=%s", config.processed_output_path)
+    logger.info("  quarantine=%s", config.quarantine_output_path)
+
     bronze = read_bronze_sensor_events(spark, config.bronze_input_path)
     result = cleanse_sensor_events(bronze, load_cleansing_config(), run_id, processed_at)
     processed = to_processed_sensor_events(result.passed, run_id, processed_at)
@@ -42,3 +52,24 @@ def run_cleansing_job(
     write_quarantined_events(
         result.quarantined, config.quarantine_output_path, config.quarantine_partition_column
     )
+
+    _log_summary(bronze, result.quarantined)
+    logger.info("cleansing finished run_id=%s elapsed=%.1fs", run_id, time.monotonic() - started)
+
+
+def _log_summary(bronze: DataFrame, quarantined: DataFrame) -> None:
+    reason_counts = {
+        row["reject_reason"]: row["count"]
+        for row in quarantined.groupBy("reject_reason").count().collect()
+    }
+    input_count = bronze.count()
+    quarantined_count = sum(reason_counts.values())
+
+    logger.info(
+        "input=%d passed=%d quarantined=%d",
+        input_count,
+        input_count - quarantined_count,
+        quarantined_count,
+    )
+    for reason, count in sorted(reason_counts.items()):
+        logger.info("  %s=%d", reason, count)
