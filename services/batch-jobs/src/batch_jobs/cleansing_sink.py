@@ -1,13 +1,17 @@
-"""Turn cleansed Bronze rows into processed_sensor_event rows."""
+"""Turn cleansed Bronze rows into processed_sensor_event rows and store them."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
 from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
+
+SILVER_PARTITION_COLUMN = "event_date"
+QUARANTINE_PARTITION_COLUMN = "rejected_date"
 
 
 def to_processed_sensor_events(
@@ -29,3 +33,13 @@ def to_processed_sensor_events(
             for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
         ]
     )
+
+
+def write_processed_sensor_events(df: DataFrame, path: str | Path) -> None:
+    """Write processed_sensor_event rows as Parquet, split by event_date."""
+    df.write.partitionBy(SILVER_PARTITION_COLUMN).parquet(str(path))
+
+
+def write_quarantined_events(df: DataFrame, path: str | Path) -> None:
+    """Write quarantined rows as Parquet, split by the date they were rejected."""
+    df.write.partitionBy(QUARANTINE_PARTITION_COLUMN).parquet(str(path))
