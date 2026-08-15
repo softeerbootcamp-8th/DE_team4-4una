@@ -12,3 +12,7 @@ def test_load_event_feature_config_reads_provisional_thresholds() -> None:
     assert config.hard_brake_threshold_mps2.provisional is True
     assert config.min_event_duration_seconds.value == 0.3
     assert config.min_event_duration_seconds.provisional is True
+    assert config.sharp_steer_threshold_deg_per_sec.value == 100.0
+    assert config.sharp_steer_threshold_deg_per_sec.provisional is True
+    assert config.sharp_steer_min_duration_seconds.value == 0.3
+    assert config.sharp_steer_min_duration_seconds.provisional is True

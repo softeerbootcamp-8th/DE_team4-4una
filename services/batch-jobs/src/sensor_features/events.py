@@ -1,4 +1,4 @@
-"""Trip-level hard-acceleration/braking episode detection from processed_sensor_event."""
+"""Trip-level sensor episode detection from processed_sensor_event."""
 
 from __future__ import annotations
 
@@ -120,4 +120,21 @@ def add_hard_braking_event(
     candidate = F.col("accel_x") <= hard_brake_threshold_mps2
     return _add_episode_start(
         df, candidate, "hard_brake_event_start", min_event_duration_seconds, max_gap_seconds
+    )
+
+
+def add_sharp_steering_event(
+    df: DataFrame,
+    sharp_steer_threshold_deg_per_sec: float,
+    min_event_duration_seconds: float,
+    max_gap_seconds: float,
+) -> DataFrame:
+    # abs(steering_rate) >= sharp_steer_threshold_deg_per_sec가 지속되는 구간을
+    # sharp_steer_event_start로 표시(add_steering_rate로 steering_rate를 먼저 계산해둬야 함)
+    if sharp_steer_threshold_deg_per_sec <= 0:
+        raise ValueError("sharp_steer_threshold_deg_per_sec must be greater than 0")
+
+    candidate = F.abs(F.col("steering_rate")) >= sharp_steer_threshold_deg_per_sec
+    return _add_episode_start(
+        df, candidate, "sharp_steer_event_start", min_event_duration_seconds, max_gap_seconds
     )
