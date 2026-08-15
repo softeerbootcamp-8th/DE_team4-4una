@@ -33,6 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanse_parser = subparsers.add_parser("cleanse-sensor-events")
     cleanse_parser.add_argument("--run-id", required=True)
+
+    score_parser = subparsers.add_parser("score-hourly-comfort")
+    score_parser.add_argument("--input-path")
+    score_parser.add_argument("--output-path")
+    score_parser.add_argument("--rejected-output-path")
+    score_parser.add_argument("--scoring-config-path", type=Path)
+    score_parser.add_argument("--run-id")
     return parser
 
 
@@ -73,10 +80,54 @@ def run_cleansing(run_id: str) -> None:
         spark.stop()
 
 
+def run_hourly_scoring(arguments: argparse.Namespace) -> None:
+    from batch_jobs.hourly_comfort_job import (
+        HourlyComfortJobConfig,
+        build_spark_session,
+        run_hourly_comfort_job,
+    )
+
+    defaults = HourlyComfortJobConfig.from_env()
+    run_id = arguments.run_id or os.getenv("HOURLY_COMFORT_RUN_ID")
+    if not run_id:
+        raise ValueError("--run-id or HOURLY_COMFORT_RUN_ID is required")
+    config = HourlyComfortJobConfig(
+        feature_input_path=arguments.input_path or defaults.feature_input_path,
+        score_output_path=arguments.output_path or defaults.score_output_path,
+        rejected_output_path=(
+            arguments.rejected_output_path or defaults.rejected_output_path
+        ),
+        scoring_config_path=(
+            arguments.scoring_config_path or defaults.scoring_config_path
+        ),
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        summary = run_hourly_comfort_job(
+            spark, config, run_id, datetime.now(UTC)
+        )
+        print(
+            json.dumps(
+                {
+                    "scored_count": summary.scored_count,
+                    "rejected_count": summary.rejected_count,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
         run_cleansing(arguments.run_id)
+        return
+    if arguments.command == "score-hourly-comfort":
+        run_hourly_scoring(arguments)
         return
 
     if arguments.command == "fetch-reference-data":
