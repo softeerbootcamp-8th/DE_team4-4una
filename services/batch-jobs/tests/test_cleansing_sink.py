@@ -13,6 +13,7 @@ from batch_jobs.cleansing_sink import (
     write_processed_sensor_events,
     write_quarantined_events,
 )
+from batch_jobs.config import CleansingJobConfig
 from batch_jobs.schemas import (
     PROCESSED_SENSOR_EVENT_SCHEMA,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
@@ -22,6 +23,7 @@ from pyspark.sql import SparkSession
 os.environ["TZ"] = "UTC"
 time.tzset()
 
+CONFIG = CleansingJobConfig.from_env({})
 RUN_ID = "cleansing-20260815-001"
 PROCESSED_AT = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
 EVENT_TIME = datetime(2024, 2, 1, 5, 39, 41, 700000, tzinfo=UTC)
@@ -127,7 +129,7 @@ def test_written_silver_is_split_by_event_date(spark, tmp_path):
     silver_path = tmp_path / "silver"
 
     silver = to_processed_sensor_events(cleanse(spark, bronze).passed, RUN_ID, PROCESSED_AT)
-    write_processed_sensor_events(silver, silver_path)
+    write_processed_sensor_events(silver, silver_path, CONFIG.silver_partition_column)
 
     assert partition_dirs(silver_path, "event_date") == [
         "event_date=2024-02-01",
@@ -143,7 +145,9 @@ def test_written_quarantine_is_split_by_rejected_date(spark, tmp_path):
     bronze = write_bronze_parquet(spark, tmp_path, valid_value(), MALFORMED_VALUE)
     quarantine_path = tmp_path / "quarantine"
 
-    write_quarantined_events(cleanse(spark, bronze).quarantined, quarantine_path)
+    write_quarantined_events(
+        cleanse(spark, bronze).quarantined, quarantine_path, CONFIG.quarantine_partition_column
+    )
 
     assert partition_dirs(quarantine_path, "rejected_date") == ["rejected_date=2026-08-15"]
     assert typed_columns(spark.read.parquet(str(quarantine_path))) == schema_columns(

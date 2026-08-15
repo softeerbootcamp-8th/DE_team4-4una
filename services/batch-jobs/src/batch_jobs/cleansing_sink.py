@@ -10,9 +10,6 @@ from pyspark.sql import functions as F
 
 from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 
-SILVER_PARTITION_COLUMN = "event_date"
-QUARANTINE_PARTITION_COLUMN = "rejected_date"
-
 
 def to_processed_sensor_events(
     passed: DataFrame,
@@ -35,11 +32,19 @@ def to_processed_sensor_events(
     )
 
 
-def write_processed_sensor_events(df: DataFrame, path: str | Path) -> None:
-    """Write processed_sensor_event rows as Parquet, split by event_date."""
-    df.write.partitionBy(SILVER_PARTITION_COLUMN).parquet(str(path))
+def write_processed_sensor_events(
+    df: DataFrame,
+    path: str | Path,
+    partition_column: str,
+) -> None:
+    """Write processed_sensor_event rows as Parquet, split by the given column."""
+    df.write.partitionBy(partition_column).parquet(str(path))
 
 
-def write_quarantined_events(df: DataFrame, path: str | Path) -> None:
-    """Write quarantined rows as Parquet, split by the date they were rejected."""
-    df.write.partitionBy(QUARANTINE_PARTITION_COLUMN).parquet(str(path))
+def write_quarantined_events(
+    df: DataFrame,
+    path: str | Path,
+    partition_column: str,
+) -> None:
+    """Write quarantined rows as Parquet, split by the given column."""
+    df.write.partitionBy(partition_column).parquet(str(path))
