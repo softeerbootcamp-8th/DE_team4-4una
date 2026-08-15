@@ -49,7 +49,6 @@ class CleansingConfig:
     required_columns: tuple[str, ...]
     value_ranges: dict[str, ValueRange]
     event_time_bounds: EventTimeBounds
-    negative_allowed: dict[str, bool]
     deduplication: DeduplicationRule
 
 
@@ -69,17 +68,13 @@ def load_cleansing_config(path: Path = DEFAULT_CLEANSING_CONFIG_PATH) -> Cleansi
         event_time_bounds=_parse_event_time_bounds(
             _require_mapping(document, "event_time_bounds", path), path
         ),
-        negative_allowed={
-            column: _require_bool(raw, f"negative_allowed.{column}", path)
-            for column, raw in _require_mapping(document, "negative_allowed", path).items()
-        },
         deduplication=_parse_deduplication(
             _require_mapping(document, "deduplication", path), path
         ),
     )
 
 
-# document[key]가 있고 dict 타입인지 검사한다(value_ranges/negative_allowed/deduplication에 재사용)
+# document[key]가 있고 dict 타입인지 검사한다(value_ranges/event_time_bounds/deduplication에 재사용)
 def _require_mapping(document: dict, key: str, path: Path) -> dict:
     if key not in document:
         raise ValueError(f"{path}: missing required key '{key}'")
@@ -99,7 +94,7 @@ def _require_list_of_str(document: dict, key: str, path: Path) -> list[str]:
     return value
 
 
-# 값이 bool 타입인지 검사한다(negative_allowed, max_exclusive, provisional에 재사용)
+# 값이 bool 타입인지 검사한다(max_exclusive, provisional에 재사용)
 def _require_bool(value: object, field_name: str, path: Path) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{path}: '{field_name}' must be a boolean")
@@ -119,9 +114,9 @@ def _parse_value_range(column: str, raw: object, path: Path) -> ValueRange:
         raise TypeError(f"{path}: value_ranges.{column} must be a mapping")
     if "min" not in raw or "max" not in raw:
         raise ValueError(f"{path}: value_ranges.{column} must define 'min' and 'max'")
-    max_exclusive = raw.get("max_exclusive", False)
-    if not isinstance(max_exclusive, bool):
-        raise TypeError(f"{path}: value_ranges.{column}.max_exclusive must be a boolean")
+    max_exclusive = _require_bool(
+        raw.get("max_exclusive", False), f"value_ranges.{column}.max_exclusive", path
+    )
     return ValueRange(
         minimum=_require_number_or_none(raw["min"], f"value_ranges.{column}.min", path),
         maximum=_require_number_or_none(raw["max"], f"value_ranges.{column}.max", path),
@@ -135,9 +130,9 @@ def _parse_event_time_bounds(raw: dict, path: Path) -> EventTimeBounds:
     maximum = raw.get("max")
     if not isinstance(minimum, str) or not isinstance(maximum, str):
         raise TypeError(f"{path}: event_time_bounds.min/max must be ISO 8601 strings")
-    provisional = raw.get("provisional", False)
-    if not isinstance(provisional, bool):
-        raise TypeError(f"{path}: event_time_bounds.provisional must be a boolean")
+    provisional = _require_bool(
+        raw.get("provisional", False), "event_time_bounds.provisional", path
+    )
     try:
         return EventTimeBounds(
             minimum=datetime.fromisoformat(minimum),

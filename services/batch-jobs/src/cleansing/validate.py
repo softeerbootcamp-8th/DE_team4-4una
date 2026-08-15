@@ -150,7 +150,7 @@ def _range_violations(config: CleansingConfig) -> Column:
     """범위를 벗어난 컬럼을 "이름=값" 형태로 담은 배열."""
     entries = [
         F.when(
-            _violates_range(name, value_range, config.negative_allowed.get(name, True)),
+            _violates_range(name, value_range),
             F.concat(F.lit(f"{name}="), F.col(name).cast("string")),
         )
         for name, value_range in config.value_ranges.items()
@@ -158,7 +158,7 @@ def _range_violations(config: CleansingConfig) -> Column:
     return F.array_compact(F.array(*entries))
 
 
-def _violates_range(name: str, value_range: ValueRange, negative_allowed: bool) -> Column:
+def _violates_range(name: str, value_range: ValueRange) -> Column:
     """컬럼 하나가 범위를 벗어났는지 판정하는 조건식."""
     violated = F.lit(False)
     if value_range.minimum is not None:
@@ -169,8 +169,6 @@ def _violates_range(name: str, value_range: ValueRange, negative_allowed: bool) 
             if value_range.max_exclusive
             else F.col(name) > value_range.maximum
         )
-    if not negative_allowed:
-        violated = violated | (F.col(name) < 0)
     return violated
 
 
