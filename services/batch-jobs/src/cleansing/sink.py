@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
-
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 
 
 def to_processed_sensor_events(
