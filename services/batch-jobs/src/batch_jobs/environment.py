@@ -337,7 +337,7 @@ def normalize_street(value: object) -> str:
 
 
 def load_feature_collection(path: Path) -> dict[str, list[dict[str, object]]]:
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or not isinstance(document.get("features"), list):
         raise TypeError(f"{path.name} must be a GeoJSON FeatureCollection")
     return document

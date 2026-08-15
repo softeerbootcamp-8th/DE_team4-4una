@@ -56,7 +56,7 @@ class CleansingConfig:
 def load_cleansing_config(path: Path = DEFAULT_CLEANSING_CONFIG_PATH) -> CleansingConfig:
     """Parse and validate a cleansing_rules.yaml file into a CleansingConfig."""
 
-    document = yaml.safe_load(path.read_text())
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise TypeError(f"{path}: top-level YAML document must be a mapping")
 

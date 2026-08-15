@@ -192,7 +192,7 @@ def file_sha256(path: Path) -> str:
 
 
 def geojson_count(path: Path) -> int:
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     features = document.get("features", [])
     return len(features) if isinstance(features, list) else 0
 

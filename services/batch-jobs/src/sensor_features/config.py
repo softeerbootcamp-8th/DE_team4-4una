@@ -45,7 +45,7 @@ class EventFeatureConfig:
 def load_steering_feature_config(
     path: Path = DEFAULT_STEERING_FEATURE_CONFIG_PATH,
 ) -> SteeringFeatureConfig:
-    document = yaml.safe_load(path.read_text())
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise TypeError(f"{path}: top-level YAML document must be a mapping")
 
@@ -61,7 +61,7 @@ def load_steering_feature_config(
 def load_event_feature_config(
     path: Path = DEFAULT_EVENT_FEATURE_CONFIG_PATH,
 ) -> EventFeatureConfig:
-    document = yaml.safe_load(path.read_text())
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise TypeError(f"{path}: top-level YAML document must be a mapping")
 

@@ -54,7 +54,7 @@ def load_lion_rows_with_geometry(path: Path) -> list[dict[str, object]]:
     select_representative_rows를 그대로 재사용할 수 있도록 여기서는 geometry를
     같은 dict에 "_geometry" 키로 같이 담아 둔다.
     """
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     features = document.get("features")
     if not isinstance(features, list):
         raise TypeError(f"{path.name} must be a GeoJSON FeatureCollection")
