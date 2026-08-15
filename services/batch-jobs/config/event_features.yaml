@@ -1,8 +1,7 @@
-# 급가속·급제동 episode(hard_accel_event_start / hard_brake_event_start) 계산에
-# 쓰는 설정값. sensor_features.config가 로드한다.
+# 급가속·급제동·급조향 episode(hard_accel_event_start / hard_brake_event_start /
+# sharp_steer_event_start) 계산에 쓰는 설정값. sensor_features.config가 로드한다.
 #
-# provisional: true가 붙은 값은 나중에 바뀔 수 있다. 값이 바뀌면 이 파일의
-# value만 갱신하면 된다.
+# provisional: true가 붙은 값은 나중에 바뀔 수 있다. 값이 바뀌면 이 파일의 value만 갱신하면 된다.
 
 # 같은 trip 안에서 이전 이벤트를 유효한 이전 샘플로 볼 수 있는 최대 시간 간격(초).
 # 이보다 큰 간격은 sensor sampling gap으로 간주해 episode를 이어붙이지 않는다.
@@ -24,5 +23,15 @@ hard_brake_threshold_mps2:
 # 급가속/급제동 후보 구간(episode)이 이 시간(초) 이상 지속돼야 실제 이벤트로 인정한다.
 # 순간적인 센서 노이즈로 인한 단일 샘플 스파이크를 제외하기 위함이다.
 min_event_duration_seconds:
+  value: 0.3
+  provisional: true
+
+# steering_rate(degree/second)의 절대값이 이 값 이상으로 유지되면 급조향 후보로 본다.
+sharp_steer_threshold_deg_per_sec:
+  value: 100.0
+  provisional: true
+
+# 급조향 후보 구간(episode)이 이 시간(초) 이상 지속돼야 실제 이벤트로 인정한다.
+sharp_steer_min_duration_seconds:
   value: 0.3
   provisional: true
