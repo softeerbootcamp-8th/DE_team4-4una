@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pyspark.sql import Row, SparkSession
-from sensor_features.steering import add_steering_rate
+from sensor_features.steering import add_steering_rate, add_steering_reversal
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
 # 고정하지 않으면 실행 머신마다(Asia/Seoul vs UTC) 값이 달라진다.
@@ -38,8 +38,16 @@ def event_time(offset_seconds: float = 0.0) -> datetime:
     return BASE_EVENT_TIME + timedelta(seconds=offset_seconds)
 
 
+def _column_by_event_id(df, column: str) -> dict:
+    return {row["event_id"]: row[column] for row in df.collect()}
+
+
 def rows_by_event_id(df) -> dict:
-    return {row["event_id"]: row["steering_rate"] for row in df.collect()}
+    return _column_by_event_id(df, "steering_rate")
+
+
+def reversal_by_event_id(df) -> dict:
+    return _column_by_event_id(df, "is_steering_reversal")
 
 
 def test_normal_steering_rate_uses_actual_time_delta(spark) -> None:
@@ -173,3 +181,100 @@ def test_non_positive_max_gap_seconds_is_rejected(spark, max_gap_seconds: float)
 
     with pytest.raises(ValueError, match="max_gap_seconds"):
         add_steering_rate(df, max_gap_seconds=max_gap_seconds)
+
+
+RATE_COLUMNS = ("event_id", "trip_id", "trip_seq", "event_time", "steering_rate")
+
+
+def rate_row(event_id: str, trip_seq: int, second: float, steering_rate: float | None) -> Row:
+    return Row(
+        event_id=event_id,
+        trip_id="A",
+        trip_seq=trip_seq,
+        event_time=event_time(second),
+        steering_rate=steering_rate,
+    )
+
+
+def test_deadband_excludes_small_changes_from_direction(spark) -> None:
+    rows = [
+        ("e1", "A", 1, event_time(0.0), 15.0),
+        ("e2", "A", 2, event_time(0.1), 3.0),
+        ("e3", "A", 3, event_time(0.2), -15.0),
+    ]
+    df = spark.createDataFrame(rows, RATE_COLUMNS)
+
+    result = reversal_by_event_id(
+        add_steering_reversal(df, steering_rate_deadband_deg_per_sec=5.0)
+    )
+
+    assert result["e1"] is None
+    assert result["e2"] is None
+    assert result["e3"] is True
+
+
+def test_same_direction_is_not_a_reversal(spark) -> None:
+    rows = [
+        ("e1", "A", 1, event_time(0.0), 15.0),
+        ("e2", "A", 2, event_time(0.1), 20.0),
+    ]
+    df = spark.createDataFrame(rows, RATE_COLUMNS)
+
+    result = reversal_by_event_id(
+        add_steering_reversal(df, steering_rate_deadband_deg_per_sec=5.0)
+    )
+
+    assert result["e1"] is None
+    assert result["e2"] is False
+
+
+def test_reversal_does_not_cross_trip_boundary(spark) -> None:
+    rows = [
+        ("e1", "A", 1, event_time(0.0), 15.0),
+        ("e2", "B", 1, event_time(0.1), -15.0),
+    ]
+    df = spark.createDataFrame(rows, RATE_COLUMNS)
+
+    result = reversal_by_event_id(
+        add_steering_reversal(df, steering_rate_deadband_deg_per_sec=5.0)
+    )
+
+    assert result["e2"] is None
+
+
+def test_null_steering_rate_breaks_reversal_continuity(spark) -> None:
+    # gap(e2) 이후 첫 유효 방향(e3)은 gap 이전 방향(e1)과 비교되면 안 된다.
+    rows = [
+        rate_row("e1", 1, 0.0, 15.0),
+        rate_row("e2", 2, 0.1, None),
+        rate_row("e3", 3, 0.2, -15.0),
+    ]
+    df = spark.createDataFrame(rows)
+
+    result = reversal_by_event_id(
+        add_steering_reversal(df, steering_rate_deadband_deg_per_sec=5.0)
+    )
+
+    assert result["e2"] is None
+    assert result["e3"] is None
+
+
+def test_reversal_existing_columns_are_preserved(spark) -> None:
+    rows = [
+        ("e1", "A", 1, event_time(0.0), 15.0),
+        ("e2", "A", 2, event_time(0.1), -15.0),
+    ]
+    df = spark.createDataFrame(rows, RATE_COLUMNS)
+
+    result = add_steering_reversal(df, steering_rate_deadband_deg_per_sec=5.0)
+
+    assert set(RATE_COLUMNS).issubset(set(result.columns))
+    assert "is_steering_reversal" in result.columns
+
+
+def test_negative_steering_rate_deadband_is_rejected(spark) -> None:
+    rows = [("e1", "A", 1, event_time(0.0), 0.0)]
+    df = spark.createDataFrame(rows, RATE_COLUMNS)
+
+    with pytest.raises(ValueError, match="steering_rate_deadband_deg_per_sec"):
+        add_steering_reversal(df, steering_rate_deadband_deg_per_sec=-1.0)

@@ -7,9 +7,11 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 
-def _trip_window() -> Window:
-    """같은 trip 내부에서만 이전 행을 찾기 위한 결정적 정렬 Window."""
-    return Window.partitionBy("trip_id").orderBy("trip_seq", "event_time", "event_id")
+def _trip_window(*extra_partition_columns: str) -> Window:
+    """같은 trip(및 추가 파티션 컬럼) 내부에서만 이전 행을 찾기 위한 결정적 정렬 Window."""
+    return Window.partitionBy("trip_id", *extra_partition_columns).orderBy(
+        "trip_seq", "event_time", "event_id"
+    )
 
 
 def add_steering_rate(df: DataFrame, max_gap_seconds: float) -> DataFrame:
@@ -54,4 +56,52 @@ def add_steering_rate(df: DataFrame, max_gap_seconds: float) -> DataFrame:
 
     return with_delta.withColumn("steering_rate", steering_rate).drop(
         prev_steering_angle, prev_event_time, delta_time_seconds
+    )
+
+
+def add_steering_reversal(df: DataFrame, steering_rate_deadband_deg_per_sec: float) -> DataFrame:
+    """Add an `is_steering_reversal` column derived within each trip.
+
+    steering_rate 부호를 조향 방향으로 보고, 직전 유효 방향과 부호가 뒤집히면 True다.
+    steering_rate가 NULL이면(sampling gap 등) 연속성이 끊긴 것으로 보아 새
+    continuity group을 시작하고, deadband로 인한 무방향은 연속성을 유지한 채 건너뛴다.
+    """
+    if steering_rate_deadband_deg_per_sec < 0:
+        raise ValueError("steering_rate_deadband_deg_per_sec must be non-negative")
+
+    trip_window = _trip_window()
+    continuity_group = "_continuity_group"
+    steering_direction = "_steering_direction"
+    prev_valid_direction = "_prev_valid_steering_direction"
+
+    is_gap = F.col("steering_rate").isNull()
+    with_group = df.withColumn(
+        continuity_group,
+        F.sum(F.when(is_gap, 1).otherwise(0)).over(
+            trip_window.rowsBetween(Window.unboundedPreceding, 0)
+        ),
+    )
+
+    continuity_preceding_window = _trip_window(continuity_group).rowsBetween(
+        Window.unboundedPreceding, -1
+    )
+
+    direction = F.when(
+        is_gap | (F.abs(F.col("steering_rate")) <= steering_rate_deadband_deg_per_sec),
+        F.lit(None).cast("double"),
+    ).otherwise(F.signum(F.col("steering_rate")))
+
+    with_direction = with_group.withColumn(steering_direction, direction)
+    with_prev_direction = with_direction.withColumn(
+        prev_valid_direction,
+        F.last(F.col(steering_direction), ignorenulls=True).over(continuity_preceding_window),
+    )
+
+    is_reversal = F.when(
+        F.col(steering_direction).isNull() | F.col(prev_valid_direction).isNull(),
+        F.lit(None).cast("boolean"),
+    ).otherwise(F.col(steering_direction) != F.col(prev_valid_direction))
+
+    return with_prev_direction.withColumn("is_steering_reversal", is_reversal).drop(
+        continuity_group, steering_direction, prev_valid_direction
     )
