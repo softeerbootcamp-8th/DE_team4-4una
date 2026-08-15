@@ -350,6 +350,7 @@ Whether `scoring_version` also belongs in the primary key is an open question.
 | Lateral comfort score | `lateral_score` | DOUBLE | N |  | Computed from lateral acceleration/jerk and steering characteristics |
 | Scoring version | `scoring_version` | STRING | N | Possible PK (open) | Score formula, weighting, and rule version |
 | Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used to compute the score |
+| Trip count | `trip_count` | BIGINT | N |  | Distinct trips used for the hourly score and downstream Gold coverage |
 | Run ID | `_run_id` | STRING | N |  | Spark/Airflow ETL run identifier |
 | Processed time | `_processed_at` | TIMESTAMP | N |  | Processing completion time |
 

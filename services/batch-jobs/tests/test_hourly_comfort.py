@@ -99,7 +99,7 @@ def test_produces_the_declared_schema_and_metadata(spark):
     assert all(row[column] is not None for column in result.scored.columns)
     assert row["scoring_version"] == "hourly-comfort-v1"
     assert row["_run_id"] == "silver3-run"
-    assert row["sample_count"] == 36_000
+    assert (row["sample_count"], row["trip_count"]) == (36_000, 10)
 
 
 def test_each_discomfort_group_only_lowers_its_directional_score(spark):

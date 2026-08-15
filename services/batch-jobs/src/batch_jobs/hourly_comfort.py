@@ -87,6 +87,7 @@ def calculate_hourly_comfort_scores(
         *SCORE_COLUMNS,
         F.lit(config.scoring_version).alias("scoring_version"),
         "sample_count",
+        "trip_count",
         F.lit(run_id).alias("_run_id"),
         F.lit(processed_at).alias("_processed_at"),
     )
@@ -128,9 +129,7 @@ def _component_score(
     )
 
 
-def _normalized_penalty(
-    value: Column, low: float, high: float, scale: Column
-) -> Column:
+def _normalized_penalty(value: Column, low: float, high: float, scale: Column) -> Column:
     scaled_low = F.lit(low) * scale
     scaled_high = F.lit(high) * scale
     ratio = (value - scaled_low) / (scaled_high - scaled_low)

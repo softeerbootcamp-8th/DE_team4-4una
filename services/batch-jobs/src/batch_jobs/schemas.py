@@ -128,6 +128,7 @@ HOURLY_COMFORT_SCORE_SCHEMA = StructType(
         StructField("lateral_score", DoubleType(), nullable=False),
         StructField("scoring_version", StringType(), nullable=False),
         StructField("sample_count", LongType(), nullable=False),
+        StructField("trip_count", LongType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
         StructField("_processed_at", TimestampType(), nullable=False),
     ]
