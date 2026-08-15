@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
+    DoubleType,
     IntegerType,
     StringType,
     StructField,
@@ -23,7 +24,15 @@ SCHEMA = StructType(
         StructField("event_time", TimestampType(), nullable=False),
         StructField("segment_id", StringType(), nullable=True),
         StructField("vehicle_profile_id", IntegerType(), nullable=False),
-        StructField("speed_mps", StringType(), nullable=True),
+        StructField("speed_mps", DoubleType(), nullable=True),
+        StructField("accel_x", DoubleType(), nullable=True),
+        StructField("accel_y", DoubleType(), nullable=True),
+        StructField("accel_z", DoubleType(), nullable=True),
+        StructField("jerk_x", DoubleType(), nullable=True),
+        StructField("jerk_y", DoubleType(), nullable=True),
+        StructField("jerk_z", DoubleType(), nullable=True),
+        StructField("steering_rate", DoubleType(), nullable=True),
+        StructField("steering_vibration", DoubleType(), nullable=True),
     ]
 )
 
@@ -51,15 +60,39 @@ def expected(hour: int, minute: int, second: int = 0) -> datetime:
     return datetime(2026, 8, 11, hour, minute, second)  # noqa: DTZ001
 
 
+def sensor_row(
+    hour: int,
+    minute: int,
+    second: int,
+    segment_id: str | None = "S1",
+    vehicle_profile_id: int = 1,
+    speed_mps: float | None = None,
+) -> tuple:
+    return (
+        event_time(hour, minute, second),
+        segment_id,
+        vehicle_profile_id,
+        speed_mps,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
 def sensor_df(spark, rows: list[tuple]):
     return spark.createDataFrame(rows, SCHEMA)
 
 
 def test_rows_in_the_same_hour_share_data_period_start(spark) -> None:
     rows = [
-        (event_time(10, 0, 0), "S1", 1, "5.0"),
-        (event_time(10, 37, 25), "S1", 1, "6.0"),
-        (event_time(10, 59, 59), "S1", 1, "7.0"),
+        sensor_row(10, 0, 0, speed_mps=5.0),
+        sensor_row(10, 37, 25, speed_mps=6.0),
+        sensor_row(10, 59, 59, speed_mps=7.0),
     ]
 
     result = add_hourly_aggregation_keys(sensor_df(spark, rows)).collect()
@@ -68,10 +101,7 @@ def test_rows_in_the_same_hour_share_data_period_start(spark) -> None:
 
 
 def test_hour_boundary_splits_into_different_periods(spark) -> None:
-    rows = [
-        (event_time(10, 59, 59), "S1", 1, None),
-        (event_time(11, 0, 0), "S1", 1, None),
-    ]
+    rows = [sensor_row(10, 59, 59), sensor_row(11, 0, 0)]
 
     result = add_hourly_aggregation_keys(sensor_df(spark, rows)).orderBy("event_time").collect()
 
@@ -80,7 +110,7 @@ def test_hour_boundary_splits_into_different_periods(spark) -> None:
 
 
 def test_data_period_end_is_exactly_one_hour_after_start(spark) -> None:
-    rows = [(event_time(10, 37, 25), "S1", 1, None)]
+    rows = [sensor_row(10, 37, 25)]
 
     row = add_hourly_aggregation_keys(sensor_df(spark, rows)).first()
 
@@ -88,10 +118,7 @@ def test_data_period_end_is_exactly_one_hour_after_start(spark) -> None:
 
 
 def test_unmatched_events_without_segment_id_are_excluded(spark) -> None:
-    rows = [
-        (event_time(10, 0, 0), "S1", 1, None),
-        (event_time(10, 0, 0), None, 1, None),
-    ]
+    rows = [sensor_row(10, 0, 0, segment_id="S1"), sensor_row(10, 0, 0, segment_id=None)]
 
     result = add_hourly_aggregation_keys(sensor_df(spark, rows)).collect()
 
@@ -100,10 +127,7 @@ def test_unmatched_events_without_segment_id_are_excluded(spark) -> None:
 
 
 def test_different_segment_ids_are_kept_separate(spark) -> None:
-    rows = [
-        (event_time(10, 0, 0), "S1", 1, None),
-        (event_time(10, 0, 0), "S2", 1, None),
-    ]
+    rows = [sensor_row(10, 0, 0, segment_id="S1"), sensor_row(10, 0, 0, segment_id="S2")]
 
     result = add_hourly_aggregation_keys(sensor_df(spark, rows)).collect()
 
@@ -112,8 +136,8 @@ def test_different_segment_ids_are_kept_separate(spark) -> None:
 
 def test_different_vehicle_profile_ids_are_kept_separate(spark) -> None:
     rows = [
-        (event_time(10, 0, 0), "S1", 1, None),
-        (event_time(10, 0, 0), "S1", 2, None),
+        sensor_row(10, 0, 0, vehicle_profile_id=1),
+        sensor_row(10, 0, 0, vehicle_profile_id=2),
     ]
 
     result = add_hourly_aggregation_keys(sensor_df(spark, rows)).collect()
@@ -122,11 +146,11 @@ def test_different_vehicle_profile_ids_are_kept_separate(spark) -> None:
 
 
 def test_existing_sensor_columns_are_retained(spark) -> None:
-    rows = [(event_time(10, 0, 0), "S1", 1, "5.0")]
+    rows = [sensor_row(10, 0, 0, speed_mps=5.0)]
 
     row = add_hourly_aggregation_keys(sensor_df(spark, rows)).first()
 
-    assert row["speed_mps"] == "5.0"
+    assert row["speed_mps"] == pytest.approx(5.0)
 
 
 def test_missing_required_column_is_rejected(spark) -> None:
