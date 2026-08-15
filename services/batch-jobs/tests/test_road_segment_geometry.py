@@ -105,13 +105,11 @@ def test_normalize_line_geometry_converts_single_part_multilinestring() -> None:
     assert line.geom_type == "LineString"
 
 
-def test_normalize_line_geometry_merges_connected_multilinestring_parts() -> None:
+def test_normalize_line_geometry_excludes_multipart_multilinestring_even_when_connected() -> None:
+    # part가 이어져 있어도 방향을 보장할 수 없으므로 제외한다.
     raw = mapping(MultiLineString([LINE_A, LINE_B]))
 
-    line = normalize_line_geometry(raw)
-
-    assert line is not None
-    assert line.geom_type == "LineString"
+    assert normalize_line_geometry(raw) is None
 
 
 def test_normalize_line_geometry_rejects_disconnected_multilinestring() -> None:
@@ -128,17 +126,6 @@ def test_normalize_line_geometry_preserves_coordinate_order_for_linestring() -> 
     expected = reproject_to_target_crs(LineString(LINE_A))
     assert line.coords[0] == expected.coords[0]
     assert line.coords[-1] == expected.coords[-1]
-
-
-def test_normalize_line_geometry_preserves_direction_when_merging_parts() -> None:
-    raw = mapping(MultiLineString([LINE_A, LINE_B]))
-
-    line = normalize_line_geometry(raw)
-
-    expected_start = reproject_to_target_crs(Point(LINE_A[0]))
-    expected_end = reproject_to_target_crs(Point(LINE_B[-1]))
-    assert line.coords[0] == expected_start.coords[0]
-    assert line.coords[-1] == expected_end.coords[0]
 
 
 def test_load_lion_rows_with_geometry_keeps_geometry_alongside_properties(
@@ -175,24 +162,21 @@ def test_build_segment_geometry_returns_none_for_null_geometry() -> None:
     assert build_segment_geometry(row) is None
 
 
-def test_build_segment_geometries_excludes_non_vehicle_and_null_geometry(
-    tmp_path,
-) -> None:
+def test_build_segment_geometries_excludes_invalid_and_multipart_geometry(tmp_path) -> None:
     path = tmp_path / "lion.geojson"
     features = [
         lion_feature(lion_row("0000001", 1, mapping(LineString(LINE_A)))),
-        lion_feature(lion_row("0000002", 2, None, feature_type="0")),
-        lion_feature(
-            lion_row("0000003", 3, mapping(LineString(LINE_B)), feature_type="F")
-        ),
+        lion_feature(lion_row("0000002", 2, None)),  # null geometry
+        lion_feature(lion_row("0000003", 3, mapping(LineString(LINE_B)), feature_type="F")),
+        lion_feature(lion_row("0000004", 4, mapping(MultiLineString([LINE_A, LINE_B])))),
     ]
     path.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
 
     report = build_segment_geometries(path)
 
     assert [geometry.segment_id for geometry in report.geometries] == ["0000001"]
-    assert report.input_segment_count == 2
-    assert report.excluded_geometry_count == 1
+    assert report.input_segment_count == 3  # 0000003은 FeatureTyp="F"라 vehicle 아님
+    assert report.excluded_geometry_count == 2  # null geometry + multipart geometry
 
 
 def test_crs_constants_are_wgs84_source_and_state_plane_meters_target() -> None:
