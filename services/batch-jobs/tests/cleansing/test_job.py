@@ -91,3 +91,17 @@ def test_job_writes_both_outputs(spark, tmp_path):
 
     assert spark.read.parquet(config.processed_output_path).count() == 2
     assert spark.read.parquet(config.quarantine_output_path).count() == 2
+
+
+def test_job_loses_no_row(spark, tmp_path):
+    # 저장된 통과 행과 격리 행을 합치면 입력 행 수와 같은지 확인한다.
+    bronze = write_bronze_parquet(
+        spark, tmp_path, valid_value(), MALFORMED_VALUE, valid_value(event_id="other")
+    )
+    config = job_config(tmp_path, bronze)
+
+    run_cleansing_job(spark, config, RUN_ID, PROCESSED_AT)
+
+    processed = spark.read.parquet(config.processed_output_path).count()
+    quarantined = spark.read.parquet(config.quarantine_output_path).count()
+    assert processed + quarantined == 3
