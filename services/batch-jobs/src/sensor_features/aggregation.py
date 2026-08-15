@@ -12,6 +12,8 @@ HOURLY_GROUP_KEYS = (
     "vehicle_profile_id",
 )
 
+EVENT_GROUP_KEYS = (*HOURLY_GROUP_KEYS, "road_snapshot_date")
+
 # RMS를 계산할 신호 전체.
 RMS_COLUMNS = (
     "accel_x",
@@ -35,6 +37,14 @@ P95_ABS_COLUMNS = (
     "jerk_z",
 )
 
+# 집계 결과 컬럼명 -> 원본 이벤트 시작 플래그 컬럼명
+EVENT_FLAG_COLUMNS = {
+    "hard_brake_count": "hard_brake_event_start",
+    "hard_accel_count": "hard_accel_event_start",
+    "sharp_steer_count": "sharp_steer_event_start",
+    "steer_reversal_count": "is_steering_reversal",
+}
+
 _KEY_REQUIRED_COLUMNS = {
     "event_time",
     "segment_id",
@@ -44,6 +54,12 @@ _KEY_REQUIRED_COLUMNS = {
 _STATISTICS_REQUIRED_COLUMNS = {
     "speed_mps",
     *RMS_COLUMNS,
+}
+
+_EVENT_REQUIRED_COLUMNS = {
+    "road_snapshot_date",
+    "trip_id",
+    *EVENT_FLAG_COLUMNS.values(),
 }
 
 # percentile_approx의 정확도 파라미터. 클수록 정확하지만 메모리를 더 쓴다.
@@ -91,3 +107,28 @@ def aggregate_hourly_sensor_statistics(df: DataFrame) -> DataFrame:
         expressions.append(_p95_abs(column_name).alias(f"p95_abs_{column_name}"))
 
     return keyed.groupBy(*HOURLY_GROUP_KEYS).agg(*expressions)
+
+
+def _count_true(column_name: str, output_name: str) -> Column:
+    # 이벤트는 시작 행 하나만 True이므로, True 개수를 세면 곧 이벤트 발생 횟수가 된다.
+    flag = F.coalesce(F.col(column_name).cast("boolean"), F.lit(False))
+    return F.sum(F.when(flag, 1).otherwise(0).cast("int")).cast("int").alias(output_name)
+
+
+def aggregate_hourly_event_counts(df: DataFrame) -> DataFrame:
+    """시간·Segment·차량 프로필·road_snapshot_date별로 표본·Trip·이벤트 횟수를 집계한다."""
+    _require_columns(df, _EVENT_REQUIRED_COLUMNS)
+    keyed = add_hourly_aggregation_keys(df)
+
+    count_expressions = [
+        _count_true(flag_column, output_column)
+        for output_column, flag_column in EVENT_FLAG_COLUMNS.items()
+    ]
+    count_expressions.extend(
+        [
+            F.count(F.lit(1)).cast("long").alias("sample_count"),
+            F.countDistinct("trip_id").cast("long").alias("trip_count"),
+        ]
+    )
+
+    return keyed.groupBy(*EVENT_GROUP_KEYS).agg(*count_expressions)
