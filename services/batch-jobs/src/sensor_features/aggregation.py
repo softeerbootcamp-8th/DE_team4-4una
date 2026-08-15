@@ -35,10 +35,13 @@ P95_ABS_COLUMNS = (
     "jerk_z",
 )
 
-_REQUIRED_COLUMNS = {
+_KEY_REQUIRED_COLUMNS = {
     "event_time",
     "segment_id",
     "vehicle_profile_id",
+}
+
+_STATISTICS_REQUIRED_COLUMNS = {
     "speed_mps",
     *RMS_COLUMNS,
 }
@@ -47,18 +50,20 @@ _REQUIRED_COLUMNS = {
 PERCENTILE_ACCURACY = 10_000
 
 
-def add_hourly_aggregation_keys(df: DataFrame) -> DataFrame:
-    """시간·Segment·차량 프로필 집계 키를 추가하고, Map Matching에 실패한 행은 제외한다."""
-    missing_columns = _REQUIRED_COLUMNS - set(df.columns)
+def _require_columns(df: DataFrame, required_columns: set[str]) -> None:
+    missing_columns = required_columns - set(df.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
         raise ValueError(f"df is missing required columns: {missing}")
 
-    data_period_start = F.date_trunc("hour", F.col("event_time"))
+
+def add_hourly_aggregation_keys(df: DataFrame) -> DataFrame:
+    """시간·Segment·차량 프로필 집계 키를 추가하고, Map Matching에 실패한 행은 제외한다."""
+    _require_columns(df, _KEY_REQUIRED_COLUMNS)
 
     return (
         df.filter(F.col("segment_id").isNotNull())
-        .withColumn("data_period_start", data_period_start)
+        .withColumn("data_period_start", F.date_trunc("hour", F.col("event_time")))
         .withColumn("data_period_end", F.col("data_period_start") + F.expr("INTERVAL 1 HOUR"))
     )
 
@@ -76,6 +81,7 @@ def _p95_abs(column_name: str) -> Column:
 
 def aggregate_hourly_sensor_statistics(df: DataFrame) -> DataFrame:
     """시간·Segment·차량 프로필별 평균 속도와 가속도/jerk/조향 신호의 RMS·P95를 계산한다."""
+    _require_columns(df, _STATISTICS_REQUIRED_COLUMNS)
     keyed = add_hourly_aggregation_keys(df)
 
     expressions = [F.avg(F.col("speed_mps").cast("double")).alias("avg_speed_mps")]
