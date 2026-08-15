@@ -109,6 +109,33 @@ def test_null_optional_value_is_not_quarantined(spark, tmp_path):
     assert split(spark, path).quarantined.collect() == []
 
 
+def test_unconvertible_event_time_is_quarantined(spark, tmp_path):
+    # 타임스탬프로 변환할 수 없는 event_time이 OUT_OF_RANGE 사유로 격리되는지 확인한다.
+    path = write_bronze_parquet(spark, tmp_path, valid_value(), valid_value(event_time="unknown"))
+
+    result = split(spark, path)
+
+    rows = result.quarantined.collect()
+    assert [row["reject_reason"] for row in rows] == [OUT_OF_RANGE]
+    assert rows[0]["reject_detail"] == "event_time=unknown"
+    assert rows[0]["event_date"] is None
+    assert len(result.passed.collect()) == 1
+
+
+def test_event_time_outside_its_bounds_is_quarantined(spark, tmp_path):
+    # 허용 범위를 벗어난 연도의 event_time이 격리되는지 확인한다.
+    path = write_bronze_parquet(
+        spark, tmp_path, valid_value(), valid_value(event_time="1000-01-01T00:00:00+00:00")
+    )
+
+    result = split(spark, path)
+
+    rows = result.quarantined.collect()
+    assert [row["reject_reason"] for row in rows] == [OUT_OF_RANGE]
+    assert rows[0]["reject_detail"] == "event_time=1000-01-01T00:00:00+00:00"
+    assert len(result.passed.collect()) == 1
+
+
 def test_reject_detail_names_the_violating_columns_and_values(spark, tmp_path):
     # 판정 상세에 위반한 컬럼과 실제 값이 설정 순서대로 들어가는지 확인한다.
     path = write_bronze_parquet(spark, tmp_path, valid_value(latitude=10.0, speed_mps=99.0))

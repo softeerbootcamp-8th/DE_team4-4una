@@ -93,6 +93,21 @@ def test_job_writes_both_outputs(spark, tmp_path):
     assert spark.read.parquet(config.quarantine_output_path).count() == 2
 
 
+def test_job_completes_when_event_time_is_unusable(spark, tmp_path):
+    # event_time을 변환할 수 없는 행이 섞여 있어도 잡이 중단되지 않는지 확인한다.
+    bronze = write_bronze_parquet(
+        spark, tmp_path, valid_value(), valid_value(event_id="broken", event_time="unknown")
+    )
+    config = job_config(tmp_path, bronze)
+
+    run_cleansing_job(spark, config, RUN_ID, PROCESSED_AT)
+
+    processed = spark.read.parquet(config.processed_output_path)
+    assert processed.count() == 1
+    assert processed.filter("event_time is null").count() == 0
+    assert spark.read.parquet(config.quarantine_output_path).count() == 1
+
+
 def test_job_loses_no_row(spark, tmp_path):
     # 저장된 통과 행과 격리 행을 합치면 입력 행 수와 같은지 확인한다.
     bronze = write_bronze_parquet(
