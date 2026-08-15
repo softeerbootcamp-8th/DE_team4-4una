@@ -1,13 +1,22 @@
-"""Build hourly aggregation keys and statistics for map-matched sensor events."""
+"""Build and validate hourly features for map-matched sensor events."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
+from batch_jobs.schemas import HOURLY_SEGMENT_FEATURE_SCHEMA
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
 HOURLY_GROUP_KEYS = (
     "data_period_start",
     "data_period_end",
+    "segment_id",
+    "vehicle_profile_id",
+)
+
+HOURLY_PRIMARY_KEY = (
+    "data_period_start",
     "segment_id",
     "vehicle_profile_id",
 )
@@ -61,6 +70,11 @@ _EVENT_REQUIRED_COLUMNS = {
     "trip_id",
     *EVENT_FLAG_COLUMNS.values(),
 }
+
+# NOT NULL이어야 하는 최종 출력 컬럼. 스키마의 nullable 플래그를 그대로 따른다.
+_NON_NULL_OUTPUT_COLUMNS = tuple(
+    field.name for field in HOURLY_SEGMENT_FEATURE_SCHEMA.fields if not field.nullable
+)
 
 # percentile_approx의 정확도 파라미터. 클수록 정확하지만 메모리를 더 쓴다.
 PERCENTILE_ACCURACY = 10_000
@@ -132,3 +146,108 @@ def aggregate_hourly_event_counts(df: DataFrame) -> DataFrame:
     )
 
     return keyed.groupBy(*EVENT_GROUP_KEYS).agg(*count_expressions)
+
+
+def build_hourly_segment_features(
+    df: DataFrame,
+    *,
+    feature_version: str,
+    run_id: str,
+    processed_at: datetime | None = None,
+) -> DataFrame:
+    """센서 통계와 이벤트 집계를 합쳐 HOURLY_SEGMENT_FEATURE_SCHEMA 형태의 결과를 만든다."""
+    if not feature_version.strip():
+        raise ValueError("feature_version must not be blank")
+    if not run_id.strip():
+        raise ValueError("run_id must not be blank")
+
+    processed_at_value = processed_at or datetime.now(UTC)
+    if processed_at_value.utcoffset() != timedelta(0):
+        raise ValueError("processed_at must be UTC timezone-aware")
+
+    statistics = aggregate_hourly_sensor_statistics(df)
+    counts = aggregate_hourly_event_counts(df)
+
+    combined = (
+        statistics.join(counts, on=list(HOURLY_GROUP_KEYS), how="inner")
+        .withColumn("feature_version", F.lit(feature_version))
+        .withColumn("_processed_at", F.lit(processed_at_value).cast("timestamp"))
+        .withColumn("_run_id", F.lit(run_id))
+    )
+
+    result = combined.select(
+        *(
+            F.col(field.name).cast(field.dataType).alias(field.name)
+            for field in HOURLY_SEGMENT_FEATURE_SCHEMA.fields
+        )
+    )
+    validate_hourly_segment_features(result)
+    return result
+
+
+def validate_hourly_segment_features(df: DataFrame) -> None:
+    """스키마·필수값·PK 중복·시간 구간·카운트 값이 계약을 위반하면 예외를 던진다."""
+    expected_fields = HOURLY_SEGMENT_FEATURE_SCHEMA.fields
+    expected_names = [field.name for field in expected_fields]
+    if df.columns != expected_names:
+        raise ValueError(
+            "hourly feature columns do not match the canonical schema: "
+            f"expected={expected_names}, actual={df.columns}"
+        )
+
+    actual_types = {field.name: field.dataType for field in df.schema.fields}
+    type_mismatches = [
+        f"{field.name}: expected {field.dataType.simpleString()}, "
+        f"got {actual_types[field.name].simpleString()}"
+        for field in expected_fields
+        if actual_types[field.name] != field.dataType
+    ]
+    if type_mismatches:
+        raise ValueError(
+            "hourly feature types do not match the canonical schema: " + "; ".join(type_mismatches)
+        )
+
+    null_condition = F.lit(False)
+    for column_name in _NON_NULL_OUTPUT_COLUMNS:
+        null_condition = null_condition | F.col(column_name).isNull()
+
+    invalid_period = F.col("data_period_end") != F.col("data_period_start") + F.expr(
+        "INTERVAL 1 HOUR"
+    )
+
+    count_columns = (*EVENT_FLAG_COLUMNS.keys(), "sample_count", "trip_count")
+    invalid_count = F.lit(False)
+    for column_name in count_columns:
+        invalid_count = invalid_count | (F.col(column_name) < 0)
+    invalid_count = (
+        invalid_count
+        | (F.col("sample_count") <= 0)
+        | (F.col("trip_count") <= 0)
+        | (F.col("sample_count") < F.col("trip_count"))
+    )
+    for column_name in EVENT_FLAG_COLUMNS:
+        invalid_count = invalid_count | (F.col(column_name) > F.col("sample_count"))
+
+    # 이후 두 액션(아래 조건 체크 + PK 중복 체크)이 상류 lineage를 다시 계산하지 않도록 캐시한다.
+    df = df.cache()
+
+    # 행 단위 위반 3종을 개별 count() 대신 하나의 스캔으로 같이 계산한다.
+    violations = df.select(
+        F.max(null_condition.cast("int")).alias("has_null"),
+        F.max(invalid_period.cast("int")).alias("has_invalid_period"),
+        F.max(invalid_count.cast("int")).alias("has_invalid_count"),
+    ).first()
+
+    if violations["has_null"]:
+        raise ValueError("hourly feature output contains NULL in a required column")
+    if violations["has_invalid_period"]:
+        raise ValueError("data_period_end must be exactly one hour after start")
+    if violations["has_invalid_count"]:
+        raise ValueError("hourly feature output contains invalid count values")
+
+    duplicate = (
+        df.groupBy(*HOURLY_PRIMARY_KEY).count().filter(F.col("count") > 1).limit(1).collect()
+    )
+    if duplicate:
+        key = {column: duplicate[0][column] for column in HOURLY_PRIMARY_KEY}
+        raise ValueError(f"duplicate hourly feature primary key: {key}")
