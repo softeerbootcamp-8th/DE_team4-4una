@@ -85,3 +85,51 @@ SENSOR_EVENT_QUARANTINE_SCHEMA = StructType(
         StructField("rejected_date", DateType(), nullable=False),
     ]
 )
+
+HOURLY_SEGMENT_FEATURE_SCHEMA = StructType(
+    [
+        StructField("segment_id", StringType(), nullable=False),
+        StructField("vehicle_profile_id", IntegerType(), nullable=False),
+        StructField("data_period_start", TimestampType(), nullable=False),
+        StructField("data_period_end", TimestampType(), nullable=False),
+        StructField("road_snapshot_date", DateType(), nullable=False),
+        StructField("avg_speed_mps", DoubleType(), nullable=True),
+        StructField("rms_accel_x", DoubleType(), nullable=True),
+        StructField("rms_accel_y", DoubleType(), nullable=True),
+        StructField("rms_accel_z", DoubleType(), nullable=True),
+        StructField("p95_abs_accel_x", DoubleType(), nullable=True),
+        StructField("p95_abs_accel_y", DoubleType(), nullable=True),
+        StructField("p95_abs_accel_z", DoubleType(), nullable=True),
+        StructField("rms_jerk_x", DoubleType(), nullable=True),
+        StructField("rms_jerk_y", DoubleType(), nullable=True),
+        StructField("rms_jerk_z", DoubleType(), nullable=True),
+        StructField("p95_abs_jerk_x", DoubleType(), nullable=True),
+        StructField("p95_abs_jerk_y", DoubleType(), nullable=True),
+        StructField("p95_abs_jerk_z", DoubleType(), nullable=True),
+        StructField("hard_brake_count", IntegerType(), nullable=False),
+        StructField("hard_accel_count", IntegerType(), nullable=False),
+        StructField("sharp_steer_count", IntegerType(), nullable=False),
+        StructField("steer_reversal_count", IntegerType(), nullable=False),
+        StructField("rms_steering_rate", DoubleType(), nullable=True),
+        StructField("rms_steering_vibration", DoubleType(), nullable=True),
+        StructField("sample_count", LongType(), nullable=False),
+        StructField("trip_count", LongType(), nullable=False),
+        StructField("feature_version", StringType(), nullable=False),
+        StructField("_processed_at", TimestampType(), nullable=False),
+        StructField("_run_id", StringType(), nullable=False),
+    ]
+)
+
+HOURLY_COMFORT_SCORE_SCHEMA = StructType(
+    [
+        *HOURLY_SEGMENT_FEATURE_SCHEMA.fields[:5],
+        StructField("vertical_score", DoubleType(), nullable=False),
+        StructField("longitudinal_score", DoubleType(), nullable=False),
+        StructField("lateral_score", DoubleType(), nullable=False),
+        StructField("scoring_version", StringType(), nullable=False),
+        StructField("sample_count", LongType(), nullable=False),
+        StructField("trip_count", LongType(), nullable=False),
+        StructField("_run_id", StringType(), nullable=False),
+        StructField("_processed_at", TimestampType(), nullable=False),
+    ]
+)

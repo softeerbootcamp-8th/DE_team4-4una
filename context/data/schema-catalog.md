@@ -348,9 +348,9 @@ Whether `scoring_version` also belongs in the primary key is an open question.
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Computed from vertical acceleration/jerk |
 | Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Computed from accel/brake and longitudinal jerk |
 | Lateral comfort score | `lateral_score` | DOUBLE | N |  | Computed from lateral acceleration/jerk and steering characteristics |
-| Comfort score | `comfort_score` | DOUBLE | N |  | Final sensor-based score combining the three directional scores |
 | Scoring version | `scoring_version` | STRING | N | Possible PK (open) | Score formula, weighting, and rule version |
 | Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used to compute the score |
+| Trip count | `trip_count` | BIGINT | N |  | Distinct trips used for the hourly score and downstream Gold coverage |
 | Run ID | `_run_id` | STRING | N |  | Spark/Airflow ETL run identifier |
 | Processed time | `_processed_at` | TIMESTAMP | N |  | Processing completion time |
 
