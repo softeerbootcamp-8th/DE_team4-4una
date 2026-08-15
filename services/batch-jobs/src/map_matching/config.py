@@ -31,7 +31,7 @@ class MapMatchingConfig:
 
 # map_matching.yaml을 읽어 MapMatchingConfig로 검증한다
 def load_map_matching_config(path: Path = DEFAULT_MAP_MATCHING_CONFIG_PATH) -> MapMatchingConfig:
-    document = yaml.safe_load(path.read_text())
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise TypeError(f"{path}: top-level YAML document must be a mapping")
 

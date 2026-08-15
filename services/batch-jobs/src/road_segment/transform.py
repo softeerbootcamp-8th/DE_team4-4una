@@ -51,7 +51,7 @@ class RoadSegmentRow:
 
 
 def load_lion_rows(path: Path) -> list[dict[str, object]]:
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     features = document.get("features")
     if not isinstance(features, list):
         raise TypeError(f"{path.name} must be a GeoJSON FeatureCollection")

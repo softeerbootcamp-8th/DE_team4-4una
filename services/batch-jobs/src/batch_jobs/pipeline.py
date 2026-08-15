@@ -253,7 +253,7 @@ def publish_tables(
 def load_source_metadata(path: Path) -> dict[str, dict[str, object]]:
     if not path.is_file():
         return {}
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     retrieved_at = document.get("retrieved_at")
     result: dict[str, dict[str, object]] = {}
     for item in document.get("sources", []):
@@ -298,7 +298,7 @@ def validate_build_id(build_id: str) -> None:
 def source_schema_fingerprint(path: Path) -> str:
     if path.suffix != ".geojson":
         return hashlib.sha256(b"shapefile:LocationID,geometry").hexdigest()
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding="utf-8"))
     property_names: set[str] = set()
     geometry_types: set[str] = set()
     for feature in document.get("features", []):
