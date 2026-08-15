@@ -4,12 +4,12 @@ import time
 from pathlib import Path
 
 import pytest
-from batch_jobs.bronze_reader import read_bronze_sensor_events
 from batch_jobs.schemas import (
     BRONZE_SENSOR_EVENT_SCHEMA,
     PARSE_FAILED_COLUMN,
     RAW_RECORD_COLUMN,
 )
+from cleansing.reader import read_bronze_sensor_events
 from pyspark.sql import SparkSession
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,

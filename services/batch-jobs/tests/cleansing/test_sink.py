@@ -5,19 +5,19 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from batch_jobs.bronze_reader import read_bronze_sensor_events
-from batch_jobs.cleansing import cleanse_sensor_events
-from batch_jobs.cleansing_config import load_cleansing_config
-from batch_jobs.cleansing_sink import (
-    to_processed_sensor_events,
-    write_processed_sensor_events,
-    write_quarantined_events,
-)
-from batch_jobs.config import CleansingJobConfig
 from batch_jobs.schemas import (
     PROCESSED_SENSOR_EVENT_SCHEMA,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
 )
+from cleansing.config import CleansingJobConfig
+from cleansing.reader import read_bronze_sensor_events
+from cleansing.rules import load_cleansing_config
+from cleansing.sink import (
+    to_processed_sensor_events,
+    write_processed_sensor_events,
+    write_quarantined_events,
+)
+from cleansing.validate import cleanse_sensor_events
 from pyspark.sql import SparkSession
 
 os.environ["TZ"] = "UTC"
@@ -129,7 +129,7 @@ def test_written_silver_is_split_by_event_date(spark, tmp_path):
     silver_path = tmp_path / "silver"
 
     silver = to_processed_sensor_events(cleanse(spark, bronze).passed, RUN_ID, PROCESSED_AT)
-    write_processed_sensor_events(silver, silver_path, CONFIG.silver_partition_column)
+    write_processed_sensor_events(silver, silver_path, CONFIG.processed_partition_column)
 
     assert partition_dirs(silver_path, "event_date") == [
         "event_date=2024-02-01",

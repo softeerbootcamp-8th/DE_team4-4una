@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, StructField, StructType
-
 from batch_jobs.schemas import (
     BRONZE_SENSOR_EVENT_SCHEMA,
     PARSE_FAILED_COLUMN,
     RAW_RECORD_COLUMN,
 )
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, StructField, StructType
 
 # from_json이 파싱 실패를 표시하도록 Bronze 스키마에 corrupt record 컬럼을 덧붙인다.
 CORRUPT_RECORD_COLUMN = "_corrupt_record"

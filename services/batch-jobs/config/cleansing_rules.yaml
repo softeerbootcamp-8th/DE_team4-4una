@@ -1,4 +1,4 @@
-# 센서 이벤트 클렌징 판정 기준. batch_jobs.cleansing_config가 로드해 검증한다.
+# 센서 이벤트 클렌징 판정 기준. cleansing.rules가 로드해 검증한다.
 #
 # 판정 순서(이 파일이 강제하진 않지만 클렌징 job 구현 시 반드시 지켜야 함):
 #   1. 파싱 실패            -> MALFORMED_JSON
