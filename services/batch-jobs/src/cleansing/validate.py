@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
-from batch_jobs.cleansing_config import CleansingConfig, ValueRange
-from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
+from cleansing.rules import CleansingConfig, ValueRange
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
@@ -199,4 +199,5 @@ def _quarantine_rows(
         raw_record.alias("raw_record"),
         F.lit(run_id).alias("_run_id"),
         F.lit(rejected_at).alias("_rejected_at"),
+        F.lit(rejected_at.date()).alias("rejected_date"),
     )

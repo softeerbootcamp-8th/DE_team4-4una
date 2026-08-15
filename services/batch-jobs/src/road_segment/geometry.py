@@ -10,7 +10,6 @@ import shapely
 from pyproj import Transformer
 from shapely.geometry import LineString, MultiLineString, shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import linemerge
 from shapely.ops import transform as reproject_geometry
 
 from road_segment.transform import (
@@ -93,12 +92,13 @@ def normalize_line_geometry(raw_geometry: object) -> BaseGeometry | None:
 
 
 def merge_to_single_line(geometry: BaseGeometry) -> LineString | None:
-    """MultiLineString의 여러 part가 하나로 이어지지 않으면 None을 반환한다."""
+    """part가 여러 개인 MultiLineString은 방향(NodeIDFrom->To)을 보장할 수 없어 제외한다."""
     if isinstance(geometry, LineString):
         return geometry
     if isinstance(geometry, MultiLineString):
-        merged = linemerge(geometry)
-        return merged if isinstance(merged, LineString) else None
+        if len(geometry.geoms) != 1:
+            return None
+        return geometry.geoms[0]
     return None
 
 
