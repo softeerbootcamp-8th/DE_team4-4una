@@ -199,4 +199,5 @@ def _quarantine_rows(
         raw_record.alias("raw_record"),
         F.lit(run_id).alias("_run_id"),
         F.lit(rejected_at).alias("_rejected_at"),
+        F.lit(rejected_at.date()).alias("rejected_date"),
     )
