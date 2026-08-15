@@ -129,7 +129,7 @@ def test_written_silver_is_split_by_event_date(spark, tmp_path):
     silver_path = tmp_path / "silver"
 
     silver = to_processed_sensor_events(cleanse(spark, bronze).passed, RUN_ID, PROCESSED_AT)
-    write_processed_sensor_events(silver, silver_path, CONFIG.silver_partition_column)
+    write_processed_sensor_events(silver, silver_path, CONFIG.processed_partition_column)
 
     assert partition_dirs(silver_path, "event_date") == [
         "event_date=2024-02-01",
