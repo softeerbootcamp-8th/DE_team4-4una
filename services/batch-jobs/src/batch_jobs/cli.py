@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import tempfile
 from datetime import UTC, date, datetime
@@ -29,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     monthly_parser = subparsers.add_parser("run-monthly")
     add_build_arguments(monthly_parser)
     add_bbox_argument(monthly_parser)
+
+    cleanse_parser = subparsers.add_parser("cleanse-sensor-events")
+    cleanse_parser.add_argument("--run-id", required=True)
     return parser
 
 
@@ -57,8 +61,24 @@ def add_bbox_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def run_cleansing(run_id: str) -> None:
+    from cleansing.config import CleansingJobConfig
+    from cleansing.job import build_spark_session, run_cleansing_job
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        run_cleansing_job(spark, CleansingJobConfig.from_env(), run_id, datetime.now(UTC))
+    finally:
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
+    if arguments.command == "cleanse-sensor-events":
+        run_cleansing(arguments.run_id)
+        return
+
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(
             arguments.output_dir,
