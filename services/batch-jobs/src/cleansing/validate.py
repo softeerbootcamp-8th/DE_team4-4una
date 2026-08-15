@@ -9,7 +9,7 @@ from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
-from cleansing.rules import CleansingConfig, ValueRange
+from cleansing.rules import CleansingConfig, EventTimeBounds, ValueRange
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
@@ -155,6 +155,12 @@ def _range_violations(config: CleansingConfig) -> Column:
         )
         for name, value_range in config.value_ranges.items()
     ]
+    entries.append(
+        F.when(
+            _violates_event_time_bounds(config.event_time_bounds),
+            F.concat(F.lit("event_time="), F.col("event_time")),
+        )
+    )
     return F.array_compact(F.array(*entries))
 
 
@@ -170,6 +176,12 @@ def _violates_range(name: str, value_range: ValueRange) -> Column:
             else F.col(name) > value_range.maximum
         )
     return violated
+
+
+def _violates_event_time_bounds(bounds: EventTimeBounds) -> Column:
+    """event_time이 타임스탬프로 변환되지 않거나 허용 범위를 벗어났는지 판정한다."""
+    parsed = F.try_to_timestamp(F.col("event_time"))
+    return parsed.isNull() | (parsed < F.lit(bounds.minimum)) | (parsed > F.lit(bounds.maximum))
 
 
 def _null_required_columns(required_columns: tuple[str, ...]) -> Column:
@@ -191,7 +203,7 @@ def _quarantine_rows(
         F.col("event_id"),
         F.col("trip_id"),
         # Bronze의 event_time은 STRING이라 DATE로 변환한다. 파싱 실패 행은 NULL이 된다.
-        F.to_date(F.col("event_time")).alias("event_date"),
+        F.to_date(F.try_to_timestamp(F.col("event_time"))).alias("event_date"),
         F.lit(reject_reason).alias("reject_reason"),
         reject_detail.alias("reject_detail"),
         raw_record.alias("raw_record"),
