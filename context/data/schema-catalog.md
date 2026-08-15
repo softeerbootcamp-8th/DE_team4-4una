@@ -382,6 +382,23 @@ without confirmation.
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Gold calculation time |
 | Speed band | TBD | TBD | TBD |  | Which speed band the row belongs to; column name and type not yet supplied |
 
+### Column calculation mapping
+
+Per issue #102; the full formula is defined in `context/comfort-score.md`.
+
+| Column | Computed from |
+| --- | --- |
+| `segment_id` | Passed through from `hourly_comfort_score.segment_id` |
+| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. How the vehicle-agnostic (all-profile) score is represented in this same column is **open** — see OQ-038 |
+| `data_period_start` / `data_period_end` | Bounds of the scoring window rolled up (comfort-score.md currently illustrates a rolling 168-hour/1-week window); whether this pair joins the primary key is still the open question noted above |
+| `reference_date` | `enriched_segment_reference` version active during the scoring window |
+| `comfort_score` | `ComfortScore` in comfort-score.md (the shrinkage-adjusted mean), or its vehicle-agnostic variant |
+| `sample_count` | Sum of `hourly_comfort_score.sample_count` (raw sensor events, matching the Silver-level definition) over the qualifying hours in `H_{s,p}` (comfort-score.md Step 2) — **not** the hour count `N`. `N` is not stored as its own column; it is recoverable from `confidence_score` and the fixed `k` (`N = k * Confidence / (1 - Confidence)`). The traffic count used for the `T_min` filter (`T_h`) is a separate concept, sourced from `hourly_segment_features.trip_count`; whether the Gold job joins that table or `hourly_comfort_score` grows its own traffic-count column is **open** — see OQ-039 |
+| `confidence_score` | `Confidence = N / (N + k)` (comfort-score.md Step 5) |
+| `score_version` | Matches the `SCORE_VERSION` constant of the formula implementation (`comfort_score/formula.py`, added in a follow-up sub-issue) |
+| `calculated_at` | Gold job completion timestamp |
+| Speed band (TBD) | Out of scope for issue #102 |
+
 ## `zone_master`
 
 **Layer:** Reference dimension. **Storage:** local Parquet at

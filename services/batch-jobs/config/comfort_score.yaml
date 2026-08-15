@@ -1,0 +1,25 @@
+# Gold segment_comfort_score 산출식 파라미터 (context/comfort-score.md 참고).
+# 전부 provisional: true — 실제 데이터로 재산정하기 전까지의 잠정값이다 (이슈 #102는
+# k의 최종 확정 수치를 제외 범위로 명시함).
+
+# 시간대별 방향 점수 결합 가중치 (수직:종방향:횡방향 = 5:3:2, 합이 1.0이어야 함)
+vertical_weight:
+  value: 0.5
+  provisional: true
+longitudinal_weight:
+  value: 0.3
+  provisional: true
+lateral_weight:
+  value: 0.2
+  provisional: true
+
+# 신뢰할 시간대로 인정할 최소 차량 통행 수 (T_min)
+min_traffic_threshold:
+  value: 5.0
+  provisional: true
+
+# Shrinkage 강도, 단위는 "시간" (k). 실제 데이터에서 within/between-segment
+# 분산비로 재산정 예정 — 여기 값(10)은 comfort-score.md의 예시와 맞춘 잠정값.
+shrinkage_k:
+  value: 10.0
+  provisional: true
