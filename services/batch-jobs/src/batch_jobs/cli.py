@@ -40,6 +40,17 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--rejected-output-path")
     score_parser.add_argument("--scoring-config-path", type=Path)
     score_parser.add_argument("--run-id")
+
+    feature_parser = subparsers.add_parser("build-hourly-segment-features")
+    feature_parser.add_argument("--target-hour", type=datetime.fromisoformat, required=True)
+    feature_parser.add_argument("--road-snapshot-date", type=date.fromisoformat, required=True)
+    feature_parser.add_argument("--feature-version", required=True)
+    feature_parser.add_argument("--run-id")
+    feature_parser.add_argument("--input-path")
+    feature_parser.add_argument("--road-segment-path")
+    feature_parser.add_argument("--event-config-path", type=Path)
+    feature_parser.add_argument("--steering-config-path", type=Path)
+    feature_parser.add_argument("--map-matching-config-path", type=Path)
     return parser
 
 
@@ -121,6 +132,50 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
         spark.stop()
 
 
+def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
+    from batch_jobs.hourly_segment_feature_job import (
+        HourlySegmentFeatureJobConfig,
+        build_spark_session,
+        run_hourly_segment_feature_job,
+    )
+
+    defaults = HourlySegmentFeatureJobConfig.from_env()
+    run_id = arguments.run_id or os.getenv("HOURLY_SEGMENT_FEATURE_RUN_ID")
+    if not run_id:
+        raise ValueError("--run-id or HOURLY_SEGMENT_FEATURE_RUN_ID is required")
+    config = HourlySegmentFeatureJobConfig(
+        processed_sensor_event_path=arguments.input_path or defaults.processed_sensor_event_path,
+        road_segment_path=arguments.road_segment_path or defaults.road_segment_path,
+        event_feature_config_path=(
+            arguments.event_config_path or defaults.event_feature_config_path
+        ),
+        steering_feature_config_path=(
+            arguments.steering_config_path or defaults.steering_feature_config_path
+        ),
+        map_matching_config_path=(
+            arguments.map_matching_config_path or defaults.map_matching_config_path
+        ),
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        # 결과 건수는 Job 내부 로그에 이미 남으므로 여기서 다시 세지 않는다
+        # (target_df가 unpersist된 뒤라 다시 세면 전체 파이프라인이 재계산된다).
+        run_hourly_segment_feature_job(
+            spark,
+            config,
+            arguments.target_hour,
+            arguments.road_snapshot_date,
+            arguments.feature_version,
+            run_id,
+            datetime.now(UTC),
+        )
+        print(json.dumps({"run_id": run_id}, sort_keys=True))
+    finally:
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -128,6 +183,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "score-hourly-comfort":
         run_hourly_scoring(arguments)
+        return
+    if arguments.command == "build-hourly-segment-features":
+        run_hourly_segment_feature_building(arguments)
         return
 
     if arguments.command == "fetch-reference-data":
