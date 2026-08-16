@@ -35,3 +35,8 @@ sharp_steer_threshold_deg_per_sec:
 sharp_steer_min_duration_seconds:
   value: 0.3
   provisional: true
+
+# Hourly Job이 시간 경계에 걸친 episode 판단을 위해 대상 시간 뒤로 추가로 읽는 lookahead(초).
+lookahead_seconds:
+  value: 1.0
+  provisional: true
