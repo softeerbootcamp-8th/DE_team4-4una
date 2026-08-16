@@ -61,6 +61,17 @@ def clean_tables():
             cursor.execute(
                 "DELETE FROM vehicle_profile WHERE vehicle_profile_id != 0"
             )
+            # hourly_row()의 기본 vehicle_profile_id=1이 FK를 통과하도록 매
+            # 테스트 시작 시 되살린다 — segment_comfort_score.vehicle_profile_id는
+            # vehicle_profile을 참조하는 FK라 이 행이 없으면 MERGE의 INSERT가
+            # ForeignKeyViolation으로 실패한다.
+            cursor.execute(
+                "INSERT INTO vehicle_profile "
+                "(vehicle_profile_id, profile_name, vehicle_class, "
+                " vertical_weight, longitudinal_weight, lateral_weight, "
+                " is_active, created_at, updated_at) "
+                "VALUES (1, 'test_profile', 'sedan', 0.5, 0.3, 0.2, TRUE, now(), now())"
+            )
         connection.commit()
     finally:
         connection.close()
@@ -175,8 +186,14 @@ def test_staging_shape_check_fails_clearly_when_staging_table_is_missing(
     config = make_config(data_lake_uri)
     connection = _connect()
     try:
+        # DROP 후 run_migrations()로 되살리는 방식은 쓰지 않는다 — 0002는 이미
+        # schema_migrations에 체크섬이 기록돼 있어 run_migrations()가
+        # 파일명/체크섬 기준으로 skip해버리고 CREATE TABLE이 재실행되지
+        # 않는다. 대신 이름을 바꿔뒀다가 finally에서 되돌린다.
         with connection.cursor() as cursor:
-            cursor.execute(f"DROP TABLE {STAGING_TABLE}")
+            cursor.execute(
+                f"ALTER TABLE {STAGING_TABLE} RENAME TO {STAGING_TABLE}_renamed"
+            )
         connection.commit()
 
         with pytest.raises(RuntimeError, match="make migrate"):
@@ -185,13 +202,12 @@ def test_staging_shape_check_fails_clearly_when_staging_table_is_missing(
             )
     finally:
         connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"ALTER TABLE {STAGING_TABLE}_renamed RENAME TO {STAGING_TABLE}"
+            )
+        connection.commit()
         connection.close()
-        # 다음 테스트를 위해 staging을 되살린다
-        restore = _connect()
-        try:
-            run_migrations(MigrationConfig.from_env().migrations_dir, restore)
-        finally:
-            restore.close()
 
 
 def test_concurrent_run_fails_fast_on_advisory_lock(spark, tmp_path):
@@ -233,6 +249,11 @@ def test_reads_are_never_blocked_while_merge_runs(spark, tmp_path):
 
     def read_loop():
         reader = _connect()
+        # autocommit/commit을 따로 호출하지 않아도 안전하다 — 기본 격리
+        # 수준인 READ COMMITTED에서는 각 SELECT 문 시작 시점에 새 스냅샷을
+        # 보므로, 커밋을 안 해도 다음 반복의 SELECT는 그 시점의 최신 커밋된
+        # 데이터를 본다. 여기서 검증하려는 것도 "MERGE 도중 읽기가 오래
+        # 블록되지 않는지"이지 read-your-writes 일관성이 아니다.
         try:
             while not stop.is_set():
                 started = time.monotonic()
