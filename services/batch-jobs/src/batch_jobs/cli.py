@@ -41,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--scoring-config-path", type=Path)
     score_parser.add_argument("--run-id")
 
+    subparsers.add_parser("migrate-database")
+
+    gold_parser = subparsers.add_parser("load-segment-comfort-score")
+    gold_parser.add_argument("--as-of", required=True)
     feature_parser = subparsers.add_parser("build-hourly-segment-features")
     feature_parser.add_argument("--target-hour", type=datetime.fromisoformat, required=True)
     feature_parser.add_argument("--road-snapshot-date", type=date.fromisoformat, required=True)
@@ -132,6 +136,71 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
         spark.stop()
 
 
+def run_migrate_database() -> None:
+    import psycopg2
+
+    from batch_jobs.migrate import MigrationConfig, run_migrations
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = MigrationConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        result = run_migrations(config.migrations_dir, connection)
+    finally:
+        connection.close()
+    print(
+        json.dumps(
+            {"applied": list(result.applied), "skipped": list(result.skipped)},
+            sort_keys=True,
+        )
+    )
+
+
+def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
+    import psycopg2
+    from comfort_score.gold_job import (
+        SegmentComfortScoreJobConfig,
+        build_spark_session,
+        run_segment_comfort_score_job,
+    )
+
+    as_of = datetime.fromisoformat(arguments.as_of)
+    if as_of.utcoffset() is None:
+        raise ValueError(
+            "--as-of must include a UTC offset, e.g. 2026-08-16T00:00:00+00:00"
+        )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = SegmentComfortScoreJobConfig.from_env()
+    spark = build_spark_session()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_segment_comfort_score_job(spark, config, as_of, connection)
+        print(
+            json.dumps(
+                {
+                    "scored_count": summary.scored_count,
+                    "merged_count": summary.merged_count,
+                    "inserted_count": summary.inserted_count,
+                    "updated_count": summary.updated_count,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
 def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
     from batch_jobs.hourly_segment_feature_job import (
         HourlySegmentFeatureJobConfig,
@@ -184,6 +253,11 @@ def main(argv: list[str] | None = None) -> None:
     if arguments.command == "score-hourly-comfort":
         run_hourly_scoring(arguments)
         return
+    if arguments.command == "migrate-database":
+        run_migrate_database()
+        return
+    if arguments.command == "load-segment-comfort-score":
+        run_segment_comfort_score_loading(arguments)
     if arguments.command == "build-hourly-segment-features":
         run_hourly_segment_feature_building(arguments)
         return
