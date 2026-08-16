@@ -39,6 +39,7 @@ class EventFeatureConfig:
     min_event_duration_seconds: ProvisionalThreshold
     sharp_steer_threshold_deg_per_sec: ProvisionalThreshold
     sharp_steer_min_duration_seconds: ProvisionalThreshold
+    lookahead_seconds: ProvisionalThreshold
 
 
 # steering_features.yaml을 읽어 SteeringFeatureConfig로 검증한다
@@ -78,6 +79,7 @@ def load_event_feature_config(
         sharp_steer_min_duration_seconds=_parse_threshold(
             document, "sharp_steer_min_duration_seconds", path
         ),
+        lookahead_seconds=_parse_threshold(document, "lookahead_seconds", path),
     )
 
 

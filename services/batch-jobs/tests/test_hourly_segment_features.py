@@ -208,6 +208,23 @@ def test_valid_output_passes_validation(spark) -> None:
     validate_hourly_segment_features(df)
 
 
+def test_cache_is_released_after_successful_validation(spark) -> None:
+    df = feature_rows_df(spark, [feature_row()])
+
+    validate_hourly_segment_features(df)
+
+    assert df.storageLevel.useMemory is False
+
+
+def test_cache_is_released_after_validation_error(spark) -> None:
+    df = feature_rows_df(spark, [feature_row(), feature_row()])  # 중복 PK -> 검증 실패
+
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_hourly_segment_features(df)
+
+    assert df.storageLevel.useMemory is False
+
+
 @pytest.mark.parametrize(
     "build_df, match",
     [

@@ -79,22 +79,6 @@ event_time_bounds:
   max: "2100-01-01T00:00:00+00:00"
   provisional: true
 
-# 컬럼별 음수 허용 여부.
-negative_allowed:
-  vehicle_profile_id: false
-  trip_seq: false
-  longitude: true
-  speed_mps: false
-  heading: false
-  accel_x: true
-  accel_y: true
-  accel_z: true
-  jerk_x: true
-  jerk_y: true
-  jerk_z: true
-  steering_vibration: false
-  steering_angle: true
-
 # 중복 제거 키와 우선순위. event_id 중복 시 _ingested_at이 가장 최신인 행만 남긴다.
 deduplication:
   key:
