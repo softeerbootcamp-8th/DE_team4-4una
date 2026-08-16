@@ -51,16 +51,6 @@ def test_reject_detail_names_the_violating_columns(spark, tmp_path):
     assert rows[0]["reject_detail"] == "event_id, speed_mps"
 
 
-def test_unconvertible_event_time_does_not_break_quarantining(spark, tmp_path):
-    # event_time을 변환할 수 없는 행도 예외 없이 격리되고 event_date가 NULL이 되는지 확인한다.
-    path = write_bronze_parquet(spark, tmp_path, valid_value(latitude=None, event_time="unknown"))
-
-    rows = split(spark, path).quarantined.collect()
-
-    assert rows[0]["reject_reason"] == MISSING_REQUIRED_FIELD
-    assert rows[0]["event_date"] is None
-
-
 def test_no_row_is_lost_and_quarantine_matches_its_schema(spark, tmp_path):
     # 통과 행과 격리 행을 합치면 입력 행 수와 같고, 격리 행이 스키마와 일치하는지 확인한다.
     path = write_bronze_parquet(

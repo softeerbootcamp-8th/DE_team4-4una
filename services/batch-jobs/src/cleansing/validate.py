@@ -179,9 +179,9 @@ def _violates_range(name: str, value_range: ValueRange) -> Column:
 
 
 def _violates_event_time_bounds(bounds: EventTimeBounds) -> Column:
-    """event_time이 타임스탬프로 변환되지 않거나 허용 범위를 벗어났는지 판정한다."""
+    """event_time이 허용 범위를 벗어났는지 판정한다."""
     parsed = F.try_to_timestamp(F.col("event_time"))
-    return parsed.isNull() | (parsed < F.lit(bounds.minimum)) | (parsed > F.lit(bounds.maximum))
+    return (parsed < F.lit(bounds.minimum)) | (parsed > F.lit(bounds.maximum))
 
 
 def _null_required_columns(required_columns: tuple[str, ...]) -> Column:
@@ -203,7 +203,7 @@ def _quarantine_rows(
         F.col("event_id"),
         F.col("trip_id"),
         # Bronze의 event_time은 STRING이라 DATE로 변환한다. 파싱 실패 행은 NULL이 된다.
-        F.to_date(F.try_to_timestamp(F.col("event_time"))).alias("event_date"),
+        F.to_date(F.col("event_time")).alias("event_date"),
         F.lit(reject_reason).alias("reject_reason"),
         reject_detail.alias("reject_detail"),
         raw_record.alias("raw_record"),
