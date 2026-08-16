@@ -9,7 +9,7 @@ from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
-from cleansing.rules import CleansingConfig, ValueRange
+from cleansing.rules import CleansingConfig, EventTimeBounds, ValueRange
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
@@ -150,15 +150,21 @@ def _range_violations(config: CleansingConfig) -> Column:
     """범위를 벗어난 컬럼을 "이름=값" 형태로 담은 배열."""
     entries = [
         F.when(
-            _violates_range(name, value_range, config.negative_allowed.get(name, True)),
+            _violates_range(name, value_range),
             F.concat(F.lit(f"{name}="), F.col(name).cast("string")),
         )
         for name, value_range in config.value_ranges.items()
     ]
+    entries.append(
+        F.when(
+            _violates_event_time_bounds(config.event_time_bounds),
+            F.concat(F.lit("event_time="), F.col("event_time")),
+        )
+    )
     return F.array_compact(F.array(*entries))
 
 
-def _violates_range(name: str, value_range: ValueRange, negative_allowed: bool) -> Column:
+def _violates_range(name: str, value_range: ValueRange) -> Column:
     """컬럼 하나가 범위를 벗어났는지 판정하는 조건식."""
     violated = F.lit(False)
     if value_range.minimum is not None:
@@ -169,9 +175,13 @@ def _violates_range(name: str, value_range: ValueRange, negative_allowed: bool) 
             if value_range.max_exclusive
             else F.col(name) > value_range.maximum
         )
-    if not negative_allowed:
-        violated = violated | (F.col(name) < 0)
     return violated
+
+
+def _violates_event_time_bounds(bounds: EventTimeBounds) -> Column:
+    """event_time이 허용 범위를 벗어났는지 판정한다."""
+    parsed = F.try_to_timestamp(F.col("event_time"))
+    return (parsed < F.lit(bounds.minimum)) | (parsed > F.lit(bounds.maximum))
 
 
 def _null_required_columns(required_columns: tuple[str, ...]) -> Column:
