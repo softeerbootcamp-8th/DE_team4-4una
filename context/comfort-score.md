@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-16
 ---
 
 # Comfort Score Design
@@ -123,9 +123,13 @@ profiles contributed to it. Apply Step 2's filter to `T_h = sum_p(T_h,p)`,
 then Steps 3-5 exactly as above, using a global `mu` (the same pooling as
 `mu_p`, but across every vehicle profile) in place of `mu_p`.
 
-Where this vehicle-agnostic score is physically stored - a sentinel
-`vehicle_profile_id` row inside `segment_comfort_score`, a dedicated column,
-or a separate table - is **not decided by this document**; see OQ-038.
+Where this vehicle-agnostic score is physically stored is resolved
+(OQ-038, accepted 2026-08-16): a sentinel `vehicle_profile_id = 0` row inside
+`segment_comfort_score`, in the same grain as the per-profile rows.
+`vehicle_profile_id = 0` represents the all-vehicle aggregate; real vehicle
+profiles are numbered from 1. `services/batch-jobs/src/comfort_score/formula.py`
+(issue #127) produces both grains as rows of one Spark DataFrame using this
+convention, rather than two separate DataFrames or a dedicated column.
 
 ## Handling a vehicle profile that never traversed a segment
 
@@ -190,8 +194,6 @@ the full record:
 
 - **OQ-006**: formal acceptance of the direction, weights, and `T_min`/`k`
   proposed here.
-- **OQ-038**: physical representation of the vehicle-agnostic per-segment
-  score.
 - **OQ-039**: source of the traffic count `T_h` used for the minimum-traffic
   filter.
 - The final numeric value of `k` (to be computed from real data once enough
