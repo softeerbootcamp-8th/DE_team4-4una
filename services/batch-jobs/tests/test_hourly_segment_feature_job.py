@@ -1,14 +1,22 @@
+import json
 import os
 import time
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import shapely
+from batch_jobs.cli import build_parser, run_hourly_segment_feature_building
 from batch_jobs.hourly_segment_feature_job import (
     HourlySegmentFeatureJobConfig,
+    HourlySegmentFeatureJobSummary,
     run_hourly_segment_feature_job,
 )
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
+from batch_jobs.hourly_segment_feature_storage import hour_output_path
+from batch_jobs.schemas import (
+    HOURLY_SEGMENT_FEATURE_SCHEMA,
+    PROCESSED_SENSOR_EVENT_SCHEMA,
+)
 from pyproj import Transformer
 from pyspark.sql import SparkSession
 from shapely.geometry import LineString
@@ -147,6 +155,27 @@ def test_matches_and_aggregates_one_target_hour(spark, tmp_path) -> None:
     assert row["feature_version"] == FEATURE_VERSION
     assert row["_run_id"] == RUN_ID
 
+    stored_schema = spark.read.parquet(summary.output_path).schema
+    actual_types = {field.name: field.dataType for field in stored_schema.fields}
+    assert stored_schema.fieldNames() == HOURLY_SEGMENT_FEATURE_SCHEMA.fieldNames()
+    assert all(
+        actual_types[field.name] == field.dataType
+        for field in HOURLY_SEGMENT_FEATURE_SCHEMA.fields
+    )
+
+
+def test_episode_starting_before_target_hour_is_not_recounted(spark, tmp_path) -> None:
+    rows = [
+        # 09:59:59.7에 급제동이 시작해 대상 시간(10시) 안까지 이어짐
+        sensor_row(TARGET_HOUR - timedelta(milliseconds=300), "e0", trip_seq=0, accel_x=-5.0),
+        sensor_row(TARGET_HOUR + timedelta(milliseconds=100), "e1", trip_seq=1, accel_x=-5.0),
+    ]
+
+    _, result = run_job(spark, tmp_path, rows)
+
+    assert len(result) == 1
+    assert result[0]["hard_brake_count"] == 0  # 시작 행은 09시에 속하므로 10시엔 없어야 함
+
 
 def test_lookback_rows_are_excluded_from_the_final_result(spark, tmp_path) -> None:
     rows = [
@@ -185,6 +214,8 @@ def test_episode_spanning_the_hour_boundary_is_counted_via_lookahead(spark, tmp_
 
     assert len(result) == 1
     assert result[0]["hard_brake_count"] == 1
+    # 11시의 e2는 Episode 판단(lookahead)에는 쓰이지만 최종 sample_count에는 들어가면 안 된다.
+    assert result[0]["sample_count"] == 2
 
 
 def test_unmatched_events_are_excluded_from_the_result(spark, tmp_path) -> None:
@@ -248,3 +279,78 @@ def test_rejects_invalid_arguments(
         run_hourly_segment_feature_job(
             spark, config, target_hour, SNAPSHOT, feature_version, run_id, processed_at
         )
+
+
+def cli_args(sensor_path: str, road_segment_path: str, run_id: str, output_path: str | None):
+    arguments = [
+        "build-hourly-segment-features",
+        "--target-hour",
+        TARGET_HOUR.isoformat(),
+        "--road-snapshot-date",
+        SNAPSHOT.isoformat(),
+        "--feature-version",
+        FEATURE_VERSION,
+        "--run-id",
+        run_id,
+        "--input-path",
+        sensor_path,
+        "--road-segment-path",
+        road_segment_path,
+    ]
+    if output_path is not None:
+        arguments += ["--output-path", output_path]
+    return build_parser().parse_args(arguments)
+
+
+def test_cli_passes_output_path_argument_to_the_job(spark, tmp_path, monkeypatch) -> None:
+    sensor_path = write_sensor_events(spark, tmp_path, [sensor_row(TARGET_HOUR, "e1")])
+    road_segment_path = write_road_segment(spark, tmp_path)
+    output_path = str(tmp_path / "cli_output")
+    monkeypatch.setattr(spark, "stop", lambda: None)
+
+    args = cli_args(sensor_path, road_segment_path, "cli-run-1", output_path)
+    run_hourly_segment_feature_building(args)
+
+    assert Path(hour_output_path(output_path, TARGET_HOUR)).exists()
+
+
+def test_cli_falls_back_to_env_output_path_when_not_given(
+    spark, tmp_path, monkeypatch
+) -> None:
+    sensor_path = write_sensor_events(spark, tmp_path, [sensor_row(TARGET_HOUR, "e1")])
+    road_segment_path = write_road_segment(spark, tmp_path)
+    env_output_path = str(tmp_path / "env_output")
+    monkeypatch.setenv("HOURLY_SEGMENT_FEATURE_OUTPUT_PATH", env_output_path)
+    monkeypatch.setattr(spark, "stop", lambda: None)
+
+    # --output-path를 주지 않으면 환경변수 기본값을 써야 한다.
+    args = cli_args(sensor_path, road_segment_path, "cli-run-2", output_path=None)
+    run_hourly_segment_feature_building(args)
+
+    assert Path(hour_output_path(env_output_path, TARGET_HOUR)).exists()
+
+
+def test_cli_prints_the_job_summary_as_json_without_extra_spark_actions(
+    spark, tmp_path, monkeypatch, capsys
+) -> None:
+    summary = HourlySegmentFeatureJobSummary(
+        result_count=3, output_path="/fake/path", target_hour=TARGET_HOUR, run_id="cli-run-3"
+    )
+    calls = []
+
+    def fake_run_job(*args, **kwargs):
+        calls.append((args, kwargs))
+        return summary
+
+    monkeypatch.setattr(
+        "batch_jobs.hourly_segment_feature_job.run_hourly_segment_feature_job", fake_run_job
+    )
+    monkeypatch.setattr(spark, "stop", lambda: None)
+
+    args = cli_args("unused", "unused", "cli-run-3", output_path="unused")
+    run_hourly_segment_feature_building(args)
+
+    # Job이 요약을 반환한 뒤 CLI가 result.count() 같은 추가 Spark Action 없이 그대로 출력하는지 확인한다.
+    assert len(calls) == 1
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {"result_count": 3, "output_path": "/fake/path", "run_id": "cli-run-3"}
