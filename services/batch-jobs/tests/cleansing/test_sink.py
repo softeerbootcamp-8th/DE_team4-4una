@@ -1,10 +1,7 @@
 import json
-import os
-import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import pytest
 from batch_jobs.schemas import (
     PROCESSED_SENSOR_EVENT_SCHEMA,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
@@ -18,10 +15,6 @@ from cleansing.sink import (
     write_quarantined_events,
 )
 from cleansing.validate import cleanse_sensor_events
-from pyspark.sql import SparkSession
-
-os.environ["TZ"] = "UTC"
-time.tzset()
 
 CONFIG = CleansingJobConfig.from_env({})
 RUN_ID = "cleansing-20260815-001"
@@ -51,19 +44,6 @@ VALID_EVENT = {
 }
 
 MALFORMED_VALUE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
-
-
-@pytest.fixture(scope="session")
-def spark():
-    session = (
-        SparkSession.builder.appName("batch-jobs-tests")
-        .master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
 
 
 def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:

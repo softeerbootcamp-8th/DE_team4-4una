@@ -1,21 +1,12 @@
 import json
-import os
-import time
 from pathlib import Path
 
-import pytest
 from batch_jobs.schemas import (
     BRONZE_SENSOR_EVENT_SCHEMA,
     PARSE_FAILED_COLUMN,
     RAW_RECORD_COLUMN,
 )
 from cleansing.reader import read_bronze_sensor_events
-from pyspark.sql import SparkSession
-
-# collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
-# 고정하지 않으면 실행 머신마다(Asia/Seoul vs UTC) 값이 달라진다.
-os.environ["TZ"] = "UTC"
-time.tzset()
 
 # 실제 sensor-producer 출력에서 가져온 한 행. 컬럼이 서로 뒤바뀌는 실수가 드러나도록
 # 값이 모두 다른 행을 골랐다.
@@ -43,20 +34,6 @@ VALID_EVENT = {
 
 # 중괄호와 문자열이 닫히지 않은 채 잘린 값
 MALFORMED_VALUE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
-
-
-@pytest.fixture(scope="session")
-def spark():
-    # 세션 전체에서 재사용: SparkSession 기동에 몇 초가 걸린다.
-    session = (
-        SparkSession.builder.appName("batch-jobs-tests")
-        .master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
 
 
 def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:

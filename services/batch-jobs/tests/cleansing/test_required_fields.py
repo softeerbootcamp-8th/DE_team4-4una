@@ -1,10 +1,7 @@
 import json
-import os
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
 from batch_jobs.schemas import SENSOR_EVENT_QUARANTINE_SCHEMA
 from cleansing.reader import read_bronze_sensor_events
 from cleansing.rules import load_cleansing_config
@@ -13,10 +10,6 @@ from cleansing.validate import (
     MISSING_REQUIRED_FIELD,
     split_required_field_failures,
 )
-from pyspark.sql import SparkSession
-
-os.environ["TZ"] = "UTC"
-time.tzset()
 
 RUN_ID = "cleansing-20260814-001"
 REJECTED_AT = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
@@ -45,19 +38,6 @@ VALID_EVENT = {
 
 # 중괄호와 문자열이 닫히지 않은 채 잘린 값
 MALFORMED_VALUE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
-
-
-@pytest.fixture(scope="session")
-def spark():
-    session = (
-        SparkSession.builder.appName("batch-jobs-tests")
-        .master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
 
 
 def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:
