@@ -1,6 +1,7 @@
 UV := uv
 COMPOSE := docker compose
 COMPOSE_DIR := infra/compose
+MIGRATE_CMD ?= uv run --package batch-jobs batch-jobs migrate-database
 
 .PHONY: help sync lock lint test package-jobs migrate up-kafka up-postgres up-airflow up-monitoring
 

@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--rejected-output-path")
     score_parser.add_argument("--scoring-config-path", type=Path)
     score_parser.add_argument("--run-id")
+
+    subparsers.add_parser("migrate-database")
     return parser
 
 
@@ -121,6 +123,32 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
         spark.stop()
 
 
+def run_migrate_database() -> None:
+    import psycopg2
+
+    from batch_jobs.migrate import MigrationConfig, run_migrations
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = MigrationConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        result = run_migrations(config.migrations_dir, connection)
+    finally:
+        connection.close()
+    print(
+        json.dumps(
+            {"applied": list(result.applied), "skipped": list(result.skipped)},
+            sort_keys=True,
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -128,6 +156,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "score-hourly-comfort":
         run_hourly_scoring(arguments)
+        return
+    if arguments.command == "migrate-database":
+        run_migrate_database()
         return
 
     if arguments.command == "fetch-reference-data":
