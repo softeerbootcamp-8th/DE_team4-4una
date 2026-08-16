@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--run-id")
 
     subparsers.add_parser("migrate-database")
+
+    gold_parser = subparsers.add_parser("load-segment-comfort-score")
+    gold_parser.add_argument("--as-of", required=True)
     return parser
 
 
@@ -149,6 +152,48 @@ def run_migrate_database() -> None:
     )
 
 
+def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
+    import psycopg2
+    from comfort_score.gold_job import (
+        SegmentComfortScoreJobConfig,
+        build_spark_session,
+        run_segment_comfort_score_job,
+    )
+
+    as_of = datetime.fromisoformat(arguments.as_of)
+    if as_of.utcoffset() is None:
+        raise ValueError(
+            "--as-of must include a UTC offset, e.g. 2026-08-16T00:00:00+00:00"
+        )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = SegmentComfortScoreJobConfig.from_env()
+    spark = build_spark_session()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_segment_comfort_score_job(spark, config, as_of, connection)
+        print(
+            json.dumps(
+                {
+                    "scored_count": summary.scored_count,
+                    "merged_count": summary.merged_count,
+                    "inserted_count": summary.inserted_count,
+                    "updated_count": summary.updated_count,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -159,6 +204,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "migrate-database":
         run_migrate_database()
+        return
+    if arguments.command == "load-segment-comfort-score":
+        run_segment_comfort_score_loading(arguments)
         return
 
     if arguments.command == "fetch-reference-data":
