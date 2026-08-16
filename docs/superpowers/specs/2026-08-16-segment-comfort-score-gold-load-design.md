@@ -239,6 +239,20 @@ advisory lock으로 이미 직렬화돼 있어 실용적으로는 충분하다 �
 어차피 `truncate=true`로 다시 비우므로 실패 시에도 지울 필요가 없고,
 오히려 실패한 staging 내용을 남겨둬야 원인 조사가 가능하다.
 
+**읽기 가용성 보장**: Gold Job이 쓰기를 직렬화(advisory lock)하는 동안에도
+`segment_comfort_score`(서빙 테이블)에 대한 일반 `SELECT`는 **절대 차단되지
+않는다.** PostgreSQL MVCC에서 잠금 없는 읽기는 어떤 쓰기 트랜잭션의 길이나
+row-level lock과도 무관하게 즉시 반환된다. 이 설계에서 실제로 읽기를
+차단하는 `ACCESS EXCLUSIVE` 락이 나오는 지점은 `TRUNCATE` 하나뿐이고, 그
+대상은 항상 `segment_comfort_score_staging`(내부 스크래치 테이블)이지
+서빙 테이블이 아니다 — `segment_comfort_score`에 대한 DDL/TRUNCATE는 최초
+마이그레이션(테이블 생성) 이후 어떤 실행 경로에서도 발생하지 않는다.
+`pg_advisory_lock`도 애플리케이션 레벨 뮤텍스일 뿐 테이블 읽기 잠금과는
+무관하다. **제약**: 이후 마이그레이션이 `segment_comfort_score`에
+`ALTER TABLE`을 추가하면 그 순간은 `ACCESS EXCLUSIVE`라 읽기가 잠깐
+막힌다 — 이는 이번 이슈 범위의 마이그레이션(신규 테이블 생성)에는 해당하지
+않지만, 후속 스키마 변경 시 반드시 재확인해야 할 불변식으로 남긴다.
+
 ## 전체 데이터 흐름
 
 ```
@@ -339,7 +353,10 @@ silver/hourly_comfort_score (Parquet)
   적재, (3) 같은 조합의 값이 바뀐 뒤 재실행 시 행 수는 그대로고 값만
   갱신되는지, (4) FK 제약, (5) staging 존재/타입 확인 로직이 실제로
   걸리는지(마이그레이션 안 돌린 상태 시뮬레이션), (6) **동시 실행 시 두
-  번째 호출이 advisory lock 획득 실패로 즉시 실패하는지**를 확인한다.
+  번째 호출이 advisory lock 획득 실패로 즉시 실패하는지**, (7) **MERGE가
+  진행되는 동안(큰 staging 데이터로 트랜잭션을 인위적으로 길게 만든 뒤)
+  별도 커넥션의 일반 `SELECT * FROM segment_comfort_score`가 차단되지 않고
+  즉시 반환되는지**(읽기 가용성 보장, 위 §5 참고)를 확인한다.
   - **스킵 정책**: `RUN_INTEGRATION` 미설정 → skip(로컬 편의).
     `RUN_INTEGRATION=1`인데 접속 실패 → skip이 아니라 fail.
 
