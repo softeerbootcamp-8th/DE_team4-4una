@@ -229,25 +229,28 @@ def validate_hourly_segment_features(df: DataFrame) -> None:
         invalid_count = invalid_count | (F.col(column_name) > F.col("sample_count"))
 
     # 이후 두 액션(아래 조건 체크 + PK 중복 체크)이 상류 lineage를 다시 계산하지 않도록 캐시한다.
+    # 검증 도중 예외가 나도 캐시가 남지 않도록 반드시 finally에서 해제한다.
     df = df.cache()
+    try:
+        # 행 단위 위반 3종을 개별 count() 대신 하나의 스캔으로 같이 계산한다.
+        violations = df.select(
+            F.max(null_condition.cast("int")).alias("has_null"),
+            F.max(invalid_period.cast("int")).alias("has_invalid_period"),
+            F.max(invalid_count.cast("int")).alias("has_invalid_count"),
+        ).first()
 
-    # 행 단위 위반 3종을 개별 count() 대신 하나의 스캔으로 같이 계산한다.
-    violations = df.select(
-        F.max(null_condition.cast("int")).alias("has_null"),
-        F.max(invalid_period.cast("int")).alias("has_invalid_period"),
-        F.max(invalid_count.cast("int")).alias("has_invalid_count"),
-    ).first()
+        if violations["has_null"]:
+            raise ValueError("hourly feature output contains NULL in a required column")
+        if violations["has_invalid_period"]:
+            raise ValueError("data_period_end must be exactly one hour after start")
+        if violations["has_invalid_count"]:
+            raise ValueError("hourly feature output contains invalid count values")
 
-    if violations["has_null"]:
-        raise ValueError("hourly feature output contains NULL in a required column")
-    if violations["has_invalid_period"]:
-        raise ValueError("data_period_end must be exactly one hour after start")
-    if violations["has_invalid_count"]:
-        raise ValueError("hourly feature output contains invalid count values")
-
-    duplicate = (
-        df.groupBy(*HOURLY_PRIMARY_KEY).count().filter(F.col("count") > 1).limit(1).collect()
-    )
-    if duplicate:
-        key = {column: duplicate[0][column] for column in HOURLY_PRIMARY_KEY}
-        raise ValueError(f"duplicate hourly feature primary key: {key}")
+        duplicate = (
+            df.groupBy(*HOURLY_PRIMARY_KEY).count().filter(F.col("count") > 1).limit(1).collect()
+        )
+        if duplicate:
+            key = {column: duplicate[0][column] for column in HOURLY_PRIMARY_KEY}
+            raise ValueError(f"duplicate hourly feature primary key: {key}")
+    finally:
+        df.unpersist()
