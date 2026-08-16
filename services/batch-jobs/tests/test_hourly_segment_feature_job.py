@@ -57,7 +57,7 @@ def write_road_segment(spark, tmp_path) -> str:
     line = LineString([(_BASE_X, _BASE_Y - 50.0), (_BASE_X, _BASE_Y + 50.0)])
     row = ("S1", SNAPSHOT, shapely.to_wkb(line), "T", "N1", "N2")
     path = str(tmp_path / "road_segment")
-    spark.createDataFrame([row], ROAD_SEGMENT_COLUMNS).write.parquet(
+    spark.createDataFrame([row], ROAD_SEGMENT_COLUMNS).write.mode("overwrite").parquet(
         f"{path}/snapshot_date={SNAPSHOT.isoformat()}/data.parquet"
     )
     return path
@@ -99,7 +99,9 @@ def sensor_row(
 
 def write_sensor_events(spark, tmp_path, rows: list[tuple]) -> str:
     path = str(tmp_path / "processed_sensor_event")
-    spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA).write.parquet(path)
+    spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA).write.mode("overwrite").parquet(
+        path
+    )
     return path
 
 
@@ -110,15 +112,17 @@ def build_config(spark, tmp_path, rows: list[tuple]) -> HourlySegmentFeatureJobC
         {
             "HOURLY_SEGMENT_FEATURE_INPUT_PATH": sensor_path,
             "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH": road_segment_path,
+            "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH": str(tmp_path / "hourly_segment_features"),
         }
     )
 
 
 def run_job(spark, tmp_path, rows: list[tuple]):
     config = build_config(spark, tmp_path, rows)
-    return run_hourly_segment_feature_job(
+    summary = run_hourly_segment_feature_job(
         spark, config, TARGET_HOUR, SNAPSHOT, FEATURE_VERSION, RUN_ID, PROCESSED_AT
     )
+    return summary, spark.read.parquet(summary.output_path).collect()
 
 
 def test_matches_and_aggregates_one_target_hour(spark, tmp_path) -> None:
@@ -128,8 +132,11 @@ def test_matches_and_aggregates_one_target_hour(spark, tmp_path) -> None:
         sensor_row(TARGET_HOUR + timedelta(seconds=2), "e3", trip_seq=2),
     ]
 
-    result = run_job(spark, tmp_path, rows).collect()
+    summary, result = run_job(spark, tmp_path, rows)
 
+    assert summary.result_count == 1
+    assert summary.target_hour == TARGET_HOUR
+    assert summary.run_id == RUN_ID
     assert len(result) == 1
     row = result[0]
     assert row["segment_id"] == "S1"
@@ -149,7 +156,7 @@ def test_lookback_rows_are_excluded_from_the_final_result(spark, tmp_path) -> No
         sensor_row(TARGET_HOUR + timedelta(seconds=1), "e2", trip_seq=1),
     ]
 
-    result = run_job(spark, tmp_path, rows).collect()
+    _, result = run_job(spark, tmp_path, rows)
 
     assert len(result) == 1  # lookback 행이 별도의 이전 시간 그룹을 만들지 않는다
     assert result[0]["data_period_start"] == TARGET_HOUR.replace(tzinfo=None)
@@ -174,7 +181,7 @@ def test_episode_spanning_the_hour_boundary_is_counted_via_lookahead(spark, tmp_
         ),
     ]
 
-    result = run_job(spark, tmp_path, rows).collect()
+    _, result = run_job(spark, tmp_path, rows)
 
     assert len(result) == 1
     assert result[0]["hard_brake_count"] == 1
@@ -193,11 +200,32 @@ def test_unmatched_events_are_excluded_from_the_result(spark, tmp_path) -> None:
         ),
     ]
 
-    result = run_job(spark, tmp_path, rows).collect()
+    _, result = run_job(spark, tmp_path, rows)
 
     assert len(result) == 1
     assert result[0]["segment_id"] == "S1"
     assert result[0]["sample_count"] == 1
+
+
+def test_rerunning_the_same_hour_replaces_the_stored_result(spark, tmp_path) -> None:
+    config = build_config(spark, tmp_path, [sensor_row(TARGET_HOUR, "e1")])
+
+    first = run_hourly_segment_feature_job(
+        spark, config, TARGET_HOUR, SNAPSHOT, FEATURE_VERSION, "run-1", PROCESSED_AT
+    )
+    rows = [
+        sensor_row(TARGET_HOUR, "e2"),
+        sensor_row(TARGET_HOUR + timedelta(seconds=1), "e3", vehicle_profile_id=2),
+    ]
+    config = build_config(spark, tmp_path, rows)
+    second = run_hourly_segment_feature_job(
+        spark, config, TARGET_HOUR, SNAPSHOT, FEATURE_VERSION, "run-2", PROCESSED_AT
+    )
+
+    assert second.output_path == first.output_path
+    result = spark.read.parquet(second.output_path).collect()
+    assert len(result) == 2  # 이전 실행(run-1)의 결과가 아니라 최신 결과로 교체됨
+    assert {row["vehicle_profile_id"] for row in result} == {1, 2}
 
 
 @pytest.mark.parametrize(
