@@ -1,7 +1,7 @@
 import json
 
 import shapely
-from road_segment.geometry import (
+from batch_jobs.road_segment.geometry import (
     SOURCE_CRS,
     TARGET_CRS,
     build_segment_geometries,

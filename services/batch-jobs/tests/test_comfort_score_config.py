@@ -1,4 +1,4 @@
-from comfort_score.config import load_comfort_score_config
+from batch_jobs.comfort_score.config import load_comfort_score_config
 
 
 def test_load_comfort_score_config_reads_provisional_thresholds() -> None:

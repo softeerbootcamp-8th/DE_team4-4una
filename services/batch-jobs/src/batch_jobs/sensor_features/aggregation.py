@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from batch_jobs.schemas import HOURLY_SEGMENT_FEATURE_SCHEMA
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
+
+from batch_jobs.schemas import HOURLY_SEGMENT_FEATURE_SCHEMA
 
 HOURLY_GROUP_KEYS = (
     "data_period_start",

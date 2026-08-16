@@ -7,15 +7,15 @@ import time
 from datetime import UTC, datetime
 
 import pytest
-from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
-from comfort_score.config import DEFAULT_COMFORT_SCORE_CONFIG_PATH
-from comfort_score.gold_job import (
+from batch_jobs.comfort_score.config import DEFAULT_COMFORT_SCORE_CONFIG_PATH
+from batch_jobs.comfort_score.gold_job import (
     SegmentComfortScoreJobConfig,
     SegmentComfortScoreJobSummary,
     _attach_calculated_at,
     _validate_as_of,
     run_segment_comfort_score_job,
 )
+from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 

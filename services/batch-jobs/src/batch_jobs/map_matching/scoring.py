@@ -12,7 +12,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import pandas_udf
 from pyspark.sql.types import DoubleType
 
-from map_matching.candidates import OUTPUT_COLUMNS
+from batch_jobs.map_matching.candidates import OUTPUT_COLUMNS
 
 
 def score_segment_candidates(

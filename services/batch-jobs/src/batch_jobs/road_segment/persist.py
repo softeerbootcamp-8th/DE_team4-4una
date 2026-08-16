@@ -17,7 +17,7 @@ from pathlib import Path
 
 import duckdb
 
-from road_segment.validate import RoadSegmentRecord
+from batch_jobs.road_segment.validate import RoadSegmentRecord
 
 CREATE_TABLE_SQL = """
 CREATE TABLE road_segment (

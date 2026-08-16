@@ -127,7 +127,7 @@ Where this vehicle-agnostic score is physically stored is resolved
 (OQ-038, accepted 2026-08-16): a sentinel `vehicle_profile_id = 0` row inside
 `segment_comfort_score`, in the same grain as the per-profile rows.
 `vehicle_profile_id = 0` represents the all-vehicle aggregate; real vehicle
-profiles are numbered from 1. `services/batch-jobs/src/comfort_score/formula.py`
+profiles are numbered from 1. `services/batch-jobs/src/batch_jobs/comfort_score/formula.py`
 (issue #127) produces both grains as rows of one Spark DataFrame using this
 convention, rather than two separate DataFrames or a dedicated column.
 
@@ -153,14 +153,15 @@ present in `hourly_comfort_score`. That choice belongs to the follow-up "데이�
 
 - **Numeric parameters** (`vertical_weight`, `longitudinal_weight`,
   `lateral_weight`, `min_traffic_threshold` / `T_min`, `shrinkage_k` / `k`) are
-  never hardcoded. They live in `services/batch-jobs/config/comfort_score.yaml`,
+  never hardcoded. They live in
+  `services/batch-jobs/src/batch_jobs/resources/comfort_score.yaml`,
   each entry shaped as `{value, provisional}`, loaded through
-  `services/batch-jobs/src/comfort_score/config.py` into a frozen
+  `services/batch-jobs/src/batch_jobs/comfort_score/config.py` into a frozen
   `ComfortScoreConfig` dataclass - the same convention already used by
   `map_matching/config.py` and `sensor_features/config.py`.
 - **The formula's shape** (not just its constants) is implemented as a
   versioned, pure Python function in
-  `services/batch-jobs/src/comfort_score/formula.py` (added in the follow-up
+  `services/batch-jobs/src/batch_jobs/comfort_score/formula.py` (added in the follow-up
   "데이터 연산" sub-issue), tagged with a `SCORE_VERSION` constant matching the
   `scoring_version` / `score_version` schema columns. A change to the
   formula's structure - not just a constant - requires bumping this version,

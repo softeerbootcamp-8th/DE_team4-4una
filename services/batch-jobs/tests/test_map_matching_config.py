@@ -1,5 +1,5 @@
 import pytest
-from map_matching.config import load_map_matching_config
+from batch_jobs.map_matching.config import load_map_matching_config
 
 
 def test_load_map_matching_config_reads_provisional_threshold() -> None:

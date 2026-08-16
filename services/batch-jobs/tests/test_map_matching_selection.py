@@ -3,7 +3,7 @@ import time
 from datetime import date
 
 import pytest
-from map_matching.selection import select_best_segment
+from batch_jobs.map_matching.selection import select_best_segment
 from pyspark.sql import SparkSession
 from pyspark.sql.types import DateType, DoubleType, StringType, StructField, StructType
 

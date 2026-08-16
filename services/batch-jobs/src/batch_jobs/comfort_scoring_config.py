@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from batch_jobs.resources import RESOURCE_DIR
+
 
 @dataclass(frozen=True, slots=True)
 class NormalizationRange:
@@ -55,7 +57,7 @@ class HourlyScoringConfig:
                 raise ValueError(f"normalizers are missing for {sorted(missing)}")
 
 
-DEFAULT_HOURLY_SCORING_CONFIG_PATH = Path(__file__).with_name("hourly_comfort.yaml")
+DEFAULT_HOURLY_SCORING_CONFIG_PATH = RESOURCE_DIR / "hourly_comfort.yaml"
 
 
 def load_hourly_scoring_config(

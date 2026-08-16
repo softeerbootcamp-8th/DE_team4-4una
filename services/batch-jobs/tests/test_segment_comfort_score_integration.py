@@ -14,16 +14,16 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg2
 import pytest
-from batch_jobs.db_lock_keys import GOLD_JOB_STAGING_LOCK_KEY
-from batch_jobs.migrate import MigrationConfig, run_migrations
-from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
-from comfort_score.config import DEFAULT_COMFORT_SCORE_CONFIG_PATH
-from comfort_score.gold_job import (
+from batch_jobs.comfort_score.config import DEFAULT_COMFORT_SCORE_CONFIG_PATH
+from batch_jobs.comfort_score.gold_job import (
     SegmentComfortScoreJobConfig,
     build_spark_session,
     run_segment_comfort_score_job,
 )
-from comfort_score.gold_writer import STAGING_TABLE, TARGET_TABLE
+from batch_jobs.comfort_score.gold_writer import STAGING_TABLE, TARGET_TABLE
+from batch_jobs.db_lock_keys import GOLD_JOB_STAGING_LOCK_KEY
+from batch_jobs.migrate import MigrationConfig, run_migrations
+from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 
 RUN_INTEGRATION = os.environ.get("RUN_INTEGRATION") == "1"
 

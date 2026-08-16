@@ -4,13 +4,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
-from comfort_score.loader import (
+from batch_jobs.comfort_score.loader import (
     _filter_window_hours,
     _select_latest_scoring_version,
     _validate_schema,
     load_hourly_comfort_score_for_gold,
 )
+from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from pyspark.sql import SparkSession
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 

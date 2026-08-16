@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from sensor_features.config import ProvisionalThreshold
 
-DEFAULT_COMFORT_SCORE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "comfort_score.yaml"
-)
+from batch_jobs.resources import RESOURCE_DIR
+from batch_jobs.sensor_features.config import ProvisionalThreshold
+
+DEFAULT_COMFORT_SCORE_CONFIG_PATH = RESOURCE_DIR / "comfort_score.yaml"
 
 
 # comfort_score.yaml 한 파일의 파싱 결과 전체

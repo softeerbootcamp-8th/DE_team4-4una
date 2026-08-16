@@ -5,8 +5,8 @@ from datetime import date
 
 import pytest
 import shapely
-from map_matching.candidates import CANDIDATE_SCHEMA, OUTPUT_COLUMNS
-from map_matching.scoring import score_segment_candidates
+from batch_jobs.map_matching.candidates import CANDIDATE_SCHEMA, OUTPUT_COLUMNS
+from batch_jobs.map_matching.scoring import score_segment_candidates
 from pyspark.sql import SparkSession
 from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 from shapely.geometry import LineString

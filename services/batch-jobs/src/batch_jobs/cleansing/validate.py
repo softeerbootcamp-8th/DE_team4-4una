@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
-from cleansing.rules import CleansingConfig, EventTimeBounds, ValueRange
+from batch_jobs.cleansing.rules import CleansingConfig, EventTimeBounds, ValueRange
+from batch_jobs.schemas import PARSE_FAILED_COLUMN, RAW_RECORD_COLUMN
 
 MALFORMED_JSON = "MALFORMED_JSON"
 MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"

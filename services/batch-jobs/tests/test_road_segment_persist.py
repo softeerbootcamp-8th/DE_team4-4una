@@ -4,8 +4,11 @@ from datetime import UTC, date, datetime, timedelta, timezone
 import duckdb
 import pytest
 import shapely
-from road_segment.persist import read_road_segment_parquet, write_road_segment_snapshot
-from road_segment.validate import RoadSegmentRecord
+from batch_jobs.road_segment.persist import (
+    read_road_segment_parquet,
+    write_road_segment_snapshot,
+)
+from batch_jobs.road_segment.validate import RoadSegmentRecord
 from shapely.geometry import LineString
 
 LINE_WKB = shapely.to_wkb(LineString([(0, 0), (1, 1)]))

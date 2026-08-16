@@ -7,12 +7,10 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_STEERING_FEATURE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "steering_features.yaml"
-)
-DEFAULT_EVENT_FEATURE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "event_features.yaml"
-)
+from batch_jobs.resources import RESOURCE_DIR
+
+DEFAULT_STEERING_FEATURE_CONFIG_PATH = RESOURCE_DIR / "steering_features.yaml"
+DEFAULT_EVENT_FEATURE_CONFIG_PATH = RESOURCE_DIR / "event_features.yaml"
 
 
 # value와 provisional 플래그를 함께 담는 단일 설정값

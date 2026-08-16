@@ -13,13 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from batch_jobs.db_lock_keys import GOLD_JOB_STAGING_LOCK_KEY
 from pyspark.sql import DataFrame
+
+from batch_jobs.db_lock_keys import GOLD_JOB_STAGING_LOCK_KEY
 
 STAGING_TABLE = "segment_comfort_score_staging"
 TARGET_TABLE = "segment_comfort_score"
 
-# db/migrations/0002_create_segment_comfort_score.sql의 staging DDL과
+# resources/migrations/0002_create_segment_comfort_score.sql의 staging DDL과
 # 정확히 일치해야 한다. information_schema.columns.data_type이 실제로
 # 반환하는 문자열 그대로다.
 EXPECTED_STAGING_COLUMNS = {

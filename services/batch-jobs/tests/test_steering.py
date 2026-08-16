@@ -3,8 +3,8 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
 from pyspark.sql import Row, SparkSession
-from sensor_features.steering import add_steering_rate, add_steering_reversal
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
 # 고정하지 않으면 실행 머신마다(Asia/Seoul vs UTC) 값이 달라진다.

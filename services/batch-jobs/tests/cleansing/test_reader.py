@@ -1,3 +1,4 @@
+from batch_jobs.cleansing.reader import read_bronze_sensor_events
 from batch_jobs.schemas import (
     BRONZE_SENSOR_EVENT_SCHEMA,
     PARSE_FAILED_COLUMN,
@@ -9,7 +10,6 @@ from bronze_samples import (
     valid_value,
     write_bronze_parquet,
 )
-from cleansing.reader import read_bronze_sensor_events
 
 
 def test_reads_every_row_with_the_declared_columns(spark, tmp_path):

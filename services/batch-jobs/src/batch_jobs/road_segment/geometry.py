@@ -12,7 +12,7 @@ from shapely.geometry import LineString, MultiLineString, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as reproject_geometry
 
-from road_segment.transform import (
+from batch_jobs.road_segment.transform import (
     is_vehicle_segment,
     normalize_string,
     select_representative_rows,

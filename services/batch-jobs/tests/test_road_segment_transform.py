@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, date, datetime
 
-from road_segment.transform import (
+from batch_jobs.road_segment.transform import (
     build_road_segment_row,
     feature_type_is_vehicle,
     find_duplicate_segment_ids,

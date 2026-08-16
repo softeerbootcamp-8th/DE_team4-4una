@@ -1,4 +1,4 @@
-from sensor_features.config import load_steering_feature_config
+from batch_jobs.sensor_features.config import load_steering_feature_config
 
 
 def test_load_steering_feature_config_reads_provisional_thresholds() -> None:

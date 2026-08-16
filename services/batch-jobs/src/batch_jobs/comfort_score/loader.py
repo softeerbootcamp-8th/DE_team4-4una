@@ -5,19 +5,20 @@
 Silver3 산출 단계(batch_jobs/hourly_comfort.py, #88/#89)에서 이미 자신의
 trip_count를 hourly_segment_features로부터 그대로 실어 오므로(OQ-039), 여기서
 별도로 join하지 않는다. 실제 집계/Shrinkage 연산과 Gold 적재는 이 함수의 범위
-밖이다 (services/batch-jobs/src/comfort_score/formula.py, 후속 이슈).
+밖이다 (services/batch-jobs/src/batch_jobs/comfort_score/formula.py, 후속 이슈).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from de4_core import join_uri
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 from pyspark.sql.window import Window
+
+from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 
 # hourly_comfort_score의 기본 키 (context/data/schema-catalog.md).
 PRIMARY_KEY = ("segment_id", "vehicle_profile_id", "data_period_start")

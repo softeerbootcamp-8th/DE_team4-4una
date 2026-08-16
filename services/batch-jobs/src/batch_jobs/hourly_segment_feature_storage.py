@@ -10,7 +10,8 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from sensor_features.aggregation import validate_hourly_segment_features
+
+from batch_jobs.sensor_features.aggregation import validate_hourly_segment_features
 
 _STAGING_DIRNAME = "_staging"
 _BACKUP_SUFFIX = ".bak"
