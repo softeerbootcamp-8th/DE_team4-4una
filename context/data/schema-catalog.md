@@ -395,7 +395,7 @@ Per issue #102; the full formula is defined in `context/comfort-score.md`.
 | Column | Computed from |
 | --- | --- |
 | `segment_id` | Passed through from `hourly_comfort_score.segment_id` |
-| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. How the vehicle-agnostic (all-profile) score is represented in this same column is **open** — see OQ-038 |
+| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. The vehicle-agnostic (all-profile) score is represented in this same column as a sentinel `vehicle_profile_id = 0` row (OQ-038, accepted 2026-08-16 — see `context/comfort-score.md`) |
 | `data_period_start` / `data_period_end` | Bounds of the scoring window rolled up (comfort-score.md currently illustrates a rolling 168-hour/1-week window); whether this pair joins the primary key is still the open question noted above |
 | `reference_date` | `enriched_segment_reference` version active during the scoring window |
 | `comfort_score` | `ComfortScore` in comfort-score.md (the shrinkage-adjusted mean), or its vehicle-agnostic variant |
