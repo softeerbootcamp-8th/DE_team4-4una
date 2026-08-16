@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     feature_parser.add_argument("--run-id")
     feature_parser.add_argument("--input-path")
     feature_parser.add_argument("--road-segment-path")
+    feature_parser.add_argument("--output-path")
     feature_parser.add_argument("--event-config-path", type=Path)
     feature_parser.add_argument("--steering-config-path", type=Path)
     feature_parser.add_argument("--map-matching-config-path", type=Path)
@@ -146,6 +147,7 @@ def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
     config = HourlySegmentFeatureJobConfig(
         processed_sensor_event_path=arguments.input_path or defaults.processed_sensor_event_path,
         road_segment_path=arguments.road_segment_path or defaults.road_segment_path,
+        output_path=arguments.output_path or defaults.output_path,
         event_feature_config_path=(
             arguments.event_config_path or defaults.event_feature_config_path
         ),
@@ -160,9 +162,7 @@ def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     spark = build_spark_session()
     try:
-        # 결과 건수는 Job 내부 로그에 이미 남으므로 여기서 다시 세지 않는다
-        # (target_df가 unpersist된 뒤라 다시 세면 전체 파이프라인이 재계산된다).
-        run_hourly_segment_feature_job(
+        summary = run_hourly_segment_feature_job(
             spark,
             config,
             arguments.target_hour,
@@ -171,7 +171,16 @@ def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
             run_id,
             datetime.now(UTC),
         )
-        print(json.dumps({"run_id": run_id}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "result_count": summary.result_count,
+                    "output_path": summary.output_path,
+                    "run_id": summary.run_id,
+                },
+                sort_keys=True,
+            )
+        )
     finally:
         spark.stop()
 
