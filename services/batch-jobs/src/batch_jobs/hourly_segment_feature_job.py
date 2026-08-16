@@ -34,6 +34,10 @@ from sensor_features.events import (
 )
 from sensor_features.steering import add_steering_rate, add_steering_reversal
 
+from batch_jobs.hourly_segment_feature_storage import (
+    HourlySegmentFeatureWriteResult,
+    write_hourly_segment_features,
+)
 from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ logger = logging.getLogger(__name__)
 class HourlySegmentFeatureJobConfig:
     processed_sensor_event_path: str
     road_segment_path: str
+    output_path: str
     event_feature_config_path: Path
     steering_feature_config_path: Path
     map_matching_config_path: Path
@@ -57,6 +62,10 @@ class HourlySegmentFeatureJobConfig:
             ),
             road_segment_path=source.get(
                 "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH", "data/processed/road_segment"
+            ),
+            output_path=source.get(
+                "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH",
+                "data/local-lake/silver/hourly_segment_features",
             ),
             event_feature_config_path=Path(
                 source.get("HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH")
@@ -73,6 +82,14 @@ class HourlySegmentFeatureJobConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class HourlySegmentFeatureJobSummary:
+    result_count: int
+    output_path: str
+    target_hour: datetime
+    run_id: str
+
+
 def build_spark_session() -> SparkSession:
     return (
         SparkSession.builder.appName("hourly-segment-feature-building")
@@ -81,6 +98,7 @@ def build_spark_session() -> SparkSession:
     )
 
 
+# Map Matching -> Steering/Event Feature -> Hourly 집계 순으로 연결해 한 시간을 처리하고 저장한다
 def run_hourly_segment_feature_job(
     spark: SparkSession,
     config: HourlySegmentFeatureJobConfig,
@@ -89,8 +107,7 @@ def run_hourly_segment_feature_job(
     feature_version: str,
     run_id: str,
     processed_at: datetime,
-) -> DataFrame:
-    """Map-match, derive Steering/Event features, and aggregate one target hour."""
+) -> HourlySegmentFeatureJobSummary:
     _validate_job_arguments(target_hour, feature_version, run_id, processed_at)
 
     event_config = load_event_feature_config(config.event_feature_config_path)
@@ -164,9 +181,20 @@ def run_hourly_segment_feature_job(
     try:
         result = build_hourly_segment_features(
             target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
-        )
-        _log_summary(run_id, target_hour, sensor_df, target_df, result)
-        return result
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+        try:
+            write_result = write_hourly_segment_features(
+                spark, result, config.output_path, target_hour, run_id
+            )
+            _log_summary(run_id, target_hour, sensor_df, target_df, write_result)
+            return HourlySegmentFeatureJobSummary(
+                result_count=write_result.row_count,
+                output_path=write_result.output_path,
+                target_hour=target_hour,
+                run_id=run_id,
+            )
+        finally:
+            result.unpersist()
     finally:
         target_df.unpersist()
 
@@ -187,7 +215,11 @@ def _validate_job_arguments(
 
 
 def _log_summary(
-    run_id: str, target_hour: datetime, sensor_df: DataFrame, target_df: DataFrame, result: DataFrame
+    run_id: str,
+    target_hour: datetime,
+    sensor_df: DataFrame,
+    target_df: DataFrame,
+    write_result: HourlySegmentFeatureWriteResult,
 ) -> None:
     started = time.monotonic()
     sensor_count = sensor_df.count()
@@ -196,15 +228,15 @@ def _log_summary(
         F.count(F.lit(1)).alias("target_count"),
         F.sum(F.when(F.col("segment_id").isNull(), 1).otherwise(0)).alias("unmatched_count"),
     ).first()
-    result_count = result.count()
     logger.info(
         "hourly segment feature job finished run_id=%s target_hour=%s "
-        "read=%d target=%d unmatched=%d result=%d elapsed=%.1fs",
+        "read=%d target=%d unmatched=%d result=%d output_path=%s elapsed=%.1fs",
         run_id,
         target_hour.isoformat(),
         sensor_count,
         counts["target_count"],
         counts["unmatched_count"],
-        result_count,
+        write_result.row_count,
+        write_result.output_path,
         time.monotonic() - started,
     )
