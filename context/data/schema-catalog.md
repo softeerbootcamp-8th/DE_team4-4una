@@ -338,6 +338,12 @@ profile.
 **Primary key:** `(segment_id, vehicle_profile_id, data_period_start)`.
 Whether `scoring_version` also belongs in the primary key is an open question.
 
+This table carries only the three directional scores, not a combined
+per-hour `comfort_score`. The Gold job derives the combined hourly score
+`c_h` itself from `vertical_score` / `longitudinal_score` / `lateral_score`
+(`comfort-score.md` Step 1); the combined score is only ever persisted at
+the Gold layer, as `segment_comfort_score.comfort_score`.
+
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Road segment | `segment_id` | STRING | N | PK, FK | LION-based road segment |
@@ -389,7 +395,7 @@ Per issue #102; the full formula is defined in `context/comfort-score.md`.
 | Column | Computed from |
 | --- | --- |
 | `segment_id` | Passed through from `hourly_comfort_score.segment_id` |
-| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. How the vehicle-agnostic (all-profile) score is represented in this same column is **open** — see OQ-038 |
+| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. The vehicle-agnostic (all-profile) score is represented in this same column as a sentinel `vehicle_profile_id = 0` row (OQ-038, accepted 2026-08-16 — see `context/comfort-score.md`) |
 | `data_period_start` / `data_period_end` | Bounds of the scoring window rolled up (comfort-score.md currently illustrates a rolling 168-hour/1-week window); whether this pair joins the primary key is still the open question noted above |
 | `reference_date` | `enriched_segment_reference` version active during the scoring window |
 | `comfort_score` | `ComfortScore` in comfort-score.md (the shrinkage-adjusted mean), or its vehicle-agnostic variant |
@@ -518,7 +524,7 @@ percentile-normalized `zone_profile_features` columns (weights in
 | Park score | `park_score` | DOUBLE | Y | | Park area ratio, park area, and arts-recreation job ratio |
 | Zone tag | `zone_tag` | STRING | N | | English zone-character label; see value table below |
 | Zone tag (Korean) | `zone_tag_ko` | STRING | N | | Korean label paired 1:1 with `zone_tag` |
-| Comfort relevance score | `comfort_relevance_score` | DOUBLE | Y | | Income, home value, family/children-household ratio, senior ratio, and medical-capacity weighted score; a candidate proxy for comfort-improvement demand, **not** the sensor-based `comfort_score` in `hourly_comfort_score`/`segment_comfort_score` |
+| Comfort relevance score | `comfort_relevance_score` | DOUBLE | Y | | Income, home value, family/children-household ratio, senior ratio, and medical-capacity weighted score; a candidate proxy for comfort-improvement demand, **not** the sensor-based `comfort_score` in `segment_comfort_score` |
 
 All score columns are validated to fall within `[0, 1]` when non-null.
 `zone_tag` is assigned from `TAG_RULES` in `generate_zone_scores.py`; an
