@@ -35,10 +35,13 @@ def to_processed_sensor_events(
 def write_processed_sensor_events(
     df: DataFrame,
     path: str | Path,
-    partition_column: str,
+    partition_column: str | None,
 ) -> None:
-    """Write processed_sensor_event rows as Parquet, split by the given column."""
-    df.write.partitionBy(partition_column).parquet(str(path))
+    """Write processed_sensor_event rows, optionally split by the given column."""
+    writer = df.write
+    if partition_column:
+        writer = writer.partitionBy(partition_column)
+    writer.mode("append").parquet(str(path))
 
 
 def write_quarantined_events(
@@ -47,4 +50,4 @@ def write_quarantined_events(
     partition_column: str,
 ) -> None:
     """Write quarantined rows as Parquet, split by the given column."""
-    df.write.partitionBy(partition_column).parquet(str(path))
+    df.write.mode("append").partitionBy(partition_column).parquet(str(path))

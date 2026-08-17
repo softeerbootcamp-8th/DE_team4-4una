@@ -62,26 +62,23 @@ def test_transform_casts_event_time_and_overwrites_run_id(spark, tmp_path):
     assert row["_processed_at"] == PROCESSED_AT.replace(tzinfo=None)
 
 
-def test_written_silver_is_split_by_event_date(spark, tmp_path):
-    # 저장된 통과 행이 event_date 디렉터리로 나뉘고 스키마와 일치하는지 확인한다.
+def test_written_silver_matches_declared_schema(spark, tmp_path):
+    # 경로 추론이 아닌 개별 Parquet 파일의 실제 스키마를 확인한다.
     bronze = write_bronze_parquet(
         spark,
         tmp_path,
         valid_value(),
-        valid_value(event_id="other", event_time="2024-02-02T01:00:00+00:00"),
     )
     silver_path = tmp_path / "silver"
 
     silver = to_processed_sensor_events(cleanse(spark, bronze).passed, RUN_ID, PROCESSED_AT)
     write_processed_sensor_events(silver, silver_path, CONFIG.processed_partition_column)
 
-    assert partition_dirs(silver_path, "event_date") == [
-        "event_date=2024-02-01",
-        "event_date=2024-02-02",
-    ]
-    assert typed_columns(spark.read.parquet(str(silver_path))) == schema_columns(
-        PROCESSED_SENSOR_EVENT_SCHEMA
-    )
+    parquet_files = sorted(silver_path.glob("part-*.parquet"))
+    assert parquet_files
+
+    stored = spark.read.parquet(*(str(path) for path in parquet_files))
+    assert typed_columns(stored) == schema_columns(PROCESSED_SENSOR_EVENT_SCHEMA)
 
 
 def test_written_quarantine_is_split_by_rejected_date(spark, tmp_path):
