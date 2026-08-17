@@ -96,7 +96,7 @@ def test_reads_scores_and_idempotently_writes_parquet(spark, tmp_path):
         field.dataType for field in HOURLY_COMFORT_SCORE_SCHEMA
     ]
     row = scores.first()
-    assert row["scoring_version"] == "hourly-comfort-v1"
+    assert row["scoring_version"] == "1.0.0"
     assert row["_run_id"] == "silver3-run"
     stored_epoch = scores.select(F.unix_timestamp("_processed_at")).first()[0]
     assert stored_epoch == int(PROCESSED_AT.timestamp())

@@ -97,7 +97,7 @@ def hourly_row(**overrides):
         "vertical_score": 80.0,
         "longitudinal_score": 80.0,
         "lateral_score": 80.0,
-        "scoring_version": "hourly-comfort-v1",
+        "scoring_version": "1.0.0",
         "sample_count": 100,
         "trip_count": 10,
         "_run_id": "test-run",

@@ -1,5 +1,7 @@
 # 실제 Silver2 분포가 나오면 기준값과 scoring_version을 함께 갱신한다
-scoring_version: hourly-comfort-v1
+# comfort_score/loader.py::_select_latest_scoring_version이 점으로 구분된 자리를
+# array<int>로 캐스팅해 비교하므로, 반드시 SemVer(MAJOR.MINOR.PATCH) 형식이어야 한다.
+scoring_version: 1.0.0
 compatible_feature_versions: [hourly-features-v1]
 minimum_valid_weight: 0.8
 
