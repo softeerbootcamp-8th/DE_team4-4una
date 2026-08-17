@@ -394,8 +394,8 @@ without confirmation.
 | --- | --- | --- | --- | --- | --- |
 | Road segment | `segment_id` | STRING | N | PK, FK | Canonical LION segment |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile` |
-| Data-period start | `data_period_start` | DATE | N |  | Start date of the driving-data period used for the score |
-| Data-period end | `data_period_end` | DATE | N |  | End date of the driving-data period used for the score |
+| Data-period start | `data_period_start` | TIMESTAMP | N |  | Start of the driving-data period used for the score, rolled up (MIN) from `hourly_comfort_score.data_period_start` over the qualifying hours |
+| Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the driving-data period used for the score, rolled up (MAX) from `hourly_comfort_score.data_period_end` over the qualifying hours |
 | Reference date | `reference_date` | DATE | N | FK | `enriched_segment_reference` version used |
 | Comfort score | `comfort_score` | DOUBLE | N |  | Final score from 0 through 100 |
 | Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used by the score |
@@ -412,7 +412,7 @@ Per issue #102; the full formula is defined in `context/comfort-score.md`.
 | --- | --- |
 | `segment_id` | Passed through from `hourly_comfort_score.segment_id` |
 | `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. The vehicle-agnostic (all-profile) score is represented in this same column as a sentinel `vehicle_profile_id = 0` row (OQ-038, accepted 2026-08-16 — see `context/comfort-score.md`) |
-| `data_period_start` / `data_period_end` | Bounds of the scoring window rolled up (comfort-score.md currently illustrates a rolling 168-hour/1-week window); whether this pair joins the primary key is still the open question noted above |
+| `data_period_start` / `data_period_end` | `MIN(hourly_comfort_score.data_period_start)` / `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}` (#163). For a `(segment_id, vehicle_profile_id)` pair with zero qualifying hours (`N=0`, falls back to the population mean — comfort-score.md Step 4), there is no qualifying hour to roll up from; the Gold job (`comfort_score/gold_job.py::_fill_missing_periods`) fills that pair's bounds with the batch run's own window `[as_of - window_hours, as_of)` instead. Whether this pair joins the primary key is still the open question noted above |
 | `reference_date` | `enriched_segment_reference` version active during the scoring window |
 | `comfort_score` | `ComfortScore` in comfort-score.md (the shrinkage-adjusted mean), or its vehicle-agnostic variant |
 | `sample_count` | Sum of `hourly_comfort_score.sample_count` (raw sensor events, matching the Silver-level definition) over the qualifying hours in `H_{s,p}` (comfort-score.md Step 2) — **not** the hour count `N`. `N` is not stored as its own column; it is recoverable from `confidence_score` and the fixed `k` (`N = k * Confidence / (1 - Confidence)`). The traffic count used for the `T_min` filter (`T_h`) is a separate concept, sourced from `hourly_segment_features.trip_count`; whether the Gold job joins that table or `hourly_comfort_score` grows its own traffic-count column is **open** — see OQ-039 |

@@ -26,6 +26,7 @@ REQUIRED_COLUMNS = (
     "segment_id",
     "vehicle_profile_id",
     "data_period_start",
+    "data_period_end",
     "vertical_score",
     "longitudinal_score",
     "lateral_score",
@@ -105,6 +106,9 @@ def _vehicle_agnostic_scores(combined: DataFrame, config: ComfortScoreConfig) ->
         (F.sum(F.col("trip_count") * F.col("c_h")) / F.sum("trip_count")).alias("c_h"),
         F.sum("trip_count").alias("trip_count"),
         F.sum("sample_count").alias("sample_count"),
+        # 같은 (segment_id, data_period_start) 시간대의 프로필들은 같은 시간 윈도우를
+        # 가리키므로 동일한 값이어야 하지만, groupBy 키로 삼는 대신 MAX로 골라 둔다.
+        F.max("data_period_end").alias("data_period_end"),
     )
 
     qualifying = _qualifying_hours(pooled_hourly, config)
@@ -139,6 +143,11 @@ def _observed_with_universe(
         F.count(F.lit(1)).alias("qualifying_hours"),
         F.avg("c_h").alias("observed_score"),
         F.sum("sample_count").alias("sample_count"),
+        # 새로 계산하는 값이 아니라 입력이 이미 갖고 있는 시간 경계를 그대로 롤업한다.
+        # qualifying hour가 하나도 없는 키는 여기서 NULL로 남고, 그 채움은 배치
+        # 윈도우 경계를 아는 gold_job.py의 책임이다(#163).
+        F.min("data_period_start").alias("data_period_start"),
+        F.max("data_period_end").alias("data_period_end"),
     )
     universe = candidate_hours.select(*group_keys).distinct()
     return universe.join(observed, on=list(group_keys), how="left").fillna(
@@ -165,6 +174,8 @@ def _apply_shrinkage(
 
     return scorable.select(
         *group_keys,
+        F.col("data_period_start"),
+        F.col("data_period_end"),
         F.round(comfort_score, 6).alias("comfort_score"),
         F.round(confidence_score, 6).alias("confidence_score"),
         F.col("sample_count"),
