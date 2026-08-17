@@ -51,7 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     feature_parser.add_argument("--feature-version", required=True)
     feature_parser.add_argument("--run-id")
     feature_parser.add_argument("--input-path")
-    feature_parser.add_argument("--road-segment-path")
+    feature_parser.add_argument(
+        "--road-segment-path",
+        help=(
+            "build-road-environment Manifest의 road_segment Artifact URI를 그대로 전달한다 "
+            "(디렉터리 접두사가 아니라 실제 Parquet 파일/경로)."
+        ),
+    )
     feature_parser.add_argument("--output-path")
     feature_parser.add_argument("--event-config-path", type=Path)
     feature_parser.add_argument("--steering-config-path", type=Path)

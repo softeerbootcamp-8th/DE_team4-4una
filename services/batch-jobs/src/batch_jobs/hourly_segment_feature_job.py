@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -132,11 +133,11 @@ def run_hourly_segment_feature_job(
         .filter((F.col("event_time") >= window_start) & (F.col("event_time") < window_end))
     )
 
-    road_segment_path = (
-        f"{config.road_segment_path.rstrip('/')}/"
-        f"snapshot_date={road_snapshot_date.isoformat()}/data.parquet"
-    )
-    road_segment_df = spark.read.parquet(road_segment_path).select(*ROAD_SEGMENT_COLUMNS)
+    # config.road_segment_path는 Manifest의 road_segment Artifact URI 그대로다 — 경로를 추가로 조립하지 않는다.
+    road_segment_df = spark.read.parquet(
+        _decode_local_file_uri(config.road_segment_path)
+    ).select(*ROAD_SEGMENT_COLUMNS)
+    _require_matching_road_snapshot_date(road_segment_df, road_snapshot_date)
 
     search_radius_m = matching_config.candidate_search_radius_m.value
     candidates = find_segment_candidates(sensor_df, road_segment_df, search_radius_m)
@@ -215,6 +216,25 @@ def _validate_job_arguments(
         raise ValueError("run_id must not be blank")
     if processed_at.utcoffset() != timedelta(0):
         raise ValueError("processed_at must be UTC timezone-aware")
+
+
+def _decode_local_file_uri(path: str) -> str:
+    # de4_core.join_uri()가 로컬 file:// URI에서 '='를 %3D로 인코딩하는데 Spark는 이를 못 읽어서 디코딩한다.
+    if path.startswith("file://"):
+        return urllib.parse.unquote(path)
+    return path
+
+
+def _require_matching_road_snapshot_date(
+    road_segment_df: DataFrame, road_snapshot_date: date
+) -> None:
+    # 엉뚱한 snapshot의 road_segment를 넘겨받았을 때 값비싼 Map Matching 전에 바로 실패하게 한다.
+    mismatched = road_segment_df.filter(F.col("snapshot_date") != F.lit(road_snapshot_date))
+    if mismatched.limit(1).count():
+        raise ValueError(
+            f"road_segment_path contains snapshot_date values other than "
+            f"{road_snapshot_date.isoformat()}"
+        )
 
 
 def _log_summary(
