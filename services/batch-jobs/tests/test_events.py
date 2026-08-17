@@ -3,12 +3,12 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pyspark.sql import Row, SparkSession
-from sensor_features.events import (
+from batch_jobs.sensor_features.events import (
     add_hard_acceleration_event,
     add_hard_braking_event,
     add_sharp_steering_event,
 )
+from pyspark.sql import Row, SparkSession
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
 # 고정하지 않으면 실행 머신마다(Asia/Seoul vs UTC) 값이 달라진다.

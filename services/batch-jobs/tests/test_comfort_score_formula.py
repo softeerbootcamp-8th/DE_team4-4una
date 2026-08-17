@@ -12,10 +12,10 @@ import time
 from datetime import datetime
 
 import pytest
-from comfort_score.config import ComfortScoreConfig
-from comfort_score.formula import compute_segment_comfort_scores
+from batch_jobs.comfort_score.config import ComfortScoreConfig
+from batch_jobs.comfort_score.formula import compute_segment_comfort_scores
+from batch_jobs.sensor_features.config import ProvisionalThreshold
 from pyspark.sql import SparkSession
-from sensor_features.config import ProvisionalThreshold
 
 # test_comfort_score_loader.py와 동일한 이유로 TZ를 고정한다: naive datetime을
 # 실행 머신 로컬 타임존이 아니라 UTC로 일관되게 다루기 위함.

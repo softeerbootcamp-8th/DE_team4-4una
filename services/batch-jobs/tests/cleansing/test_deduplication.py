@@ -1,13 +1,13 @@
 from datetime import UTC, datetime
 
-from bronze_samples import VALID_EVENT, valid_value, write_bronze_parquet
-from cleansing.reader import read_bronze_sensor_events
-from cleansing.rules import load_cleansing_config
-from cleansing.validate import (
+from batch_jobs.cleansing.reader import read_bronze_sensor_events
+from batch_jobs.cleansing.rules import load_cleansing_config
+from batch_jobs.cleansing.validate import (
     DUPLICATE_EVENT,
     MISSING_REQUIRED_FIELD,
     cleanse_sensor_events,
 )
+from bronze_samples import VALID_EVENT, valid_value, write_bronze_parquet
 
 RUN_ID = "cleansing-20260814-001"
 REJECTED_AT = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)

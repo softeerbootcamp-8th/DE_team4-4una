@@ -14,8 +14,8 @@ from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as reproject_geometry
 
-from road_segment.geometry import TARGET_CRS, geometry_from_wkb
-from road_segment.validate import RoadSegmentRecord
+from batch_jobs.road_segment.geometry import TARGET_CRS, geometry_from_wkb
+from batch_jobs.road_segment.validate import RoadSegmentRecord
 
 
 @dataclass(frozen=True, slots=True)

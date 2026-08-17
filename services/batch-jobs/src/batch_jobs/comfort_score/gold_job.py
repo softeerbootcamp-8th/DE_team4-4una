@@ -13,13 +13,13 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from comfort_score.config import (
+from batch_jobs.comfort_score.config import (
     DEFAULT_COMFORT_SCORE_CONFIG_PATH,
     load_comfort_score_config,
 )
-from comfort_score.formula import compute_segment_comfort_scores
-from comfort_score.gold_writer import write_segment_comfort_scores
-from comfort_score.loader import (
+from batch_jobs.comfort_score.formula import compute_segment_comfort_scores
+from batch_jobs.comfort_score.gold_writer import write_segment_comfort_scores
+from batch_jobs.comfort_score.loader import (
     DEFAULT_WINDOW_HOURS,
     load_hourly_comfort_score_for_gold,
 )

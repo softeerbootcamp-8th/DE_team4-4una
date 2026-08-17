@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import pytest
 import shapely
-from map_matching.candidates import (
+from batch_jobs.map_matching.candidates import (
     SOURCE_CRS,
     TARGET_CRS,
     RoadSegmentCandidate,

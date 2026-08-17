@@ -1,4 +1,4 @@
-"""Apply db/migrations/*.sql to Postgres, tracked in schema_migrations (#129)."""
+"""Apply packaged SQL migrations to Postgres, tracked in schema_migrations (#129)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from batch_jobs.db_lock_keys import MIGRATION_LOCK_KEY
+from batch_jobs.resources import RESOURCE_DIR
 
-DEFAULT_MIGRATIONS_DIR = Path("db/migrations")
+DEFAULT_MIGRATIONS_DIR = RESOURCE_DIR / "migrations"
 
 
 @dataclass(frozen=True, slots=True)

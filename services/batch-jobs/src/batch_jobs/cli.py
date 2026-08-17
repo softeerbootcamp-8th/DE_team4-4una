@@ -85,8 +85,8 @@ def add_bbox_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def run_cleansing(run_id: str) -> None:
-    from cleansing.config import CleansingJobConfig
-    from cleansing.job import build_spark_session, run_cleansing_job
+    from batch_jobs.cleansing.config import CleansingJobConfig
+    from batch_jobs.cleansing.job import build_spark_session, run_cleansing_job
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     spark = build_spark_session()
@@ -165,7 +165,8 @@ def run_migrate_database() -> None:
 
 def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
     import psycopg2
-    from comfort_score.gold_job import (
+
+    from batch_jobs.comfort_score.gold_job import (
         SegmentComfortScoreJobConfig,
         build_spark_session,
         run_segment_comfort_score_job,

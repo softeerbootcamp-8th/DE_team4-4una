@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from comfort_score.gold_writer import (
+from batch_jobs.comfort_score.gold_writer import (
     EXPECTED_STAGING_COLUMNS,
     _acquire_lock,
     _merge,

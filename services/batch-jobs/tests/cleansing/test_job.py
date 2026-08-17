@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+from batch_jobs.cleansing.config import CleansingJobConfig
+from batch_jobs.cleansing.job import run_cleansing_job
 from bronze_samples import MALFORMED_VALUE, valid_value, write_bronze_parquet
-from cleansing.config import CleansingJobConfig
-from cleansing.job import run_cleansing_job
 
 RUN_ID = "cleansing-20260815-001"
 PROCESSED_AT = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)

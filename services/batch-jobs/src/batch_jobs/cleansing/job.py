@@ -8,15 +8,15 @@ from datetime import datetime
 
 from pyspark.sql import DataFrame, SparkSession
 
-from cleansing.config import CleansingJobConfig
-from cleansing.reader import read_bronze_sensor_events
-from cleansing.rules import load_cleansing_config
-from cleansing.sink import (
+from batch_jobs.cleansing.config import CleansingJobConfig
+from batch_jobs.cleansing.reader import read_bronze_sensor_events
+from batch_jobs.cleansing.rules import load_cleansing_config
+from batch_jobs.cleansing.sink import (
     to_processed_sensor_events,
     write_processed_sensor_events,
     write_quarantined_events,
 )
-from cleansing.validate import cleanse_sensor_events
+from batch_jobs.cleansing.validate import cleanse_sensor_events
 
 logger = logging.getLogger(__name__)
 

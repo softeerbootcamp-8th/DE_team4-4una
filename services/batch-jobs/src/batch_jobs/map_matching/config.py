@@ -8,9 +8,9 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_MAP_MATCHING_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "map_matching.yaml"
-)
+from batch_jobs.resources import RESOURCE_DIR
+
+DEFAULT_MAP_MATCHING_CONFIG_PATH = RESOURCE_DIR / "map_matching.yaml"
 
 
 # value와 provisional 플래그를 함께 담는 단일 설정값

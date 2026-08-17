@@ -3,6 +3,7 @@ import time
 from datetime import UTC, datetime
 
 import pytest
+from batch_jobs.sensor_features.aggregation import add_hourly_aggregation_keys
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     DoubleType,
@@ -12,7 +13,6 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
-from sensor_features.aggregation import add_hourly_aggregation_keys
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,
 # 고정하지 않으면 실행 머신마다(Asia/Seoul vs UTC) 값이 달라진다.

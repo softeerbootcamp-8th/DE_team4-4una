@@ -4,6 +4,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 from batch_jobs.schemas import HOURLY_SEGMENT_FEATURE_SCHEMA
+from batch_jobs.sensor_features.aggregation import (
+    build_hourly_segment_features,
+    validate_hourly_segment_features,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType,
@@ -14,10 +18,6 @@ from pyspark.sql.types import (
     StructField,
     StructType,
     TimestampType,
-)
-from sensor_features.aggregation import (
-    build_hourly_segment_features,
-    validate_hourly_segment_features,
 )
 
 # collect()가 돌려주는 timestamp는 이 파이썬 프로세스의 로컬 타임존으로 변환되어,

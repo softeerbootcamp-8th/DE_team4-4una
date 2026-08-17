@@ -8,13 +8,13 @@ context/comfort-score.md에 정의된 Step 1~5(및 vehicle-agnostic 버전)를 �
 
 from __future__ import annotations
 
-from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
-from comfort_score.config import ComfortScoreConfig
-from comfort_score.loader import _validate_schema
+from batch_jobs.comfort_score.config import ComfortScoreConfig
+from batch_jobs.comfort_score.loader import _validate_schema
+from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 
 # 이 계산 로직의 형태(shape) 버전. 공식 구조가 바뀌면 올린다 (comfort-score.md 참고).
 SCORE_VERSION = "1.0.0"

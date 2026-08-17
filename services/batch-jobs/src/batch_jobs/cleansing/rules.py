@@ -8,9 +8,9 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_CLEANSING_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "cleansing_rules.yaml"
-)
+from batch_jobs.resources import RESOURCE_DIR
+
+DEFAULT_CLEANSING_CONFIG_PATH = RESOURCE_DIR / "cleansing_rules.yaml"
 
 
 @dataclass(frozen=True, slots=True)

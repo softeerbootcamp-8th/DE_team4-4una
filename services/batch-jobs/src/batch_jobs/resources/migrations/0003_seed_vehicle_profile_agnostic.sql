@@ -4,7 +4,7 @@
 -- vehicle-agnostic 경로는 차량별 보정을 하지 않으므로, 이 행의 가중치는
 -- 정확히 그 전역 가중치(0.5/0.3/0.2)와 같아야 한다.
 --
--- 주의(drift 위험): 이 값은 services/batch-jobs/config/comfort_score.yaml과
+-- 주의(drift 위험): 이 값은 batch_jobs/resources/comfort_score.yaml과
 -- 별개 파일에 하드코딩된 중복 값이다. comfort_score.yaml의 가중치가
 -- 바뀌면 이 파일도 같이 갱신해야 하며 자동 동기화 장치는 없다.
 --

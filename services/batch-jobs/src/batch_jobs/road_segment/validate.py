@@ -8,8 +8,8 @@ from datetime import date, datetime
 import shapely
 from shapely.geometry.base import BaseGeometry
 
-from road_segment.geometry import SegmentGeometry
-from road_segment.transform import RoadSegmentRow
+from batch_jobs.road_segment.geometry import SegmentGeometry
+from batch_jobs.road_segment.transform import RoadSegmentRow
 
 REQUIRED_FIELDS = (
     "segment_id",
