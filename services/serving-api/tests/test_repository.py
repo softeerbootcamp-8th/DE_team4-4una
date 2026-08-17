@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Self
 
 from serving_api.repository import BATCH_SQL, COLUMNS, SINGLE_SQL, fetch_many, fetch_one
@@ -16,8 +16,8 @@ from serving_api.schemas import ComfortScore
 ROW = (
     "0032900",
     0,
-    date(2026, 8, 10),
-    date(2026, 8, 16),
+    datetime(2026, 8, 10, tzinfo=UTC),
+    datetime(2026, 8, 17, tzinfo=UTC),
     82.5,
     1200,
     0.94,
@@ -63,8 +63,8 @@ def test_fetch_one_maps_row_to_model() -> None:
     assert score is not None
     assert score.segment_id == "0032900"
     assert score.vehicle_profile_id == 0
-    assert score.data_period_start == date(2026, 8, 10)
-    assert score.data_period_end == date(2026, 8, 16)
+    assert score.data_period_start == datetime(2026, 8, 10, tzinfo=UTC)
+    assert score.data_period_end == datetime(2026, 8, 17, tzinfo=UTC)
     assert score.comfort_score == 82.5
     assert score.sample_count == 1200
     assert score.confidence_score == 0.94

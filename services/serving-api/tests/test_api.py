@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Self
 
 import psycopg
@@ -33,8 +33,8 @@ def row(segment_id: str, comfort_score: float) -> tuple[object, ...]:
     return (
         segment_id,
         0,
-        date(2026, 8, 10),
-        date(2026, 8, 16),
+        datetime(2026, 8, 10, tzinfo=UTC),
+        datetime(2026, 8, 17, tzinfo=UTC),
         comfort_score,
         1200,
         0.94,
@@ -108,8 +108,8 @@ def test_single_lookup_returns_every_response_field() -> None:
     assert response.json() == {
         "segment_id": "0032900",
         "vehicle_profile_id": 0,
-        "data_period_start": "2026-08-10",
-        "data_period_end": "2026-08-16",
+        "data_period_start": "2026-08-10T00:00:00Z",
+        "data_period_end": "2026-08-17T00:00:00Z",
         "comfort_score": 82.5,
         "sample_count": 1200,
         "confidence_score": 0.94,

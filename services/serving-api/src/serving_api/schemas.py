@@ -1,12 +1,8 @@
-"""Request and response models for the serving API (#160).
-
-필드 구성과 순서는 Gold `segment_comfort_score` 노션 스키마를 따른다.
-`data_period_start`/`data_period_end`는 Score 계산에 사용한 주행 데이터 기간이다.
-"""
+"""Request and response models for the serving API (#160)."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
@@ -22,8 +18,8 @@ SegmentId = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 class ComfortScore(BaseModel):
     segment_id: str
     vehicle_profile_id: int
-    data_period_start: date
-    data_period_end: date
+    data_period_start: datetime
+    data_period_end: datetime
     comfort_score: float
     sample_count: int
     confidence_score: float
