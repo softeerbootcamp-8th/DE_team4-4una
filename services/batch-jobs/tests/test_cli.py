@@ -1,0 +1,22 @@
+"""Tests for batch_jobs/cli.py::main() command dispatch (#152)."""
+
+from __future__ import annotations
+
+import argparse
+
+from batch_jobs import cli
+
+
+def test_main_returns_after_load_segment_comfort_score_without_falling_through(
+    monkeypatch,
+) -> None:
+    # load-segment-comfort-score 분기에 return이 없으면, 이 분기 처리 후 뒤에 있는
+    # build-hourly-segment-features/fetch-reference-data/build-road-environment
+    # 코드까지 그대로 실행되어 이 커맨드에는 없는 --build-id 등을 찾다가
+    # AttributeError로 비정상 종료된다.
+    calls: list[argparse.Namespace] = []
+    monkeypatch.setattr(cli, "run_segment_comfort_score_loading", calls.append)
+
+    cli.main(["load-segment-comfort-score", "--as-of", "2026-08-16T00:00:00+00:00"])
+
+    assert len(calls) == 1
