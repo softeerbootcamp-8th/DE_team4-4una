@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
@@ -42,6 +42,7 @@ def write_hourly_segment_features(
     # 검증된 result를 staging에 쓰고, read-back 확인 후에만 대상 Hour 경로에 반영한다
     if not _SAFE_RUN_ID.match(run_id):
         raise ValueError(f"run_id contains unsafe path characters: {run_id!r}")
+    _require_utc_target_hour(target_hour)
     _require_single_target_hour(result, target_hour)
 
     final_path = hour_output_path(output_root, target_hour)
@@ -65,10 +66,18 @@ def write_hourly_segment_features(
     return HourlySegmentFeatureWriteResult(output_path=final_path, row_count=row_count)
 
 
+def _require_utc_target_hour(target_hour: datetime) -> None:
+    # tzinfo를 떼면 호스트 OS 타임존에 따라 다른 시각으로 재해석되므로, UTC 정각인지 그대로 검증한다.
+    if target_hour.utcoffset() != timedelta(0):
+        raise ValueError("target_hour must be UTC timezone-aware")
+    if (target_hour.minute, target_hour.second, target_hour.microsecond) != (0, 0, 0):
+        raise ValueError("target_hour must be truncated to the hour")
+
+
 def _require_single_target_hour(result: DataFrame, target_hour: datetime) -> None:
     # 엉뚱한 Hour 경로에 쓰지 않도록, 결과의 data_period_start가 전부 target_hour인지 확인한다.
-    naive_target_hour = target_hour.replace(tzinfo=None)
-    mismatched = result.filter(F.col("data_period_start") != F.lit(naive_target_hour))
+    # target_hour는 UTC-aware 그대로 비교해야 호스트 OS 타임존과 무관하게 같은 결과가 나온다.
+    mismatched = result.filter(F.col("data_period_start") != F.lit(target_hour))
     if mismatched.limit(1).count():
         raise ValueError("result contains rows outside the requested target_hour")
 
