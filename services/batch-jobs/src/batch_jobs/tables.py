@@ -1,4 +1,4 @@
-"""Write normalized, enriched, and runtime road tables as Parquet."""
+# road_segment 자체는 road_segment.persist가 쓴다 — 여기는 그로부터 파생된 테이블만 쓴다.
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 import duckdb
 
 from batch_jobs.environment import PreparedEnvironment, pavement_condition
+from batch_jobs.road_segment.geometry import geometry_from_wkb, reproject_to_source_crs
 
 
 def write_environment_tables(
@@ -19,19 +20,11 @@ def write_environment_tables(
     processed_at: datetime,
 ) -> dict[str, tuple[Path, int]]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    road_segment_path = output_dir / "road_segment.parquet"
     enriched_path = output_dir / "enriched_segment_reference.parquet"
     runtime_path = output_dir / "simulation_road_environment.parquet"
     taxi_zone_path = output_dir / "taxi_zone.parquet"
     connection = duckdb.connect()
     try:
-        write_road_segment(
-            connection,
-            prepared,
-            road_segment_path,
-            road_snapshot_date,
-            processed_at,
-        )
         write_enriched_segments(
             connection,
             prepared,
@@ -51,72 +44,10 @@ def write_environment_tables(
     finally:
         connection.close()
     return {
-        "road_segment": (road_segment_path, len(prepared.segments)),
         "enriched_segment_reference": (enriched_path, len(prepared.segments)),
         "simulation_road_environment": (runtime_path, len(prepared.segments)),
         "taxi_zone": (taxi_zone_path, len(prepared.taxi_zones)),
     }
-
-
-def write_road_segment(
-    connection: duckdb.DuckDBPyConnection,
-    prepared: PreparedEnvironment,
-    path: Path,
-    snapshot_date: date,
-    processed_at: datetime,
-) -> None:
-    connection.execute("DROP TABLE IF EXISTS road_segment")
-    connection.execute(
-        """
-        CREATE TABLE road_segment (
-            segment_id VARCHAR NOT NULL,
-            snapshot_date DATE NOT NULL,
-            street_name VARCHAR NOT NULL,
-            from_node_id BIGINT NOT NULL,
-            to_node_id BIGINT NOT NULL,
-            traffic_direction VARCHAR,
-            segment_type VARCHAR NOT NULL,
-            feature_type VARCHAR NOT NULL,
-            roadbed_layer VARCHAR NOT NULL,
-            from_node_level VARCHAR NOT NULL,
-            to_node_level VARCHAR NOT NULL,
-            posted_speed_mph INTEGER,
-            curve_flag VARCHAR,
-            curve_radius DOUBLE,
-            length_m DOUBLE NOT NULL,
-            location_id INTEGER,
-            geometry VARCHAR NOT NULL,
-            _ingested_at TIMESTAMP NOT NULL
-        )
-        """
-    )
-    connection.executemany(
-        "INSERT INTO road_segment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                segment.segment_id,
-                snapshot_date,
-                segment.street_name,
-                segment.from_node_id,
-                segment.to_node_id,
-                segment.traffic_direction,
-                segment.segment_type,
-                segment.feature_type,
-                segment.roadbed_layer,
-                segment.from_node_level,
-                segment.to_node_level,
-                segment.posted_speed_mph,
-                segment.curve_flag,
-                segment.curve_radius_m,
-                segment.length_m,
-                segment.location_id,
-                segment.geometry.wkt,
-                processed_at,
-            )
-            for segment in prepared.segments
-        ],
-    )
-    copy_to_parquet(connection, "road_segment", path)
 
 
 def write_enriched_segments(
@@ -154,7 +85,7 @@ def write_enriched_segments(
         "INSERT INTO enriched_segment_reference VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
-                segment.segment_id,
+                segment.road.segment_id,
                 reference_date,
                 road_snapshot_date,
                 segment.pavement_rating,
@@ -162,10 +93,10 @@ def write_enriched_segments(
                 segment.pavement_rating_date,
                 segment.hump_count,
                 0,
-                segment.curve_flag,
-                segment.curve_radius_m,
-                segment.posted_speed_mph,
-                segment.length_m,
+                segment.road.curve_flag,
+                segment.road.curve_radius_m,
+                segment.road.posted_speed_mph,
+                segment.road.length_m,
                 segment.pavement_quality_flag,
                 segment.hump_quality_flag,
                 "NOT_INCLUDED",
@@ -208,17 +139,18 @@ def write_runtime_environment(
         "INSERT INTO simulation_road_environment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
-                segment.segment_id,
+                segment.road.segment_id,
                 reference_date,
                 road_snapshot_date,
-                segment.from_node_id,
-                segment.to_node_id,
-                segment.traffic_direction,
-                segment.street_name,
-                segment.geometry.wkt,
-                segment.length_m,
-                segment.posted_speed_mph,
-                segment.curve_radius_m,
+                int(segment.road.from_node_id),
+                int(segment.road.to_node_id),
+                segment.road.traffic_direction,
+                segment.road.street_name,
+                # 시뮬레이터는 EPSG:4326(도)을 기대하므로 미터 기준 geometry_wkb를 여기서만 역투영한다.
+                reproject_to_source_crs(geometry_from_wkb(segment.road.geometry_wkb)).wkt,
+                segment.road.length_m,
+                segment.road.posted_speed_mph,
+                segment.road.curve_radius_m,
                 segment.pavement_rating,
                 json.dumps(segment.hump_fractions, separators=(",", ":")),
             )
@@ -245,7 +177,8 @@ def write_taxi_zones(
     connection.executemany(
         "INSERT INTO taxi_zone VALUES (?, ?)",
         [
-            (location_id, geometry.wkt)
+            # Zone은 Segment 결합용 EPSG:32118이므로 시뮬레이터가 기대하는 EPSG:4326으로 역투영한다.
+            (location_id, reproject_to_source_crs(geometry).wkt)
             for location_id, geometry in sorted(prepared.taxi_zones.items())
         ],
     )

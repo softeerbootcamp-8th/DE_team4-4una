@@ -204,26 +204,42 @@ decision in `open-questions.md`.
 
 **Primary key:** `(segment_id, snapshot_date)`.
 
+Built end to end by `batch_jobs.road_segment.build.build_road_segments()`
+(transform -> geometry -> validate -> taxi-zone assignment) and persisted by
+`batch_jobs.road_segment.persist.write_road_segment_snapshot()`. Vehicle-segment
+selection requires `FeatureTyp`/`Status`/`RW_TYPE`/`TrafDir` to all pass (see
+`batch_jobs.road_segment.transform.is_vehicle_segment`), which is stricter than
+the LION default and intentionally excludes non-vehicle roadway types (e.g.
+`RW_TYPE=12`, ferry routes) and non-constructed segments (`Status != "2"`).
+
 | Attribute | Column | Source column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
 | LION segment ID | `segment_id` | `SegmentID` | STRING | N | PK | Canonical road segment ID |
 | Snapshot date | `snapshot_date` | Derived | DATE | N | PK | LION snapshot date |
-| Street name | `street_name` | `Street` | STRING | N |  | Road name |
-| From node | `from_node_id` | `NodeIDFrom` | BIGINT | N |  | Starting node |
-| To node | `to_node_id` | `NodeIDTo` | BIGINT | N |  | Ending node |
+| Street name | `street_name` | `Street` | STRING | Y |  | Road name |
+| From node | `from_node_id` | `NodeIDFrom` | STRING | N |  | Starting node |
+| To node | `to_node_id` | `NodeIDTo` | STRING | N |  | Ending node |
 | Traffic direction | `traffic_direction` | `TrafDir` | STRING | Y |  | Permitted vehicle direction |
-| Segment type | `segment_type` | `SegmentTyp` | STRING | N |  | LION segment type |
-| Feature type | `feature_type` | `FeatureTyp` | STRING | N |  | LION feature type |
-| Roadbed layer | `roadbed_layer` | `RB_Layer` | STRING | N |  | Grade-separated roadbed discriminator |
-| From-node level | `from_node_level` | `NodeLevelF` | STRING | N |  | Starting grade level |
-| To-node level | `to_node_level` | `NodeLevelT` | STRING | N |  | Ending grade level |
+| Segment type | `segment_type` | `SegmentTyp` | STRING | Y |  | LION segment type |
+| Feature type | `feature_type` | `FeatureTyp` | STRING | Y |  | LION feature type |
+| Roadway type | `roadway_type` | `RW_TYPE` | STRING | Y |  | LION roadway-type code used to filter vehicle segments |
+| Roadbed layer | `roadbed_layer` | `RB_Layer` | STRING | Y |  | Grade-separated roadbed discriminator |
+| From-node level | `from_node_level` | `NodeLevelF` | STRING | Y |  | Starting grade level |
+| To-node level | `to_node_level` | `NodeLevelT` | STRING | Y |  | Ending grade level |
 | Posted speed | `posted_speed_mph` | `POSTED_SPEED` | INTEGER | Y |  | Miles per hour |
 | Curve flag | `curve_flag` | `CurveFlag` | STRING | Y |  | Whether the segment is curved |
-| Curve radius | `curve_radius` | `Radius` | DOUBLE | Y |  | Radius used for curve effects; unit must be confirmed |
-| Length | `length_m` | Converted from `SHAPE_Length` | DOUBLE | N |  | Meters |
-| Taxi zone | `location_id` | Spatial mapping | INTEGER | Y | FK | TLC taxi zone containing the segment |
-| Geometry | `geometry` | `SHAPE` | GEOMETRY | N |  | LineString or MultiLineString |
-| Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Pipeline load time |
+| Curve radius | `curve_radius_m` | Converted from `Radius` (feet) | DOUBLE | Y |  | Meters |
+| Length | `length_m` | Converted from `Shape__Length` (feet) | DOUBLE | N |  | Meters |
+| Geometry | `geometry_wkb` | `SHAPE` | GEOMETRY (WKB) | N |  | LineString in `EPSG:32118` (NY State Plane, meters) — map matching relies on this being pre-projected, not `EPSG:4326` |
+| Source version | `source_version` | Derived | STRING | N |  | LION source snapshot/release identifier |
+| Ingested time | `ingested_at` | Derived | TIMESTAMPTZ | N |  | Pipeline load time (UTC) |
+| Taxi zone | `location_id` | Spatial mapping (in `EPSG:32118`) | INTEGER | Y | FK | TLC taxi zone containing the segment |
+
+`simulation_road_environment` and `taxi_zone` (the sensor-simulator-facing
+artifacts also published by `build-road-environment`) keep `from_node_id`/
+`to_node_id` as `BIGINT` and geometry as `EPSG:4326` WKT/WKB — those are
+reprojected back from the `EPSG:32118` `road_segment` records specifically for
+simulator consumption and are not affected by the above.
 
 ## `enriched_segment_reference`
 

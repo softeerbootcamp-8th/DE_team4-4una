@@ -26,6 +26,7 @@ TARGET_CRS = "EPSG:32118"
 
 # Transformer 생성 비용이 있어 모듈 로드 시 한 번만 만들어 재사용한다.
 _TRANSFORMER = Transformer.from_crs(SOURCE_CRS, TARGET_CRS, always_xy=True)
+_INVERSE_TRANSFORMER = Transformer.from_crs(TARGET_CRS, SOURCE_CRS, always_xy=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,11 @@ def load_lion_rows_with_geometry(path: Path) -> list[dict[str, object]]:
 
 def reproject_to_target_crs(geometry: BaseGeometry) -> BaseGeometry:
     return reproject_geometry(_TRANSFORMER.transform, geometry)
+
+
+# reproject_to_target_crs의 역변환 — WGS84가 여전히 필요한 소비자용(예: 시뮬레이터)
+def reproject_to_source_crs(geometry: BaseGeometry) -> BaseGeometry:
+    return reproject_geometry(_INVERSE_TRANSFORMER.transform, geometry)
 
 
 def normalize_line_geometry(raw_geometry: object) -> BaseGeometry | None:
