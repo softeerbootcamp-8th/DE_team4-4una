@@ -1,13 +1,14 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-17
 ---
 
 # Service Map
 
-All listed packages exist as independent `uv` workspace members, but currently
-contain skeleton entry points only.
+All listed packages exist as independent `uv` workspace members. The table
+describes their proposed ownership boundaries; implementation maturity varies
+and does not by itself settle those boundaries.
 
 | Workspace member | Proposed responsibility | Primary inputs | Primary outputs |
 | --- | --- | --- | --- |
@@ -19,6 +20,21 @@ contain skeleton entry points only.
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance | Serving store | HTTP API responses |
 | `services/orchestration` | Coordinate monthly reference jobs, replay runs, score jobs, and publication | Schedules and run configuration | Workflow state and run metadata |
 | `services/dashboard` | Visualize coverage, latest scores, pipeline status, and possibly simulated movement | Serving API and operational metadata | Human-facing views |
+
+## Current `batch-jobs` packaging
+
+`services/batch-jobs` is implemented beyond its original skeleton. Importable
+code is contained by the `batch_jobs` namespace, including the `cleansing`,
+`comfort_score`, `map_matching`, `road_segment`, and `sensor_features`
+subpackages. Default YAML configuration and executable PostgreSQL migrations
+are package resources under
+`services/batch-jobs/src/batch_jobs/resources/`, so they remain available from
+an installed wheel rather than depending on the repository working directory.
+
+The service currently exposes Gold calculation/publication and database
+migration commands even though the target boundary above assigns Gold loading
+to `services/gold-loader`, whose entry point remains a skeleton. OQ-040 records
+the required ownership decision; this document does not resolve it implicitly.
 
 ## Boundary rules
 
@@ -42,3 +58,5 @@ The following boundaries require an explicit decision before implementation:
 - Whether trip sampling belongs to the monthly orchestration workflow or to a
   simulation-specific preparation command.
 - Whether the dashboard is required for the first end-to-end milestone.
+- Whether serving-store migrations and Gold publication remain in `batch-jobs`
+  or move to `gold-loader` (OQ-040).

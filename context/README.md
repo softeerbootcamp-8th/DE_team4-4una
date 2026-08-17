@@ -33,7 +33,8 @@ Every task should begin with:
 Use the following precedence when sources disagree:
 
 1. Accepted requirements and decisions recorded in this directory or an ADR.
-2. Executable contracts in `libs/de4-core` and database migrations in `db/`.
+2. Executable contracts in `libs/de4-core` and database migrations in
+   `services/batch-jobs/src/batch_jobs/resources/migrations/`.
 3. Implemented service behavior and tests.
 4. General descriptions in the repository `README.md`.
 
