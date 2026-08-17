@@ -6,7 +6,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pyspark import StorageLevel
@@ -111,8 +111,12 @@ def run_segment_comfort_score_job(
     )
     scoring_config = load_comfort_score_config(config.comfort_score_config_path)
     scored = _select_staging_columns(
-        _attach_calculated_at(
-            compute_segment_comfort_scores(hourly_df, scoring_config), as_of
+        _fill_missing_periods(
+            _attach_calculated_at(
+                compute_segment_comfort_scores(hourly_df, scoring_config), as_of
+            ),
+            as_of,
+            config.window_hours,
         )
     ).persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -150,6 +154,19 @@ def _select_staging_columns(df: DataFrame) -> DataFrame:
     population_mean 같은 진단용 컬럼을 걸러, staging 테이블 컬럼(EXPECTED_STAGING_COLUMNS)과
     정확히 맞춘다. 안 그러면 JDBC write가 컬럼 불일치로 실패한다."""
     return df.select(*EXPECTED_STAGING_COLUMNS)
+
+
+def _fill_missing_periods(df: DataFrame, as_of: datetime, window_hours: int) -> DataFrame:
+    """qualifying_hours=0인 행은 formula.py에서 MIN/MAX로 롤업할 시간이 없어
+    data_period_start/data_period_end가 NULL로 나온다 (#163). 그 그룹의 실제 관측
+    시간은 없지만, 이 실행이 커버하려던 배치 윈도우 [as_of - window_hours, as_of)로
+    대신 채운다 — loader.py._filter_window_hours와 동일한 경계 정의를 쓴다."""
+    window_start = as_of - timedelta(hours=window_hours)
+    return df.withColumn(
+        "data_period_start", F.coalesce(F.col("data_period_start"), F.lit(window_start))
+    ).withColumn(
+        "data_period_end", F.coalesce(F.col("data_period_end"), F.lit(as_of))
+    )
 
 
 def _attach_calculated_at(df: DataFrame, as_of: datetime) -> DataFrame:
