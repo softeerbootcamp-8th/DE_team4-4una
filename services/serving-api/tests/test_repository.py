@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from typing import Self
 
 from serving_api.repository import BATCH_SQL, COLUMNS, SINGLE_SQL, fetch_many, fetch_one
-from serving_api.schemas import ComfortScore, ComfortScoreKey
+from serving_api.schemas import ComfortScore
 
 # COLUMNS와 같은 순서의 한 행.
 ROW = (
@@ -76,25 +76,21 @@ def test_fetch_one_returns_none_when_no_row_matches() -> None:
     assert fetch_one(FakeConnection([]), "0032900", 0) is None
 
 
-def test_fetch_many_passes_one_array_per_key_column() -> None:
+def test_fetch_many_passes_the_profile_and_one_segment_array() -> None:
     connection = FakeConnection([ROW])
-    keys = [
-        ComfortScoreKey(segment_id="0032900", vehicle_profile_id=0),
-        ComfortScoreKey(segment_id="0032901", vehicle_profile_id=1),
-    ]
 
-    scores = fetch_many(connection, keys)
+    scores = fetch_many(connection, 0, ["0032900", "0032901"])
 
     assert [score.segment_id for score in scores] == ["0032900"]
     assert connection.opened_cursor.executed == [
-        (BATCH_SQL, (["0032900", "0032901"], [0, 1]))
+        (BATCH_SQL, (0, ["0032900", "0032901"]))
     ]
 
 
-def test_fetch_many_skips_the_query_when_no_keys_are_given() -> None:
+def test_fetch_many_skips_the_query_when_no_segments_are_given() -> None:
     connection = FakeConnection([ROW])
 
-    assert fetch_many(connection, []) == []
+    assert fetch_many(connection, 0, []) == []
     assert connection.opened_cursor.executed == []
 
 

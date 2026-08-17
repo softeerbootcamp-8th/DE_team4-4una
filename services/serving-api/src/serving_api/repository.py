@@ -14,7 +14,7 @@ from typing import Any
 
 import psycopg
 
-from serving_api.schemas import ComfortScore, ComfortScoreKey
+from serving_api.schemas import ComfortScore
 
 TABLE = "segment_comfort_score"
 
@@ -37,14 +37,13 @@ FROM {TABLE}
 WHERE segment_id = %s AND vehicle_profile_id = %s
 """
 
-# 조합 수가 늘어도 파라미터는 배열 2개로 고정된다. IN 목록을 문자열로 조립하면
-# 조합 수마다 다른 쿼리가 되어 실행 계획을 매번 새로 세운다.
+# 구간 수가 늘어도 파라미터는 스칼라 1개 + 배열 1개로 고정된다. IN 목록을
+# 문자열로 조립하면 구간 수마다 다른 쿼리가 되어 실행 계획과 prepared statement를
+# 재사용할 수 없다.
 BATCH_SQL = f"""
-SELECT {", ".join(f"score.{column}" for column in COLUMNS)}
-FROM {TABLE} AS score
-JOIN unnest(%s::text[], %s::integer[]) AS requested(segment_id, vehicle_profile_id)
-  ON score.segment_id = requested.segment_id
- AND score.vehicle_profile_id = requested.vehicle_profile_id
+SELECT {", ".join(COLUMNS)}
+FROM {TABLE}
+WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
 """
 
 
@@ -59,15 +58,13 @@ def fetch_one(
 
 
 def fetch_many(
-    connection: psycopg.Connection, keys: Sequence[ComfortScoreKey]
+    connection: psycopg.Connection, vehicle_profile_id: int, segment_ids: Sequence[str]
 ) -> list[ComfortScore]:
-    """찾은 행만 돌려준다. 빠진 키를 골라내는 것은 HTTP 계층의 몫이다."""
-    if not keys:
+    """찾은 행만 돌려준다. 빠진 구간을 골라내는 것은 HTTP 계층의 몫이다."""
+    if not segment_ids:
         return []
-    segment_ids = [key.segment_id for key in keys]
-    vehicle_profile_ids = [key.vehicle_profile_id for key in keys]
     with connection.cursor() as cursor:
-        cursor.execute(BATCH_SQL, (segment_ids, vehicle_profile_ids))
+        cursor.execute(BATCH_SQL, (vehicle_profile_id, list(segment_ids)))
         rows = cursor.fetchall()
     return [_to_score(row) for row in rows]
 
