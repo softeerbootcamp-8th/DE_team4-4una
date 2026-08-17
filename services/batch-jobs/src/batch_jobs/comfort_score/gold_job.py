@@ -18,7 +18,10 @@ from batch_jobs.comfort_score.config import (
     load_comfort_score_config,
 )
 from batch_jobs.comfort_score.formula import compute_segment_comfort_scores
-from batch_jobs.comfort_score.gold_writer import write_segment_comfort_scores
+from batch_jobs.comfort_score.gold_writer import (
+    EXPECTED_STAGING_COLUMNS,
+    write_segment_comfort_scores,
+)
 from batch_jobs.comfort_score.loader import (
     DEFAULT_WINDOW_HOURS,
     load_hourly_comfort_score_for_gold,
@@ -107,8 +110,10 @@ def run_segment_comfort_score_job(
         spark, config.data_lake_uri, as_of, config.window_hours
     )
     scoring_config = load_comfort_score_config(config.comfort_score_config_path)
-    scored = _attach_calculated_at(
-        compute_segment_comfort_scores(hourly_df, scoring_config), as_of
+    scored = _select_staging_columns(
+        _attach_calculated_at(
+            compute_segment_comfort_scores(hourly_df, scoring_config), as_of
+        )
     ).persist(StorageLevel.MEMORY_AND_DISK)
 
     try:
@@ -138,6 +143,13 @@ def run_segment_comfort_score_job(
         return summary
     finally:
         scored.unpersist()
+
+
+def _select_staging_columns(df: DataFrame) -> DataFrame:
+    """compute_segment_comfort_scores()가 남기는 qualifying_hours/observed_score/
+    population_mean 같은 진단용 컬럼을 걸러, staging 테이블 컬럼(EXPECTED_STAGING_COLUMNS)과
+    정확히 맞춘다. 안 그러면 JDBC write가 컬럼 불일치로 실패한다."""
+    return df.select(*EXPECTED_STAGING_COLUMNS)
 
 
 def _attach_calculated_at(df: DataFrame, as_of: datetime) -> DataFrame:
