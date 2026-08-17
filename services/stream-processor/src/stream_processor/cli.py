@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import signal
 
 import pyspark
 from pyspark.sql import SparkSession
+from pyspark.sql.streaming import StreamingQuery
 
 from stream_processor.bronze_sink import write_bronze_stream
 from stream_processor.config import StreamConfig
@@ -26,6 +28,17 @@ def build_spark_session() -> SparkSession:
     )
 
 
+def install_shutdown_handler(query: StreamingQuery) -> None:
+    """SIGINT/SIGTERM 수신 시 query.stop()을 먼저 호출해, awaitTermination()이
+    KeyboardInterrupt 등 예외로 인한 스택트레이스 없이 정상 종료되도록 한다."""
+
+    def _handle_signal(signum: int, frame: object) -> None:
+        query.stop()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+
 def main() -> None:
     # basicConfig 없이는 logging의 INFO 레벨이 조용히 버려져서 ProgressLogger가 아무것도
     # 출력하지 않는다 (핸들러가 없으면 root logger 기본 레벨은 WARNING). 실행 로그로 남도록 설정한다.
@@ -37,4 +50,5 @@ def main() -> None:
 
     stream_df = read_kafka_stream(spark, config)
     query = write_bronze_stream(stream_df, config)
+    install_shutdown_handler(query)
     query.awaitTermination()

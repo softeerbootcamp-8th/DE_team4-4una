@@ -10,6 +10,7 @@ from batch_jobs.comfort_score.loader import (
     _validate_schema,
     load_hourly_comfort_score_for_gold,
 )
+from batch_jobs.comfort_scoring_config import DEFAULT_HOURLY_SCORING_CONFIG
 from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from pyspark.sql import SparkSession
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
@@ -117,6 +118,21 @@ def test_select_latest_scoring_version_compares_semver_not_strings(spark):
         ("seg-1", 1, AS_OF): 20,  # "10.0.0"이 이겨야 한다
         ("seg-2", 1, AS_OF): 30,
     }
+
+
+def test_select_latest_scoring_version_parses_the_configured_scoring_version(spark):
+    # 여기서 검증할 값은 하드코딩한 semver가 아니라 hourly_comfort.yaml에 실제로 설정된
+    # scoring_version이다 (#152). 이게 SemVer가 아니면 캐스팅이 런타임에 실패한다.
+    configured_version = DEFAULT_HOURLY_SCORING_CONFIG.scoring_version
+    rows = spark.createDataFrame(
+        [("seg-1", 1, AS_OF, configured_version, 100)],
+        "segment_id string, vehicle_profile_id int, data_period_start timestamp, "
+        "scoring_version string, sample_count long",
+    )
+
+    result = _select_latest_scoring_version(rows).collect()
+
+    assert result[0]["scoring_version"] == configured_version
 
 
 def _write_rows(spark, path: Path, schema: StructType, rows: list[dict]) -> None:

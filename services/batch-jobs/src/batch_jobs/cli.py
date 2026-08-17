@@ -268,6 +268,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "load-segment-comfort-score":
         run_segment_comfort_score_loading(arguments)
+        return
     if arguments.command == "build-hourly-segment-features":
         run_hourly_segment_feature_building(arguments)
         return

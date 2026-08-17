@@ -97,7 +97,7 @@ def test_produces_the_declared_schema_and_metadata(spark):
     ]
     row = result.scored.first()
     assert all(row[column] is not None for column in result.scored.columns)
-    assert row["scoring_version"] == "hourly-comfort-v1"
+    assert row["scoring_version"] == "1.0.0"
     assert row["_run_id"] == "silver3-run"
     assert (row["sample_count"], row["trip_count"]) == (36_000, 10)
 

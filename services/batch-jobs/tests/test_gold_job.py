@@ -12,9 +12,11 @@ from batch_jobs.comfort_score.gold_job import (
     SegmentComfortScoreJobConfig,
     SegmentComfortScoreJobSummary,
     _attach_calculated_at,
+    _select_staging_columns,
     _validate_as_of,
     run_segment_comfort_score_job,
 )
+from batch_jobs.comfort_score.gold_writer import EXPECTED_STAGING_COLUMNS
 from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -68,6 +70,23 @@ def test_attach_calculated_at_uses_the_same_as_of_literal_for_every_row(spark):
 
     epochs = [row[0] for row in result.select(F.unix_timestamp("calculated_at")).collect()]
     assert epochs == [int(as_of.timestamp())] * 2
+
+
+def test_select_staging_columns_drops_diagnostic_columns_not_in_the_staging_table(spark):
+    # formula.py의 출력에는 qualifying_hours/observed_score/population_mean처럼
+    # staging 테이블에 없는 진단용 컬럼이 섞여 있다 (#152) — 그대로 write하면
+    # JDBC write가 컬럼 불일치로 실패한다.
+    df = spark.createDataFrame(
+        [("seg-1", 1, 80.0, 0.9, 100, 5, 78.0, 82.0, "1.0.0", datetime(2026, 8, 16, tzinfo=UTC))],
+        "segment_id string, vehicle_profile_id int, comfort_score double, "
+        "confidence_score double, sample_count long, qualifying_hours long, "
+        "observed_score double, population_mean double, score_version string, "
+        "calculated_at timestamp",
+    )
+
+    result = _select_staging_columns(df)
+
+    assert result.columns == list(EXPECTED_STAGING_COLUMNS)
 
 
 def test_returns_zero_merged_count_and_skips_write_when_window_has_no_rows(
