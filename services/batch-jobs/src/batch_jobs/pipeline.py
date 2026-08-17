@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import tempfile
 from dataclasses import dataclass
@@ -19,8 +20,12 @@ from de4_core import (
 )
 
 from batch_jobs.environment import PreparedEnvironment, prepare_environment
+from batch_jobs.road_segment.build import RoadSegmentBuildReport, build_road_segments
+from batch_jobs.road_segment.persist import write_road_segment_snapshot
 from batch_jobs.sources import file_sha256, geojson_count
 from batch_jobs.tables import write_environment_tables
+
+logger = logging.getLogger(__name__)
 
 SOURCE_FILES = {
     "nyc_lion": "lion.geojson",
@@ -87,11 +92,26 @@ def build_and_publish_environment(
     if missing:
         raise FileNotFoundError(f"missing reference source files: {', '.join(missing)}")
 
-    prepared = prepare_environment(
+    created_at = datetime.now(UTC)
+    source_metadata = load_source_metadata(source_dir / "source_manifest.json")
+    lion_source_version = str(
+        source_metadata.get("nyc_lion", {}).get("source_period_or_version")
+        or road_snapshot_date.isoformat()
+    )
+
+    road_report = build_road_segments(
         source_paths["nyc_lion"],
+        source_paths["tlc_taxi_zones"],
+        road_snapshot_date,
+        lion_source_version,
+        created_at,
+    )
+    _log_road_segment_build(road_report)
+    prepared = prepare_environment(
+        list(road_report.records),
         source_paths["nyc_street_pavement_ratings"],
         source_paths["nyc_speed_humps"],
-        source_paths["tlc_taxi_zones"],
+        road_report.taxi_zones,
         reference_date,
     )
     enforce_quality_thresholds(
@@ -99,19 +119,23 @@ def build_and_publish_environment(
         minimum_pavement_segment_match_rate,
         minimum_hump_source_match_rate,
     )
-    created_at = datetime.now(UTC)
     environment_id = f"nyc-{reference_date:%Y%m%d}-{build_id}"
 
     with tempfile.TemporaryDirectory(prefix="de4-road-environment-") as temporary:
-        table_files = write_environment_tables(
-            prepared,
-            Path(temporary),
-            reference_date,
-            road_snapshot_date,
-            created_at,
+        road_segment_path = write_road_segment_snapshot(
+            list(road_report.records), Path(temporary) / "road_segment"
         )
+        table_files = {
+            "road_segment": (road_segment_path, len(road_report.records)),
+            **write_environment_tables(
+                prepared,
+                Path(temporary),
+                reference_date,
+                road_snapshot_date,
+                created_at,
+            ),
+        }
         sources = publish_sources(
-            source_dir,
             source_paths,
             data_lake_uri,
             road_snapshot_date,
@@ -119,6 +143,7 @@ def build_and_publish_environment(
             prepared,
             store,
             created_at,
+            source_metadata,
         )
         artifacts = publish_tables(
             table_files,
@@ -163,7 +188,6 @@ def build_and_publish_environment(
 
 
 def publish_sources(
-    source_dir: Path,
     source_paths: dict[str, Path],
     data_lake_uri: str,
     snapshot_date: date,
@@ -171,8 +195,8 @@ def publish_sources(
     prepared: PreparedEnvironment,
     store: ObjectStore,
     created_at: datetime,
+    source_metadata: dict[str, dict[str, object]],
 ) -> list[SourceSnapshot]:
-    source_metadata = load_source_metadata(source_dir / "source_manifest.json")
     row_counts = {
         "nyc_lion": geojson_count(source_paths["nyc_lion"]),
         "nyc_street_pavement_ratings": geojson_count(
@@ -288,6 +312,19 @@ def enforce_quality_thresholds(
             f"hump source match rate {hump_rate:.3f} is below "
             f"{minimum_hump_source_match_rate:.3f}"
         )
+
+
+def _log_road_segment_build(report: RoadSegmentBuildReport) -> None:
+    failed_ids = {segment_id for ids in report.rule_failures.values() for segment_id in ids}
+    logger.info(
+        "road_segment build: input=%d valid=%d rule_failures=%d unmatched_taxi_zone=%d",
+        report.input_segment_count,
+        len(report.records),
+        len(failed_ids),
+        len(report.unmatched_taxi_zone_segment_ids),
+    )
+    for rule, segment_ids in report.rule_failures.items():
+        logger.warning("road_segment rule_failure=%s count=%d", rule, len(segment_ids))
 
 
 def validate_build_id(build_id: str) -> None:

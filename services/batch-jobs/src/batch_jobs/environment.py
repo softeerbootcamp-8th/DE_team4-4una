@@ -1,46 +1,33 @@
-"""Normalize and enrich raw NYC road-reference snapshots."""
+# road_segment 정본(RoadSegmentRecord)에 포장 상태·과속방지턱 참조 데이터를 결합한다.
 
 from __future__ import annotations
 
-import io
 import json
 import re
-import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import shapefile
-from pyproj import CRS, Transformer
-from shapely import STRtree
-from shapely.geometry import LineString, shape
+from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import transform
 
-from batch_jobs.geo import as_line, line_length_m
+from batch_jobs.geo import as_line
+from batch_jobs.road_segment.geometry import (
+    geometry_from_wkb,
+    reproject_to_target_crs,
+)
+from batch_jobs.road_segment.validate import RoadSegmentRecord
 
-MAX_REFERENCE_DISTANCE_DEGREES = 0.00035
+# OQ-011: 포장·방지턱 매칭은 도로명 정규화 + 약 39m 이내 최근접 Geometry를 쓴다.
+# (구 EPSG:4326 기준 0.00035도 threshold는 NYC 위도에서 대략 39m에 해당했다.)
+MAX_REFERENCE_DISTANCE_M = 39.0
 
 
+# RoadSegmentRecord는 frozen이라 복제하지 않고 감싸기만 한다 — road_segment/가 단일 기준이다.
 @dataclass(slots=True)
-class PreparedRoadSegment:
-    segment_id: str
-    from_node_id: int
-    to_node_id: int
-    traffic_direction: str
-    segment_type: str
-    feature_type: str
-    roadbed_layer: str
-    from_node_level: str
-    to_node_level: str
-    street_name: str
-    geometry: LineString
-    length_m: float
-    posted_speed_mph: int | None
-    curve_flag: str | None
-    curve_radius_m: float | None
-    location_id: int | None = None
+class EnrichedRoadSegment:
+    road: RoadSegmentRecord
     pavement_rating: float | None = None
     pavement_rating_date: date | None = None
     pavement_quality_flag: str = "NOT_FOUND"
@@ -84,21 +71,19 @@ class PreparationQuality:
 
 @dataclass(frozen=True, slots=True)
 class PreparedEnvironment:
-    segments: tuple[PreparedRoadSegment, ...]
+    segments: tuple[EnrichedRoadSegment, ...]
     taxi_zones: dict[int, BaseGeometry]
     quality: PreparationQuality
 
 
 def prepare_environment(
-    lion_path: Path,
+    road_records: list[RoadSegmentRecord],
     pavement_path: Path,
     hump_path: Path,
-    taxi_zone_zip: Path,
+    taxi_zones: dict[int, BaseGeometry],
     reference_date: date,
 ) -> PreparedEnvironment:
-    segments = load_lion_segments(lion_path)
-    taxi_zones = load_taxi_zones(taxi_zone_zip)
-    assign_taxi_zones(segments, taxi_zones)
+    segments = [EnrichedRoadSegment(road=record) for record in road_records]
     pavement_source_count = attach_pavement(segments, pavement_path, reference_date)
     hump_source_count, hump_mapped_source_count = attach_speed_humps(
         segments, hump_path, reference_date
@@ -122,61 +107,12 @@ def prepare_environment(
     return PreparedEnvironment(tuple(segments), taxi_zones, quality)
 
 
-def load_lion_segments(path: Path) -> list[PreparedRoadSegment]:
-    document = load_feature_collection(path)
-    segments: list[PreparedRoadSegment] = []
-    seen_ids: set[str] = set()
-    for feature in document["features"]:
-        properties = feature.get("properties") or {}
-        segment_id = string_property(properties, "SegmentID")
-        traffic_direction = string_property(properties, "TrafDir")
-        from_node = integer_property(properties, "NodeIDFrom")
-        to_node = integer_property(properties, "NodeIDTo")
-        if (
-            not segment_id
-            or segment_id in seen_ids
-            or traffic_direction not in {"W", "A", "T"}
-            or from_node is None
-            or to_node is None
-            or not feature.get("geometry")
-        ):
-            continue
-        geometry = as_line(shape(feature["geometry"]))
-        length_m = line_length_m(geometry)
-        if length_m <= 0:
-            continue
-        radius_feet = float_property(properties, "Radius")
-        seen_ids.add(segment_id)
-        segments.append(
-            PreparedRoadSegment(
-                segment_id=segment_id,
-                from_node_id=from_node,
-                to_node_id=to_node,
-                traffic_direction=traffic_direction,
-                segment_type=string_property(properties, "SegmentTyp"),
-                feature_type=string_property(properties, "FeatureTyp"),
-                roadbed_layer=string_property(properties, "RB_Layer"),
-                from_node_level=string_property(properties, "NodeLevelF"),
-                to_node_level=string_property(properties, "NodeLevelT"),
-                street_name=string_property(properties, "Street"),
-                geometry=geometry,
-                length_m=length_m,
-                posted_speed_mph=integer_property(properties, "POSTED_SPEED"),
-                curve_flag=nullable_string_property(properties, "CurveFlag"),
-                curve_radius_m=radius_feet * 0.3048 if radius_feet else None,
-            )
-        )
-    if not segments:
-        raise ValueError("LION snapshot contains no valid routable segments")
-    return segments
-
-
 def attach_pavement(
-    segments: list[PreparedRoadSegment], path: Path, reference_date: date
+    segments: list[EnrichedRoadSegment], path: Path, reference_date: date
 ) -> int:
     document = load_feature_collection(path)
     by_street: dict[
-        str, list[tuple[LineString, float | None, date | None]]
+        str, list[tuple[BaseGeometry, float | None, date | None]]
     ] = defaultdict(list)
     source_count = 0
     for feature in document["features"]:
@@ -187,9 +123,10 @@ def attach_pavement(
         rating = float_property(properties, "systemrating", "SystemRating")
         if rating is not None and rating <= 0:
             rating = None
+        geometry = reproject_to_target_crs(as_line(shape(feature["geometry"])))
         by_street[normalize_street(property_value(properties, "onstreetna", "OnStreetName"))].append(
             (
-                as_line(shape(feature["geometry"])),
+                geometry,
                 rating,
                 parse_source_date(
                     property_value(properties, "inspectiontime", "InspectionTime")
@@ -198,21 +135,22 @@ def attach_pavement(
         )
 
     for segment in segments:
-        candidates = by_street.get(normalize_street(segment.street_name), [])
+        candidates = by_street.get(normalize_street(segment.road.street_name), [])
         applicable = [
             item for item in candidates if item[2] is None or item[2] <= reference_date
         ]
         if not applicable:
             continue
+        segment_geometry = geometry_from_wkb(segment.road.geometry_wkb)
         geometry, rating, inspection_date = min(
             applicable,
             key=lambda item: (
-                segment.geometry.distance(item[0]),
+                segment_geometry.distance(item[0]),
                 -(item[2].toordinal() if item[2] else 0),
                 item[0].wkt,
             ),
         )
-        if segment.geometry.distance(geometry) > MAX_REFERENCE_DISTANCE_DEGREES:
+        if segment_geometry.distance(geometry) > MAX_REFERENCE_DISTANCE_M:
             continue
         segment.pavement_rating = rating
         segment.pavement_rating_date = inspection_date
@@ -221,12 +159,12 @@ def attach_pavement(
 
 
 def attach_speed_humps(
-    segments: list[PreparedRoadSegment], path: Path, reference_date: date
+    segments: list[EnrichedRoadSegment], path: Path, reference_date: date
 ) -> tuple[int, int]:
     document = load_feature_collection(path)
-    by_street: dict[str, list[PreparedRoadSegment]] = defaultdict(list)
+    by_street: dict[str, list[EnrichedRoadSegment]] = defaultdict(list)
     for segment in segments:
-        by_street[normalize_street(segment.street_name)].append(segment)
+        by_street[normalize_street(segment.road.street_name)].append(segment)
 
     source_count = 0
     mapped_count = 0
@@ -245,9 +183,12 @@ def attach_speed_humps(
         )
         if not candidates:
             continue
-        hump_geometry = as_line(shape(feature["geometry"]))
-        nearest = min(candidates, key=lambda item: item.geometry.distance(hump_geometry))
-        if nearest.geometry.distance(hump_geometry) > MAX_REFERENCE_DISTANCE_DEGREES:
+        hump_geometry = reproject_to_target_crs(as_line(shape(feature["geometry"])))
+        nearest = min(
+            candidates,
+            key=lambda item: geometry_from_wkb(item.road.geometry_wkb).distance(hump_geometry),
+        )
+        if geometry_from_wkb(nearest.road.geometry_wkb).distance(hump_geometry) > MAX_REFERENCE_DISTANCE_M:
             continue
         count = max(0, integer_property(properties, "humps", "HumpCount") or 0)
         nearest.hump_count += count
@@ -261,55 +202,12 @@ def attach_speed_humps(
     return source_count, mapped_count
 
 
-def load_taxi_zones(path: Path) -> dict[int, BaseGeometry]:
-    with zipfile.ZipFile(path) as archive:
-        names = archive.namelist()
-        shp_name = next(name for name in names if name.lower().endswith(".shp"))
-        stem = shp_name[:-4]
-        reader = shapefile.Reader(
-            shp=io.BytesIO(archive.read(f"{stem}.shp")),
-            shx=io.BytesIO(archive.read(f"{stem}.shx")),
-            dbf=io.BytesIO(archive.read(f"{stem}.dbf")),
-        )
-        prj_name = next(name for name in names if name.lower().endswith(".prj"))
-        source_crs = CRS.from_wkt(archive.read(prj_name).decode())
-        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
-        field_names = [field[0] for field in reader.fields[1:]]
-        location_index = next(
-            index for index, name in enumerate(field_names) if name.lower() == "locationid"
-        )
-        zones = {
-            int(record.record[location_index]): transform(
-                transformer.transform, shape(record.shape.__geo_interface__)
-            )
-            for record in reader.iterShapeRecords()
-        }
-    if not zones:
-        raise ValueError("taxi-zone snapshot contains no zones")
-    return zones
-
-
-def assign_taxi_zones(
-    segments: list[PreparedRoadSegment], taxi_zones: dict[int, BaseGeometry]
-) -> None:
-    zone_ids = list(taxi_zones)
-    geometries = [taxi_zones[zone_id] for zone_id in zone_ids]
-    tree = STRtree(geometries)
-    for segment in segments:
-        midpoint = segment.geometry.interpolate(0.5, normalized=True)
-        for candidate_index in tree.query(midpoint):
-            index = int(candidate_index)
-            if geometries[index].covers(midpoint):
-                segment.location_id = zone_ids[index]
-                break
-
-
 def validate_environment(
-    segments: list[PreparedRoadSegment], taxi_zones: dict[int, BaseGeometry]
+    segments: list[EnrichedRoadSegment], taxi_zones: dict[int, BaseGeometry]
 ) -> None:
     if not segments or not taxi_zones:
         raise ValueError("prepared environment must contain roads and taxi zones")
-    segment_ids = [segment.segment_id for segment in segments]
+    segment_ids = [segment.road.segment_id for segment in segments]
     if len(segment_ids) != len(set(segment_ids)):
         raise ValueError("prepared environment contains duplicate segment IDs")
     invalid_ratings = [
@@ -353,13 +251,6 @@ def property_value(properties: dict[str, object], *names: str) -> object | None:
 
 def string_property(properties: dict[str, object], *names: str) -> str:
     return str(property_value(properties, *names) or "").strip()
-
-
-def nullable_string_property(
-    properties: dict[str, object], *names: str
-) -> str | None:
-    value = string_property(properties, *names)
-    return value or None
 
 
 def float_property(properties: dict[str, object], *names: str) -> float | None:
