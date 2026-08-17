@@ -66,3 +66,10 @@ def test_conninfo_keeps_values_that_need_quoting() -> None:
     assert parsed["dbname"] == "de4"
     assert parsed["user"] == "de4"
     assert parsed["password"] == "two words"
+
+
+def test_conninfo_pins_the_session_timezone_to_utc() -> None:
+    # 고정하지 않으면 timestamptz가 서버 로컬 타임존 오프셋으로 직렬화된다.
+    config = ServingApiConfig.from_env(REQUIRED_ENV)
+
+    assert conninfo_to_dict(config.conninfo)["options"] == "-c timezone=UTC"

@@ -35,12 +35,17 @@ class ServingApiConfig:
     def conninfo(self) -> str:
         # 문자열을 직접 조립하지 않고 make_conninfo를 쓴다 — 비밀번호에 공백이나
         # 작은따옴표가 들어가면 수동 조립은 조용히 잘못된 접속 문자열을 만든다.
+        #
+        # 세션 타임존을 UTC로 고정한다. timestamptz는 세션 타임존으로 변환되어
+        # 돌아오므로, 고정하지 않으면 같은 행이 서버 로컬 타임존에 따라 다른
+        # 오프셋으로 직렬화된다 (KST 로컬에서는 +09:00, UTC 컨테이너에서는 Z).
         return make_conninfo(
             host=self.postgres_host,
             port=self.postgres_port,
             dbname=self.postgres_db,
             user=self.postgres_user,
             password=self.postgres_password,
+            options="-c timezone=UTC",
         )
 
     @classmethod
