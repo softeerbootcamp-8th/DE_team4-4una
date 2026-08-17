@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-17
 ---
 
 # Comfort Score Design

@@ -1,16 +1,26 @@
-ds---
+---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-17
 ---
 
 # Target Architecture
 
 ## Current repository state
 
-The repository contains Python 3.12 `uv` workspace skeletons for the shared
-library and seven services. The service entry points currently print their names;
-the data flows below are target behavior, not an implemented system.
+The repository contains Python 3.12 `uv` workspace members for the shared
+library and seven services. Implementation is incremental rather than
+skeleton-only: `services/batch-jobs` currently provides reference-environment,
+sensor-cleansing, map-matching, hourly-feature, hourly-scoring, Gold-publication,
+and database-migration commands. Its importable modules, default YAML
+configuration, and SQL migrations are packaged under the single `batch_jobs`
+namespace.
+
+The data flow below remains the target architecture. In particular, it assigns
+Gold publication to `services/gold-loader`, while the current command and
+migrations reside in `services/batch-jobs`. OQ-040 tracks that unresolved
+ownership mismatch; the current implementation must not be treated as an
+accepted boundary change.
 
 ## Target local-first flow
 
