@@ -9,13 +9,13 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 
 from batch_jobs.cleansing.config import CleansingJobConfig
+from batch_jobs.cleansing.hourly_storage import write_hourly_cleansing_results
 from batch_jobs.cleansing.reader import (
     filter_bronze_sensor_events_for_hour,
     read_bronze_sensor_events,
 )
 from batch_jobs.cleansing.rules import load_cleansing_config
 from batch_jobs.cleansing.sink import to_processed_sensor_events
-from batch_jobs.cleansing.hourly_storage import write_hourly_cleansing_results
 from batch_jobs.cleansing.validate import cleanse_sensor_events
 
 logger = logging.getLogger(__name__)
