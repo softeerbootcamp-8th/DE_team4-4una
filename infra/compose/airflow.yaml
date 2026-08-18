@@ -6,6 +6,19 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
     AIRFLOW_HOME: ${AIRFLOW_HOME}
+    # hourly_pipeline의 cleanse task가 host에 batch-jobs 컨테이너를 직접 띄우기 위한
+    # 임시(로컬 전용) 배선. EMR Serverless 연결(ADR 0001, 후속 이슈) 시 아래 세 값과
+    # docker socket 마운트를 통째로 제거한다.
+    HOST_PROJECT_DIR: ${PWD}
+    BATCH_JOBS_IMAGE_TAG: ${BATCH_JOBS_IMAGE_TAG}
+    CLEANSING_BRONZE_INPUT_PATH: ${CLEANSING_BRONZE_INPUT_PATH}
+    CLEANSING_SILVER_OUTPUT_PATH: ${CLEANSING_SILVER_OUTPUT_PATH}
+    CLEANSING_QUARANTINE_OUTPUT_PATH: ${CLEANSING_QUARANTINE_OUTPUT_PATH}
+    CLEANSING_SILVER_PARTITION_COLUMN: ${CLEANSING_SILVER_PARTITION_COLUMN}
+    CLEANSING_QUARANTINE_PARTITION_COLUMN: ${CLEANSING_QUARANTINE_PARTITION_COLUMN}
+    # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
+    # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
   volumes:
     - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
 
@@ -24,6 +37,13 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    # LocalExecutor는 task를 scheduler 프로세스 안에서 실행하므로, host의 docker에
+    # 위임하는(docker-outside-of-docker) BashOperator는 이 컨테이너에서만 동작하면 된다.
+    # 로컬 전용 배선이며, 이 소켓은 host docker에 대한 사실상의 제어권을 준다 —
+    # 공유/운영 환경으로 그대로 옮기지 않는다.
+    volumes:
+      - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-init:
         condition: service_completed_successfully
