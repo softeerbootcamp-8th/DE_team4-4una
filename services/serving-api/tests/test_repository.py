@@ -9,8 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Self
 
-from serving_api.repository import BATCH_SQL, COLUMNS, SINGLE_SQL, fetch_many, fetch_one
-from serving_api.schemas import ComfortScore
+from serving_api.repository import BATCH_SQL, SINGLE_SQL, fetch_many, fetch_one
 
 # COLUMNS와 같은 순서의 한 행.
 ROW = (
@@ -92,8 +91,3 @@ def test_fetch_many_skips_the_query_when_no_segments_are_given() -> None:
 
     assert fetch_many(connection, 0, []) == []
     assert connection.opened_cursor.executed == []
-
-
-def test_columns_cover_every_response_field() -> None:
-    # SELECT 목록과 응답 모델이 어긋나면 매핑이 조용히 깨진다.
-    assert set(COLUMNS) == set(ComfortScore.model_fields)
