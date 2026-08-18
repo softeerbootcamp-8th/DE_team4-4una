@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-18
 ---
 
 # Project Definition
@@ -30,16 +30,29 @@ time.
 
 ### Vehicle types
 
-The initial requested vehicle set is:
+Vehicle types are defined by body type x size class rather than manufacturer
+or model (accepted 2026-08-18, issue #170 — this supersedes the earlier
+Genesis/Grandeur/Avante/EV5 set; see resolved `OQ-013`/`OQ-014`/`OQ-015` in
+`open-questions.md`). The canonical set is:
 
-- Genesis, with the exact model still open
-- Hyundai Grandeur
-- Hyundai Avante
-- EV5, with manufacturer and exact model designation to be confirmed
+| `vehicle_profile_id` | Profile name | Body type | Size class |
+| --- | --- | --- | --- |
+| 1 | `VP_SEDAN_COMPACT` | SEDAN | COMPACT |
+| 2 | `VP_SEDAN_LARGE` | SEDAN | LARGE |
+| 3 | `VP_SUV_COMPACT` | SUV | COMPACT |
+| 4 | `VP_SUV_LARGE` | SUV | LARGE |
+| 5 | `VP_MPV_LARGE` | MPV | LARGE |
 
-Each vehicle type has deterministic parameters representing properties that
-affect ride comfort, such as suspension behavior, wheelbase, mass, and tires.
-Exact parameters are not yet confirmed.
+`vehicle_profile_id = 0` (`ALL_VEHICLES`) is a vehicle-agnostic sentinel, not
+a vehicle type — see `OQ-038`. See `context/data/schema-catalog.md`
+(`vehicle_profile`) for the full column contract and
+`services/batch-jobs/src/batch_jobs/resources/migrations/0005_define_vehicle_profiles.sql`
+for the executable seed.
+
+Each vehicle profile has deterministic response coefficients that approximate
+differences in vertical, longitudinal, lateral, damping, and
+steering-vibration behavior (`sensor_producer.domain.VehicleProfile`), not a
+direct mass/wheelbase/suspension model.
 
 ### Monthly reference data
 

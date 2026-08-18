@@ -37,7 +37,7 @@ class TripRecord:
 @dataclass(frozen=True, slots=True)
 class VehicleProfile:
     vehicle_profile_id: int
-    vehicle_name: str
+    profile_name: str
     vertical_response: float
     damping: float
     longitudinal_response: float = 1.0
@@ -45,11 +45,13 @@ class VehicleProfile:
     steering_vibration_response: float = 1.0
 
 
+# 제조사/모델 대신 차체 유형 x 크기 등급으로 재정의한다 (#170).
 VEHICLE_PROFILES: dict[int, VehicleProfile] = {
-    1: VehicleProfile(1, "genesis", 0.72, 0.82, 0.90, 0.90, 0.72),
-    2: VehicleProfile(2, "grandeur", 0.82, 0.76, 0.95, 0.95, 0.82),
-    3: VehicleProfile(3, "avante", 1.08, 0.62, 1.05, 1.08, 1.08),
-    4: VehicleProfile(4, "ev5", 0.94, 0.72, 0.88, 1.02, 0.94),
+    1: VehicleProfile(1, "VP_SEDAN_COMPACT", 1.05, 0.68, 1.00, 1.00, 1.03),
+    2: VehicleProfile(2, "VP_SEDAN_LARGE", 1.00, 0.77, 1.00, 1.00, 1.00),
+    3: VehicleProfile(3, "VP_SUV_COMPACT", 1.08, 0.70, 1.00, 1.06, 1.04),
+    4: VehicleProfile(4, "VP_SUV_LARGE", 1.01, 0.66, 1.00, 1.08, 1.00),
+    5: VehicleProfile(5, "VP_MPV_LARGE", 0.96, 0.61, 1.00, 1.10, 0.98),
 }
 
 

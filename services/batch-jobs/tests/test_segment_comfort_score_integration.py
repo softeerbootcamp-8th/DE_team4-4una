@@ -67,10 +67,12 @@ def clean_tables():
             # ForeignKeyViolation으로 실패한다.
             cursor.execute(
                 "INSERT INTO vehicle_profile "
-                "(vehicle_profile_id, profile_name, vehicle_class, "
-                " vertical_weight, longitudinal_weight, lateral_weight, "
+                "(vehicle_profile_id, profile_name, body_type, size_class, "
+                " vertical_response_factor, longitudinal_response_factor, "
+                " lateral_response_factor, damping_factor, steering_vibration_factor, "
                 " is_active, created_at, updated_at) "
-                "VALUES (1, 'test_profile', 'sedan', 0.5, 0.3, 0.2, TRUE, now(), now())"
+                "VALUES (1, 'test_profile', 'sedan', 'compact', "
+                " 1.0, 1.0, 1.0, 1.0, 1.0, TRUE, now(), now())"
             )
         connection.commit()
     finally:
