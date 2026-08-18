@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-18
 ---
 
 # Open Questions and Decision Register
@@ -37,9 +37,9 @@ ADR when the choice affects multiple components.
 
 | ID | Question | Why it matters | Status |
 | --- | --- | --- | --- |
-| OQ-013 | What exact vehicle models, model years, trims, and parameter sources are used? | Required for credible stable vehicle profiles | Open |
-| OQ-014 | Does "Genesis" mean the brand, Genesis G80, or another model? | Current vehicle identifier is ambiguous | Open |
-| OQ-015 | Does "EV5" refer to Kia EV5, and should it remain in a Hyundai-focused set? | Current manufacturer/model description is ambiguous | Open |
+| OQ-013 | What exact vehicle models, model years, trims, and parameter sources are used? | Required for credible stable vehicle profiles | Accepted 2026-08-18 — profiles are defined by body type x size class, not manufacturer/model/trim; see `context/project.md` (Vehicle types) and issue #170 |
+| OQ-014 | Does "Genesis" mean the brand, Genesis G80, or another model? | Current vehicle identifier is ambiguous | Resolved 2026-08-18 — moot; Genesis was removed from the vehicle set (issue #170) |
+| OQ-015 | Does "EV5" refer to Kia EV5, and should it remain in a Hyundai-focused set? | Current manufacturer/model description is ambiguous | Resolved 2026-08-18 — moot; EV5 was removed from the vehicle set (issue #170) |
 | OQ-016 | Is each sampled trip simulated for one vehicle type or all supported vehicle types, and how does that affect `trip_id`? | Changes event volume and determines whether `(trip_id, trip_seq)` is unique | Open |
 | OQ-017 | Are overlapping trips replayed concurrently, and are long idle gaps preserved or capped? | Prototype interleaves overlapping trips and preserves gaps; explicit `time_scale=0` removes waits in tests | Prototype accepted 2026-08-10 |
 | OQ-018 | How is speed determined along each route: source average, road class, synthetic profile, or another source? | Prototype uses a smoothstep profile over route length and source passenger duration; calibration remains open | Prototype accepted 2026-08-10 |
@@ -62,7 +62,7 @@ ADR when the choice affects multiple components.
 | OQ-025 | Is `event_id` serialized as a STRING containing a UUID or stored using a native UUID type? | Kafka JSON and the executable Bronze contract use a UUID-formatted STRING | Accepted 2026-08-10 |
 | OQ-026 | What are the exact units and axis semantics for `accel_x`, `accel_y`, `accel_z`, and jerk? | Prototype uses longitudinal x, lateral y, and vertical z for acceleration in m/s² and jerk in m/s³; `jerk` aliases `jerk_x` | Accepted 2026-08-11 |
 | OQ-027 | What are the physical names of the unnamed source, reference, and Gold tables? | Required for storage layout, SQL, and catalog registration | Open |
-| OQ-028 | What is the `vehicle_profile` schema? | Producer has versioned synthetic response profiles for four named vehicles; a persisted shared dimension remains open | Partially accepted 2026-08-10 |
+| OQ-028 | What is the `vehicle_profile` schema? | `vehicle_profile` (Postgres) now seeds 5 body-type/size-class profiles plus the `vehicle_profile_id=0` sentinel, with response/damping factor columns matching `sensor_producer.domain.VEHICLE_PROFILES`'s motion-response constants (migration `0005_define_vehicle_profiles.sql`, issue #170). The two are kept in sync by convention only — there is no runtime read from Postgres, so drift between the DB values and the Python constants is possible and unguarded | Partially accepted 2026-08-18 |
 | OQ-029 | What is the taxi-zone geometry schema and source? | `taxi_zone_lookup` alone cannot choose pickup/drop-off road points | Open |
 | OQ-030 | What are the accepted enums for map-match status and the three reference quality flags? | Required for shared contracts and data-quality metrics | Open |
 | OQ-031 | Must corrections to an existing `enriched_segment_reference` row retain prior versions, or is an in-place upsert sufficient? | `updated_at` exposes the latest rebuild but does not itself preserve audit history | Open |

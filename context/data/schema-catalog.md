@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-18
 ---
 
 # Table Schema Catalog
@@ -144,22 +144,51 @@ alone cannot support deterministic road-point selection.
 
 **Layer:** Bronze reference. **Storage:** PostgreSQL. **Grain:** one vehicle profile.
 
+Profiles are classified by body type x size class rather than manufacturer or
+model (accepted 2026-08-18, issue #170; supersedes the earlier
+Genesis/Grandeur/Avante/EV5 set — see `OQ-013`/`OQ-014`/`OQ-015`). The
+executable seed is
+`services/batch-jobs/src/batch_jobs/resources/migrations/0005_define_vehicle_profiles.sql`
+(on top of the `0001`/`0003` table and sentinel-row migrations):
+
+| `vehicle_profile_id` | `profile_name` | `body_type` | `size_class` |
+| --- | --- | --- | --- |
+| 0 | `ALL_VEHICLES` | `ALL` | `ALL` |
+| 1 | `VP_SEDAN_COMPACT` | `SEDAN` | `COMPACT` |
+| 2 | `VP_SEDAN_LARGE` | `SEDAN` | `LARGE` |
+| 3 | `VP_SUV_COMPACT` | `SUV` | `COMPACT` |
+| 4 | `VP_SUV_LARGE` | `SUV` | `LARGE` |
+| 5 | `VP_MPV_LARGE` | `MPV` | `LARGE` |
+
+`vehicle_profile_id = 0` is the vehicle-agnostic sentinel (`OQ-038`), not a
+vehicle type; its response/damping factors are neutral (`1.0`). `manufacturer`,
+`model_name`, `mass_kg`, `wheelbase_mm`, and `suspension_type` were dropped —
+classification is body type x size class, and physical differences are
+captured directly as response factors instead of derived from vehicle specs.
+`services/sensor-producer/src/sensor_producer/domain.py::VEHICLE_PROFILES`
+must hold the same 5 profiles' `vertical_response`/`longitudinal_response`/
+`lateral_response`/`damping`/`steering_vibration_response` values as this
+table's matching factor columns — kept in sync by convention only (no
+runtime read from Postgres; see `OQ-028`).
+
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Vehicle profile ID | `vehicle_profile_id` | INTEGER | N | PK | Unique vehicle profile identifier |
-| Profile name | `profile_name` | STRING | N |  | For example `standard_sedan`, `suv` |
-| Vehicle class | `vehicle_class` | STRING | N |  | Sedan, SUV, and so on |
-| Manufacturer | `manufacturer` | STRING | Y |  | Manufacturer |
-| Model name | `model_name` | STRING | Y |  | Vehicle model |
-| Mass | `mass_kg` | DOUBLE | Y |  | Vehicle mass |
-| Wheelbase | `wheelbase_mm` | DOUBLE | Y |  | Wheelbase |
-| Suspension type | `suspension_type` | STRING | Y |  | Suspension type |
-| Vertical sensitivity | `vertical_weight` | DOUBLE | N |  | Weight applied to `accel_z` |
-| Longitudinal sensitivity | `longitudinal_weight` | DOUBLE | N |  | Weight applied to hard braking/acceleration |
-| Lateral sensitivity | `lateral_weight` | DOUBLE | N |  | Weight applied to turning/lateral acceleration |
+| Profile name | `profile_name` | STRING | N | UK* | For example `VP_SEDAN_COMPACT` |
+| Body type | `body_type` | STRING | N |  | `SEDAN`, `SUV`, `MPV`, or `ALL` for the sentinel |
+| Size class | `size_class` | STRING | N |  | `COMPACT`, `LARGE`, or `ALL` for the sentinel |
+| Vertical response factor | `vertical_response_factor` | DOUBLE | N |  | Multiplier on vertical shock/acceleration response; mirrors `VehicleProfile.vertical_response` |
+| Longitudinal response factor | `longitudinal_response_factor` | DOUBLE | N |  | Multiplier on acceleration/braking response; mirrors `VehicleProfile.longitudinal_response` |
+| Lateral response factor | `lateral_response_factor` | DOUBLE | N |  | Multiplier on cornering/lateral response; mirrors `VehicleProfile.lateral_response` |
+| Damping factor | `damping_factor` | DOUBLE | N |  | How quickly post-shock vibration decays; mirrors `VehicleProfile.damping` |
+| Steering vibration factor | `steering_vibration_factor` | DOUBLE | N |  | Multiplier on vibration transmitted to the steering wheel; mirrors `VehicleProfile.steering_vibration_response` |
+| Profile version | `profile_version` | STRING | N | UK* | For example `v1-heuristic` |
 | Active flag | `is_active` | BOOLEAN | N |  | Whether the profile is currently in use |
-| Created time | `created_at` | TIMESTAMP | N |  | Profile creation time |
-| Updated time | `updated_at` | TIMESTAMP | N |  | Last modification time |
+| Created time | `created_at` | TIMESTAMPTZ | N |  | Profile creation time |
+| Updated time | `updated_at` | TIMESTAMPTZ | N |  | Last modification time |
+
+\* `UNIQUE(profile_name, profile_version)` is a composite constraint, not two
+independent single-column ones.
 
 ## `sensor_event`
 
