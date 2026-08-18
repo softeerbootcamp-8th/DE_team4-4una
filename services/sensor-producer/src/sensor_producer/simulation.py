@@ -16,6 +16,8 @@ from datetime import UTC, datetime, timedelta
 from de4_core import SensorEvent
 
 from sensor_producer.domain import (
+    BASELINE_DAMPING,
+    VEHICLE_MIXES,
     VEHICLE_PROFILES,
     RouteLeg,
     RoutePlan,
@@ -35,6 +37,9 @@ MAX_ACCELERATION_PHASE_SECONDS = 8.0
 # 차량별 보정값이 없는 PoC용 bicycle model 가정이다.
 REPRESENTATIVE_WHEELBASE_M = 2.8
 MIN_STEERING_SPEED_MPS = 0.5
+# 차체 흔들림은 휠 레벨 거칠기(1.7 rad/m)보다 훨씬 긴 파장으로 나타나는 저주파 성분이다.
+SWAY_WAVENUMBER_RAD_PER_M = 0.35
+SWAY_WEIGHT = 0.25
 MAX_STEERING_ANGLE_DEG = 35.0
 STEERING_ANGLE_DEADBAND_DEG = 0.05
 logger = logging.getLogger(__name__)
@@ -50,6 +55,7 @@ class ReplayResult:
     unique_segments: int
     rated_samples: int
     hump_samples: int
+    profile_trip_counts: dict[str, int]
 
     @property
     def trip_skip_ratio(self) -> float:
@@ -350,7 +356,7 @@ class ReplayCoordinator:
         segments: set[str] = set()
         rated_samples = 0
         hump_samples = 0
-        profile = VEHICLE_PROFILES[self.config.vehicle_profile_id]
+        profile_trip_counts: Counter[str] = Counter()
 
         while queue:
             action_time, _, action, value = heapq.heappop(queue)
@@ -375,6 +381,7 @@ class ReplayCoordinator:
                         dropoff_zone,
                         target_distance_m=trip.trip_miles * METERS_PER_MILE,
                     )
+                    profile = self._profile_for(trip)
                     event_iterator = self.simulator.generate(
                         trip, route, profile, self.config
                     )
@@ -399,6 +406,8 @@ class ReplayCoordinator:
                     )
                     continue
                 trips_planned += 1
+                # skip된 trip을 세면 요약이 실제 발행 이벤트와 어긋난다.
+                profile_trip_counts[profile.profile_name] += 1
                 segments.update(route.segment_ids)
                 heapq.heappush(
                     queue,
@@ -457,7 +466,16 @@ class ReplayCoordinator:
             unique_segments=len(segments),
             rated_samples=rated_samples,
             hump_samples=hump_samples,
+            profile_trip_counts=dict(sorted(profile_trip_counts.items())),
         )
+
+    def _profile_for(self, trip: TripRecord) -> VehicleProfile:
+        if self.config.vehicle_mix is not None:
+            return assign_vehicle_profile(
+                trip.trip_id, self.config.seed, self.config.vehicle_mix
+            )
+        assert self.config.vehicle_profile_id is not None
+        return VEHICLE_PROFILES[self.config.vehicle_profile_id]
 
     def _taxi_zone(self, location_id: int, reason: TripSkipReason) -> object:
         try:
@@ -504,6 +522,15 @@ def vertical_acceleration(
         math.sin(route_distance_m * 1.7 + phase)
         + 0.35 * math.sin(route_distance_m * 4.1 + phase / 2)
     )
+    # 감쇠계수가 낮은 차량일수록 노면 입력이 차체 흔들림으로 더 오래 남는다. 정상상태
+    # 사인파에는 지속 시간이 없으므로 지속을 진폭으로 근사한다(감쇠비가 아니다).
+    sway = (
+        profile.vertical_response
+        * roughness
+        * SWAY_WEIGHT
+        * (BASELINE_DAMPING / profile.damping)
+        * math.sin(route_distance_m * SWAY_WAVENUMBER_RAD_PER_M + phase / 3)
+    )
     hump_response = 0.0
     near_hump = False
     for hump_distance in position.leg.hump_distances_m:
@@ -513,11 +540,14 @@ def vertical_acceleration(
         near_hump = True
         width = 1.8
         impact = math.exp(-((offset / width) ** 2))
-        ring = math.sin(elapsed_seconds * 18) * math.exp(-abs(offset) * profile.damping)
+        # 잔진동은 요철을 지난 뒤에만 남는다. 통과 전 구간에는 충격만 있다.
+        ring = 0.0
+        if offset > 0:
+            ring = math.sin(elapsed_seconds * 18) * math.exp(-offset * profile.damping)
         hump_response += profile.vertical_response * max(0.5, speed_mps / 5) * (
             1.8 * impact + 0.35 * ring
         )
-    return pavement + hump_response, near_hump
+    return pavement + sway + hump_response, near_hump
 
 
 def steering_vibration_amplitude(
@@ -573,6 +603,37 @@ def smoothstep_integral(value: float) -> float:
 
 def signed_heading_delta(previous: float, current: float) -> float:
     return (current - previous + 180) % 360 - 180
+
+
+def uniform01(namespace: str, seed: int, trip_id: str) -> float:
+    """Map one trip onto a reproducible value in [0, 1).
+
+    `namespace` keeps independent draws from correlating. Do not reuse it for
+    `deterministic_phase`: that hash input is frozen so recorded runs stay
+    reproducible.
+    """
+
+    digest = hashlib.sha256(f"{namespace}:{seed}:{trip_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def assign_vehicle_profile(trip_id: str, seed: int, mix_name: str) -> VehicleProfile:
+    """Draw one vehicle profile for a trip from the configured share table.
+
+    The draw is deterministic, not random. `mix_name` is deliberately absent from
+    the namespace, so adjusting one share moves only the trips near the shifted
+    boundary instead of reshuffling every assignment.
+    """
+
+    shares = VEHICLE_MIXES[mix_name]
+    value = uniform01("vehicle-mix", seed, trip_id)
+    cumulative = 0.0
+    for profile_id, share in shares:
+        cumulative += share
+        if value < cumulative:
+            return VEHICLE_PROFILES[profile_id]
+    # 비율 합이 1이어도 부동소수 잔차로 마지막 구간을 넘길 수 있다.
+    return VEHICLE_PROFILES[shares[-1][0]]
 
 
 def deterministic_phase(trip_id: str, seed: int) -> float:
