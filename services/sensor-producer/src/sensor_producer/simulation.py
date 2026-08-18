@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -336,12 +336,11 @@ class ReplayCoordinator:
         self.simulator = simulator or MotionSimulator()
         self.clock = clock or ReplayClock(config.time_scale)
 
-    def replay(self, trips: list[TripRecord]) -> ReplayResult:
+    def replay(self, trips: Iterable[TripRecord]) -> ReplayResult:
         queue: list[tuple[datetime, int, str, object]] = []
         counter = 0
-        for trip in sorted(trips, key=lambda value: (value.request_datetime, value.trip_id)):
-            heapq.heappush(queue, (trip.request_datetime, counter, "dispatch", trip))
-            counter += 1
+        trip_iterator = iter(self._ordered_trips(trips))
+        next_trip = next(trip_iterator, None)
 
         trips_planned = 0
         trips_attempted = 0
@@ -352,8 +351,16 @@ class ReplayCoordinator:
         hump_samples = 0
         profile = VEHICLE_PROFILES[self.config.vehicle_profile_id]
 
-        while queue:
-            action_time, _, action, value = heapq.heappop(queue)
+        while next_trip is not None or queue:
+            if next_trip is not None and (
+                not queue or next_trip.request_datetime <= queue[0][0]
+            ):
+                action_time = next_trip.request_datetime
+                action = "dispatch"
+                value: object = next_trip
+                next_trip = next(trip_iterator, None)
+            else:
+                action_time, _, action, value = heapq.heappop(queue)
             self.clock.wait_until(action_time)
             if action == "dispatch":
                 trip = value
@@ -458,6 +465,24 @@ class ReplayCoordinator:
             rated_samples=rated_samples,
             hump_samples=hump_samples,
         )
+
+    def _ordered_trips(self, trips: Iterable[TripRecord]) -> Iterator[TripRecord]:
+        if isinstance(trips, Sequence):
+            yield from sorted(
+                trips,
+                key=lambda value: (value.request_datetime, value.trip_id),
+            )
+            return
+
+        previous_request_time: datetime | None = None
+        for trip in trips:
+            if (
+                previous_request_time is not None
+                and trip.request_datetime < previous_request_time
+            ):
+                raise ValueError("streaming trip input must be sorted by request time")
+            yield trip
+            previous_request_time = trip.request_datetime
 
     def _taxi_zone(self, location_id: int, reason: TripSkipReason) -> object:
         try:

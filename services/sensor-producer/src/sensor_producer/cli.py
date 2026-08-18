@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Iterable
 from datetime import date
 from itertools import islice
 from pathlib import Path
 
-from sensor_producer.domain import SimulationConfig
+from sensor_producer.domain import SimulationConfig, TripRecord
 from sensor_producer.environment import RoadEnvironment
 from sensor_producer.nyc_data import DEFAULT_HVFHV_URL, fetch_nyc_sample, load_trips
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
@@ -180,7 +181,7 @@ def resolve_environment(arguments: argparse.Namespace) -> tuple[RoadEnvironment,
 def resolve_trips(
     arguments: argparse.Namespace,
     input_dir: Path | None,
-) -> tuple[object, dict[str, object]]:
+) -> tuple[Iterable[TripRecord], dict[str, object]]:
     if arguments.trips_path and arguments.trips_uri:
         raise SystemExit("choose only one of --trips-path or --trips-uri")
     if arguments.trips_uri:

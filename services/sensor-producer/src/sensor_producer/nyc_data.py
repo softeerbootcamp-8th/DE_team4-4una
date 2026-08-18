@@ -159,8 +159,8 @@ def load_trips(path: Path) -> list[TripRecord]:
     ]
 
 
-def parse_nyc_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
+def parse_nyc_datetime(value: str | datetime) -> datetime:
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
     return parsed.replace(tzinfo=NYC_TIMEZONE) if parsed.tzinfo is None else parsed
 
 
