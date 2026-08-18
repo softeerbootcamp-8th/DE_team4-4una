@@ -54,7 +54,9 @@ _RUN_CLEANSE_BASH_COMMAND = (
     # 직접 exec하므로, `batch-jobs`(uv venv 안의 엔트리포인트)만 주면 PATH에서
     # 못 찾아 실패한다.
     "uv run --no-sync --package batch-jobs batch-jobs "
-    "cleanse-sensor-events --run-id={{ run_id }}"
+    "cleanse-sensor-events "
+    "--target-hour='{{ data_interval_start.isoformat() }}' "
+    "--run-id='{{ run_id }}'"
 )
 
 # 경로·feature 설정은 HourlySegmentFeatureJobConfig.from_env()가 환경변수에서

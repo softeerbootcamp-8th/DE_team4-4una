@@ -39,6 +39,16 @@ def test_cleanse_task_group_contains_only_run_cleanse():
     assert "cleanse.run_cleanse" in task_ids
 
 
+def test_run_cleanse_passes_target_hour_and_run_id():
+    module = _load_dag_module()
+
+    run_cleanse = module.dag.get_task("cleanse.run_cleanse")
+    command = run_cleanse.bash_command
+    assert "cleanse-sensor-events" in command
+    assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
+    assert "--run-id='{{ run_id }}'" in command
+
+
 def test_scoring_task_group_contains_only_run_scoring():
     module = _load_dag_module()
 
