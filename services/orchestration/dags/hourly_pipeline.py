@@ -3,8 +3,8 @@
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
 scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고
 cleanse >> features >> scoring 의존관계를 연결한다. 이슈 #176: publish 단계를
-추가한다(#157의 마지막 진행). scoring >> publish 의존관계 연결은 이 이슈
-범위 밖이라 아직 연결하지 않는다.
+추가한다(#157의 마지막 진행). 이슈 #189: scoring이 만든 시간별 점수를 publish가
+같은 실행에서 적재하도록 4단계 의존관계를 완성한다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import datetime
 
+import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, TaskGroup
+from airflow.timetables.interval import CronDataIntervalTimetable
 
 # BATCH_JOBS_IMAGE_TAG는 `make build-batch-jobs-image`가 만든 git-SHA 태그를
 # 가리켜야 한다(재현성). 값이 없으면 어떤 코드가 실행되는지 보장할 수 없으므로
@@ -117,7 +119,14 @@ _RUN_PUBLISH_BASH_COMMAND = (
 with DAG(
     dag_id="hourly_pipeline",
     description="cleanse -> features -> scoring -> publish 4단계 시간배치 파이프라인",
-    schedule="0 * * * *",
+    # Airflow 3의 bare cron 기본값인 CronTriggerTimetable은 data interval의
+    # 시작과 끝을 같은 시각으로 만든다. 이 DAG는 09시 실행을 [09:00, 10:00)으로
+    # 처리하고 publish의 as_of에 10:00을 넘겨야 하므로 interval timetable을
+    # 명시한다.
+    schedule=CronDataIntervalTimetable(
+        "0 * * * *",
+        timezone=pendulum.timezone("UTC"),
+    ),
     start_date=datetime.datetime(2026, 8, 17, tzinfo=datetime.UTC),
     catchup=False,
     default_args={
@@ -146,10 +155,9 @@ with DAG(
         )
 
     with TaskGroup(group_id="publish") as publish:
-        # scoring >> publish 의존관계 연결은 이슈 #176 범위 밖(후속 이슈에서 연결).
         run_publish = BashOperator(
             task_id="run_publish",
             bash_command=_RUN_PUBLISH_BASH_COMMAND,
         )
 
-    cleanse >> features >> scoring
+    cleanse >> features >> scoring >> publish

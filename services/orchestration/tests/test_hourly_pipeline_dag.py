@@ -11,6 +11,10 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pendulum
+from airflow.timetables.base import TimeRestriction
+from airflow.timetables.interval import CronDataIntervalTimetable
+
 DAG_PATH = (
     Path(__file__).resolve().parents[1] / "dags" / "hourly_pipeline.py"
 )
@@ -28,8 +32,31 @@ def test_dag_parses_with_expected_schedule():
     module = _load_dag_module()
 
     assert module.dag.dag_id == "hourly_pipeline"
-    assert module.dag.schedule == "0 * * * *"
+    assert isinstance(module.dag.timetable, CronDataIntervalTimetable)
+    assert module.dag.timetable.summary == "0 * * * *"
     assert module.dag.catchup is False
+
+
+def test_dag_uses_one_hour_utc_data_interval():
+    module = _load_dag_module()
+
+    run_info = module.dag.timetable.next_dagrun_info(
+        last_automated_data_interval=None,
+        restriction=TimeRestriction(
+            earliest=pendulum.datetime(2026, 8, 18, 9, tz="UTC"),
+            latest=pendulum.datetime(2026, 8, 18, 10, tz="UTC"),
+            catchup=True,
+        ),
+    )
+
+    assert run_info is not None
+    assert run_info.logical_date == pendulum.datetime(2026, 8, 18, 9, tz="UTC")
+    assert run_info.data_interval.start == pendulum.datetime(
+        2026, 8, 18, 9, tz="UTC"
+    )
+    assert run_info.data_interval.end == pendulum.datetime(
+        2026, 8, 18, 10, tz="UTC"
+    )
 
 
 def test_cleanse_task_group_contains_only_run_cleanse():
@@ -103,8 +130,6 @@ def test_run_publish_invokes_load_segment_comfort_score_with_templated_as_of():
 
 
 def test_dag_contains_expected_pipeline_tasks_so_far():
-    # 이 이슈(#176)에서 scoring >> publish 의존관계 연결까지는 하지 않으므로,
-    # publish.run_publish는 이 집합에 들어가지만 순서 테스트 대상은 아니다.
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
@@ -122,8 +147,11 @@ def test_task_groups_follow_hourly_pipeline_order():
     run_cleanse = module.dag.get_task("cleanse.run_cleanse")
     run_features = module.dag.get_task("features.run_features")
     run_scoring = module.dag.get_task("scoring.run_scoring")
+    run_publish = module.dag.get_task("publish.run_publish")
 
     assert run_cleanse.downstream_task_ids == {"features.run_features"}
     assert run_features.upstream_task_ids == {"cleanse.run_cleanse"}
     assert run_features.downstream_task_ids == {"scoring.run_scoring"}
     assert run_scoring.upstream_task_ids == {"features.run_features"}
+    assert run_scoring.downstream_task_ids == {"publish.run_publish"}
+    assert run_publish.upstream_task_ids == {"scoring.run_scoring"}
