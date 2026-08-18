@@ -82,4 +82,4 @@ def test_filters_valid_and_malformed_rows_to_one_target_hour(spark, tmp_path):
         bronze, BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)
     ).collect()
 
-    assert {row["event_id"] for row in result} == {VALID_EVENT["event_id"], None}
+    assert {row["event_id"] for row in result} == {"target", None}
