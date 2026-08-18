@@ -9,8 +9,10 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
+import duckdb
 import shapefile
 from pyproj import CRS, Transformer
+from shapely import from_wkt
 from shapely.geometry import LineString, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
@@ -31,6 +33,8 @@ class RoadEnvironment:
     def __init__(self, segments: list[RoadSegment], taxi_zones: dict[int, BaseGeometry]):
         if not segments:
             raise ValueError("road environment requires at least one LION segment")
+        if not taxi_zones:
+            raise ValueError("road environment requires at least one taxi zone")
         self.segments = segments
         self.taxi_zones = taxi_zones
 
@@ -46,6 +50,61 @@ class RoadEnvironment:
         attach_pavement(segments, pavement_path)
         attach_speed_humps(segments, hump_path)
         return cls(segments, load_taxi_zones(taxi_zone_zip))
+
+    @classmethod
+    def from_parquet(cls, road_path: Path, taxi_zone_path: Path) -> RoadEnvironment:
+        connection = duckdb.connect()
+        try:
+            road_rows = connection.execute(
+                """
+                SELECT segment_id, from_node_id, to_node_id, traffic_direction,
+                       street_name, geometry_wkt, length_m, posted_speed_mph,
+                       curve_radius_m, pavement_rating, hump_fractions_json
+                FROM read_parquet(?)
+                ORDER BY segment_id
+                """,
+                [str(road_path)],
+            ).fetchall()
+            zone_rows = connection.execute(
+                """
+                SELECT location_id, geometry_wkt
+                FROM read_parquet(?)
+                ORDER BY location_id
+                """,
+                [str(taxi_zone_path)],
+            ).fetchall()
+        finally:
+            connection.close()
+
+        segments = [road_segment_from_row(row) for row in road_rows]
+        if len({segment.segment_id for segment in segments}) != len(segments):
+            raise ValueError("road-environment parquet contains duplicate segment_id values")
+        taxi_zones = {int(row[0]): from_wkt(row[1]) for row in zone_rows}
+        if len(taxi_zones) != len(zone_rows):
+            raise ValueError("taxi-zone parquet contains duplicate location_id values")
+        return cls(segments, taxi_zones)
+
+
+def road_segment_from_row(row: tuple[object, ...]) -> RoadSegment:
+    fractions = json.loads(str(row[10]))
+    if not isinstance(fractions, list) or any(
+        not isinstance(value, (int, float)) or not 0 <= value <= 1
+        for value in fractions
+    ):
+        raise ValueError("hump_fractions_json must be a list of values in [0, 1]")
+    return RoadSegment(
+        segment_id=str(row[0]),
+        from_node_id=str(row[1]),
+        to_node_id=str(row[2]),
+        traffic_direction=str(row[3]),
+        street_name=str(row[4]),
+        geometry=as_line(from_wkt(str(row[5]))),
+        length_m=float(row[6]),
+        posted_speed_mph=float(row[7]) if row[7] is not None else None,
+        curve_radius_m=float(row[8]) if row[8] is not None else None,
+        pavement_rating=float(row[9]) if row[9] is not None else None,
+        hump_fractions=[float(value) for value in fractions],
+    )
 
 
 def load_lion_segments(path: Path) -> list[RoadSegment]:
