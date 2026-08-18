@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
@@ -16,6 +17,7 @@ from batch_jobs.schemas import (
 
 # from_json이 파싱 실패를 표시하도록 Bronze 스키마에 corrupt record 컬럼을 덧붙인다.
 CORRUPT_RECORD_COLUMN = "_corrupt_record"
+SOURCE_TIMESTAMP_COLUMN = "_source_timestamp"
 _PARSE_SCHEMA = StructType(
     [
         *BRONZE_SENSOR_EVENT_SCHEMA.fields,
@@ -37,8 +39,39 @@ def read_bronze_sensor_events(spark: SparkSession, path: str | Path) -> DataFram
     parsed = F.from_json(
         F.col("value"), _PARSE_SCHEMA, {"columnNameOfCorruptRecord": CORRUPT_RECORD_COLUMN}
     )
+    source_timestamp = (
+        F.col("timestamp")
+        if "timestamp" in envelope.columns
+        else F.lit(None).cast("timestamp")
+    )
     return envelope.select(
         *[parsed[field.name].alias(field.name) for field in BRONZE_SENSOR_EVENT_SCHEMA.fields],
         F.col("value").alias(RAW_RECORD_COLUMN),
         parsed[CORRUPT_RECORD_COLUMN].isNotNull().alias(PARSE_FAILED_COLUMN),
+        source_timestamp.alias(SOURCE_TIMESTAMP_COLUMN),
     )
+
+
+def filter_bronze_sensor_events_for_hour(
+    bronze: DataFrame, target_hour: datetime
+) -> DataFrame:
+    """Keep records assigned to one UTC hour.
+
+    Valid records use their event time. A malformed JSON record has no parseable
+    event time, so its Kafka source timestamp is used for deterministic quarantine.
+    """
+    _require_utc_hour(target_hour)
+    target_hour_end = target_hour + timedelta(hours=1)
+    event_time = F.try_to_timestamp(F.col("event_time"))
+    assigned_time = F.coalesce(event_time, F.col(SOURCE_TIMESTAMP_COLUMN))
+    return bronze.filter(
+        (assigned_time >= F.lit(target_hour))
+        & (assigned_time < F.lit(target_hour_end))
+    )
+
+
+def _require_utc_hour(target_hour: datetime) -> None:
+    if target_hour.utcoffset() != timedelta(0):
+        raise ValueError("target_hour must be UTC timezone-aware")
+    if (target_hour.minute, target_hour.second, target_hour.microsecond) != (0, 0, 0):
+        raise ValueError("target_hour must be truncated to the hour")

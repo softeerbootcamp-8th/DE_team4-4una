@@ -6,16 +6,16 @@ import logging
 import time
 from datetime import datetime
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 
 from batch_jobs.cleansing.config import CleansingJobConfig
-from batch_jobs.cleansing.reader import read_bronze_sensor_events
-from batch_jobs.cleansing.rules import load_cleansing_config
-from batch_jobs.cleansing.sink import (
-    to_processed_sensor_events,
-    write_processed_sensor_events,
-    write_quarantined_events,
+from batch_jobs.cleansing.hourly_storage import write_hourly_cleansing_results
+from batch_jobs.cleansing.reader import (
+    filter_bronze_sensor_events_for_hour,
+    read_bronze_sensor_events,
 )
+from batch_jobs.cleansing.rules import load_cleansing_config
+from batch_jobs.cleansing.sink import to_processed_sensor_events
 from batch_jobs.cleansing.validate import cleanse_sensor_events
 
 logger = logging.getLogger(__name__)
@@ -33,43 +33,45 @@ def run_cleansing_job(
     spark: SparkSession,
     config: CleansingJobConfig,
     run_id: str,
+    target_hour: datetime,
     processed_at: datetime,
 ) -> None:
-    """Read Bronze, cleanse it, and store the passed and quarantined rows."""
+    """Cleanse and replace one UTC hour of Silver and quarantine rows."""
     started = time.monotonic()
-    logger.info("cleansing started run_id=%s", run_id)
+    logger.info("cleansing started run_id=%s target_hour=%s", run_id, target_hour.isoformat())
     logger.info("  input=%s", config.bronze_input_path)
     logger.info("  processed=%s", config.processed_output_path)
     logger.info("  quarantine=%s", config.quarantine_output_path)
 
-    bronze = read_bronze_sensor_events(spark, config.bronze_input_path)
+    bronze = filter_bronze_sensor_events_for_hour(
+        read_bronze_sensor_events(spark, config.bronze_input_path), target_hour
+    )
     result = cleanse_sensor_events(bronze, load_cleansing_config(), run_id, processed_at)
     processed = to_processed_sensor_events(result.passed, run_id, processed_at)
 
-    write_processed_sensor_events(
-        processed, config.processed_output_path, config.processed_partition_column
-    )
-    write_quarantined_events(
-        result.quarantined, config.quarantine_output_path, config.quarantine_partition_column
+    write_result = write_hourly_cleansing_results(
+        spark,
+        processed,
+        result.quarantined,
+        config.processed_output_path,
+        config.quarantine_output_path,
+        target_hour,
+        run_id,
     )
 
-    _log_summary(bronze, result.quarantined)
+    _log_summary(
+        write_result.processed_count,
+        write_result.quarantined_count,
+        target_hour,
+    )
     logger.info("cleansing finished run_id=%s elapsed=%.1fs", run_id, time.monotonic() - started)
 
 
-def _log_summary(bronze: DataFrame, quarantined: DataFrame) -> None:
-    reason_counts = {
-        row["reject_reason"]: row["count"]
-        for row in quarantined.groupBy("reject_reason").count().collect()
-    }
-    input_count = bronze.count()
-    quarantined_count = sum(reason_counts.values())
-
+def _log_summary(processed_count: int, quarantined_count: int, target_hour: datetime) -> None:
     logger.info(
-        "input=%d passed=%d quarantined=%d",
-        input_count,
-        input_count - quarantined_count,
+        "target_hour=%s input=%d passed=%d quarantined=%d",
+        target_hour.isoformat(),
+        processed_count + quarantined_count,
+        processed_count,
         quarantined_count,
     )
-    for reason, count in sorted(reason_counts.items()):
-        logger.info("  %s=%d", reason, count)

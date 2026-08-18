@@ -3,8 +3,23 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 
 from batch_jobs import cli
+
+
+def test_cleanse_command_requires_and_parses_target_hour() -> None:
+    arguments = cli.build_parser().parse_args(
+        [
+            "cleanse-sensor-events",
+            "--run-id",
+            "scheduled__2026-08-18T05:00:00+00:00",
+            "--target-hour",
+            "2026-08-18T05:00:00+00:00",
+        ]
+    )
+
+    assert arguments.target_hour == datetime(2026, 8, 18, 5, tzinfo=UTC)
 
 
 def test_main_returns_after_load_segment_comfort_score_without_falling_through(

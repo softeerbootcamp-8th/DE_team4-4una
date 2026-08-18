@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
@@ -29,25 +28,4 @@ def to_processed_sensor_events(
             overrides.get(field.name, F.col(field.name)).alias(field.name)
             for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
         ]
-    )
-
-
-def write_processed_sensor_events(
-    df: DataFrame,
-    path: str | Path,
-    partition_column: str | None,
-) -> None:
-    """Write processed_sensor_event rows, optionally split by the given column."""
-    writer = df.write
-    if partition_column:
-        writer = writer.partitionBy(partition_column)
-    writer.mode("append").parquet(str(path))
-
-
-def write_quarantined_events(
-    df: DataFrame,
-    path: str | Path,
-    partition_column: str,
-) -> None:
-    """Write quarantined rows as Parquet, split by the given column."""
-    df.write.mode("append").partitionBy(partition_column).parquet(str(path))
+    ).withColumn("event_hour", F.hour(event_time))

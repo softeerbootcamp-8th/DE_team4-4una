@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from pyspark import StorageLevel
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from batch_jobs.hourly_segment_feature_storage import (
@@ -29,7 +29,7 @@ from batch_jobs.map_matching.config import (
 )
 from batch_jobs.map_matching.scoring import score_segment_candidates
 from batch_jobs.map_matching.selection import select_best_segment
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
+from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_FILE_SCHEMA
 from batch_jobs.sensor_features.aggregation import build_hourly_segment_features
 from batch_jobs.sensor_features.config import (
     DEFAULT_EVENT_FEATURE_CONFIG_PATH,
@@ -127,9 +127,9 @@ def run_hourly_segment_feature_job(
     window_end = target_hour_end + lookahead
 
     sensor_df = (
-        spark.read.schema(PROCESSED_SENSOR_EVENT_SCHEMA)
+        spark.read.schema(PROCESSED_SENSOR_EVENT_FILE_SCHEMA)
         .parquet(config.processed_sensor_event_path)
-        .filter(F.col("event_date").between(window_start.date(), window_end.date()))
+        .filter(_hour_partition_filter(window_start, window_end))
         .filter((F.col("event_time") >= window_start) & (F.col("event_time") < window_end))
     )
 
@@ -201,6 +201,21 @@ def run_hourly_segment_feature_job(
             result.unpersist()
     finally:
         target_df.unpersist()
+
+
+def _hour_partition_filter(window_start: datetime, window_end: datetime) -> Column:
+    """Select only Silver1 hour partitions touched by the event window."""
+    partition_hour = window_start.replace(minute=0, second=0, microsecond=0)
+    predicate: Column | None = None
+    while partition_hour < window_end:
+        hour_predicate = (F.col("event_date") == F.lit(partition_hour.date())) & (
+            F.col("event_hour") == F.lit(partition_hour.hour)
+        )
+        predicate = hour_predicate if predicate is None else predicate | hour_predicate
+        partition_hour += timedelta(hours=1)
+    if predicate is None:
+        raise ValueError("sensor read window must not be empty")
+    return predicate
 
 
 def _validate_job_arguments(

@@ -65,6 +65,7 @@ from batch_jobs.road_segment.validate import (
 from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 from pyproj import CRS, Transformer
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from shapely import STRtree
 from shapely import wkt as shapely_wkt
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, mapping
@@ -1188,9 +1189,15 @@ class TestBuild:
 
         # 4. Transform 2가 경로를 추가로 조립하지 않고 Manifest URI를 그대로 읽어 실제 GPS를 매칭하는지
         sensor_path = str(tmp_path / "processed_sensor_event")
-        spark.createDataFrame(
-            [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
-        ).write.mode("overwrite").parquet(sensor_path)
+        (
+            spark.createDataFrame(
+                [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
+            )
+            .withColumn("event_hour", F.hour("event_time"))
+            .write.mode("overwrite")
+            .partitionBy("event_date", "event_hour")
+            .parquet(sensor_path)
+        )
 
         config = HourlySegmentFeatureJobConfig.from_env(
             {
@@ -1228,9 +1235,15 @@ class TestBuild:
         road_segment_uri = result.manifest.artifact("road_segment").uri
 
         sensor_path = str(tmp_path / "processed_sensor_event")
-        spark.createDataFrame(
-            [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
-        ).write.mode("overwrite").parquet(sensor_path)
+        (
+            spark.createDataFrame(
+                [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
+            )
+            .withColumn("event_hour", F.hour("event_time"))
+            .write.mode("overwrite")
+            .partitionBy("event_date", "event_hour")
+            .parquet(sensor_path)
+        )
 
         config = HourlySegmentFeatureJobConfig.from_env(
             {
