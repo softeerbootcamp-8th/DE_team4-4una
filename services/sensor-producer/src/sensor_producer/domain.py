@@ -54,6 +54,8 @@ VEHICLE_PROFILES: dict[int, VehicleProfile] = {
     5: VehicleProfile(5, "VP_MPV_LARGE", 0.96, 0.61, 1.00, 1.10, 0.98),
 }
 
+# 차체 흔들림 항을 정규화하는 기준 차량. 세 반응계수가 모두 1.00인 프로필이다.
+BASELINE_DAMPING = VEHICLE_PROFILES[2].damping
 
 @dataclass(slots=True)
 class RoadSegment:

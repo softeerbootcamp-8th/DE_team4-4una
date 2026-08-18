@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from de4_core import SensorEvent
 
 from sensor_producer.domain import (
+    BASELINE_DAMPING,
     VEHICLE_PROFILES,
     RouteLeg,
     RoutePlan,
@@ -35,6 +36,9 @@ MAX_ACCELERATION_PHASE_SECONDS = 8.0
 # 차량별 보정값이 없는 PoC용 bicycle model 가정이다.
 REPRESENTATIVE_WHEELBASE_M = 2.8
 MIN_STEERING_SPEED_MPS = 0.5
+# 차체 흔들림은 휠 레벨 거칠기(1.7 rad/m)보다 훨씬 긴 파장으로 나타나는 저주파 성분이다.
+SWAY_WAVENUMBER_RAD_PER_M = 0.35
+SWAY_WEIGHT = 0.25
 MAX_STEERING_ANGLE_DEG = 35.0
 STEERING_ANGLE_DEADBAND_DEG = 0.05
 logger = logging.getLogger(__name__)
@@ -504,6 +508,15 @@ def vertical_acceleration(
         math.sin(route_distance_m * 1.7 + phase)
         + 0.35 * math.sin(route_distance_m * 4.1 + phase / 2)
     )
+    # 감쇠계수가 낮은 차량일수록 노면 입력이 차체 흔들림으로 더 오래 남는다. 정상상태
+    # 사인파에는 지속 시간이 없으므로 지속을 진폭으로 근사한다(감쇠비가 아니다).
+    sway = (
+        profile.vertical_response
+        * roughness
+        * SWAY_WEIGHT
+        * (BASELINE_DAMPING / profile.damping)
+        * math.sin(route_distance_m * SWAY_WAVENUMBER_RAD_PER_M + phase / 3)
+    )
     hump_response = 0.0
     near_hump = False
     for hump_distance in position.leg.hump_distances_m:
@@ -513,11 +526,14 @@ def vertical_acceleration(
         near_hump = True
         width = 1.8
         impact = math.exp(-((offset / width) ** 2))
-        ring = math.sin(elapsed_seconds * 18) * math.exp(-abs(offset) * profile.damping)
+        # 잔진동은 요철을 지난 뒤에만 남는다. 통과 전 구간에는 충격만 있다.
+        ring = 0.0
+        if offset > 0:
+            ring = math.sin(elapsed_seconds * 18) * math.exp(-offset * profile.damping)
         hump_response += profile.vertical_response * max(0.5, speed_mps / 5) * (
             1.8 * impact + 0.35 * ring
         )
-    return pavement + hump_response, near_hump
+    return pavement + sway + hump_response, near_hump
 
 
 def steering_vibration_amplitude(
