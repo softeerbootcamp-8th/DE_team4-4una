@@ -18,18 +18,11 @@ from serving_api.schemas import ComfortScore
 
 TABLE = "segment_comfort_score"
 
-# SELECT 순서와 모델 매핑이 어긋나면 값이 조용히 뒤바뀌므로 한 곳에서만 정의한다.
-COLUMNS = (
-    "segment_id",
-    "vehicle_profile_id",
-    "data_period_start",
-    "data_period_end",
-    "comfort_score",
-    "sample_count",
-    "confidence_score",
-    "score_version",
-    "calculated_at",
-)
+# 컬럼 목록을 여기 따로 적지 않고 응답 모델에서 가져온다. 두 곳에 적으면 컬럼을
+# 추가할 때 한쪽만 고치고 놓칠 수 있고, SELECT 순서와 모델 매핑이 어긋나면 값이
+# 조용히 뒤바뀐다. ComfortScore가 이 테이블 한 행과 1:1이라 성립하는 방식이며,
+# DB 컬럼이 아닌 응답 필드가 생기면 그 시점에 목록을 따로 두어야 한다.
+COLUMNS = tuple(ComfortScore.model_fields)
 
 SINGLE_SQL = f"""
 SELECT {", ".join(COLUMNS)}
