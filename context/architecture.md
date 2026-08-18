@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-18
 ---
 
 # Target Architecture
@@ -99,6 +99,11 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 The producer reads the pinned trip sample and road environment, chooses or loads
 a vehicle profile, computes a route, and emits time-ordered observations. It must
 be restartable without producing logically different events.
+
+The implemented runtime can follow the batch job's active environment pointer
+or pin an immutable manifest through either `file://` or `s3://`. It verifies
+manifest and artifact checksums, then materializes the prepared road and taxi-zone
+Parquet files into a local cache before route construction.
 
 ### Stream collection
 

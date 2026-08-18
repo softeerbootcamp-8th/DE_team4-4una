@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-18
 ---
 
 # Service Map
@@ -14,7 +14,7 @@ and does not by itself settle those boundaries.
 | --- | --- | --- | --- |
 | `libs/de4-core` | Shared IDs, enums, event contracts, dataset contracts, configuration primitives | Accepted cross-service designs | Importable versioned contracts |
 | `services/batch-jobs` | Download, snapshot, validate, and normalize reference data; prepare deterministic TLC sample; run Spark map-matching and monthly score jobs if no separate Spark package is added | NYC/OSM reference sources, HVFHV data, S3 Bronze | Road environment, trip sample, Silver matches, monthly Gold dataset |
-| `services/sensor-producer` | Route trips and replay deterministic synthetic vehicle observations with `trip_seq` in wall-clock time | Road environment, trip sample, vehicle profiles | Kafka dispatch and Bronze-shape sensor events without `segment_id` |
+| `services/sensor-producer` | Resolve a verified file/S3 environment manifest, route trips, and replay deterministic synthetic vehicle observations with `trip_seq` in wall-clock time | Prepared road environment, trip sample, vehicle profiles | Kafka dispatch and Bronze-shape sensor events without `segment_id` |
 | `services/stream-processor` | Validate and persist Kafka sensor records without changing their raw meaning | Kafka events, shared contracts | Immutable S3 Bronze `sensor_event` records |
 | `services/gold-loader` | Load a completed monthly gold snapshot into the serving store idempotently | Gold score dataset | Serving records and load audit |
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance | Serving store | HTTP API responses |

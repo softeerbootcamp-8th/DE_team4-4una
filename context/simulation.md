@@ -36,6 +36,10 @@ simulation offsets.
 
 ## Implemented prototype pipeline
 
+At startup, the producer can follow the published `active.json` pointer or pin a
+specific immutable environment manifest. Runtime Parquet artifacts are accepted
+only after size and SHA-256 validation and are cached by `environment_id`.
+
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.
 2. Sort using a documented stable ordering and select approximately 1,000 rows

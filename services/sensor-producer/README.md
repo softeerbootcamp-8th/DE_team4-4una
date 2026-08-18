@@ -54,6 +54,43 @@ the replay if its skipped-trip ratio is too high. The option is disabled by
 default. The producer still flushes published events and writes the run summary
 before enforcing the threshold.
 
+## Prepared environment and EC2 container
+
+The monthly batch job publishes an active pointer and immutable environment
+manifest. The producer can resolve either URI through the same `file://` or
+`s3://` boundary, verify the manifest and Parquet checksums, and cache the
+artifacts before routing starts:
+
+```bash
+uv run --package sensor-producer sensor-producer run \
+  --environment-pointer-uri s3://de4-lake/prepared/simulation_environment/active.json \
+  --trips-path data/nyc-sensor/trips.json \
+  --publisher kafka
+```
+
+On EC2, attach a least-privilege instance profile with read access to the
+pointer, manifest, and referenced artifacts. Boto3 then uses the standard AWS
+credential chain; do not pass or bake access keys into the image.
+
+Build the production image from the repository root and mount the current
+bounded trip input until the S3 TLC reader is implemented separately:
+
+```bash
+docker build -f services/sensor-producer/Dockerfile -t de4-sensor-producer .
+docker run --rm \
+  -v "$PWD/data/nyc-sensor:/data:ro" \
+  -e AWS_REGION=us-east-1 \
+  -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
+  de4-sensor-producer run \
+  --environment-pointer-uri s3://de4-lake/prepared/simulation_environment/active.json \
+  --trips-path /data/trips.json \
+  --publisher kafka
+```
+
+`--environment-manifest-uri` pins one build instead of following `active.json`.
+`SENSOR_CACHE_DIR` controls the verified local artifact cache. The legacy
+`--input-dir` mode remains available for the checked-in local sample workflow.
+
 ## Timing and delivery contracts
 
 - Dispatch actions are ordered by `request_datetime`; route planning happens in
