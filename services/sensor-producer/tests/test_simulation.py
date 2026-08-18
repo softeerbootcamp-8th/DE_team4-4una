@@ -324,6 +324,32 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
     assert result.events_published == 3
 
 
+def test_replay_rejects_an_out_of_order_streaming_trip_source() -> None:
+    source = iter(
+        [
+            trip(trip_id="trip-later"),
+            TripRecord(
+                trip_id="trip-earlier",
+                request_datetime=trip().request_datetime - timedelta(minutes=1),
+                pickup_datetime=trip().pickup_datetime,
+                dropoff_datetime=trip().dropoff_datetime,
+                pu_location_id=181,
+                do_location_id=181,
+                trip_miles=0.1,
+            ),
+        ]
+    )
+    coordinator = ReplayCoordinator(
+        object(),  # type: ignore[arg-type]
+        {181: object()},
+        MemoryPublisher(),
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    with pytest.raises(ValueError, match="sorted by request time"):
+        coordinator.replay(source)
+
+
 def test_replay_skips_infeasible_trip_and_continues(caplog) -> None:
     class SelectiveRouter:
         def plan_for_zones(
