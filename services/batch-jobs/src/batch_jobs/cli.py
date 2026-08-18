@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanse_parser = subparsers.add_parser("cleanse-sensor-events")
     cleanse_parser.add_argument("--run-id", required=True)
+    cleanse_parser.add_argument("--target-hour", type=datetime.fromisoformat, required=True)
 
     score_parser = subparsers.add_parser("score-hourly-comfort")
     score_parser.add_argument("--input-path")
@@ -90,14 +91,20 @@ def add_bbox_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def run_cleansing(run_id: str) -> None:
+def run_cleansing(run_id: str, target_hour: datetime) -> None:
     from batch_jobs.cleansing.config import CleansingJobConfig
     from batch_jobs.cleansing.job import build_spark_session, run_cleansing_job
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     spark = build_spark_session()
     try:
-        run_cleansing_job(spark, CleansingJobConfig.from_env(), run_id, datetime.now(UTC))
+        run_cleansing_job(
+            spark,
+            CleansingJobConfig.from_env(),
+            run_id,
+            target_hour,
+            datetime.now(UTC),
+        )
     finally:
         spark.stop()
 
@@ -264,7 +271,7 @@ def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
-        run_cleansing(arguments.run_id)
+        run_cleansing(arguments.run_id, arguments.target_hour)
         return
     if arguments.command == "score-hourly-comfort":
         run_hourly_scoring(arguments)

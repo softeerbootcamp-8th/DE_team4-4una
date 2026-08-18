@@ -14,8 +14,6 @@ class CleansingJobConfig:
     bronze_input_path: str
     processed_output_path: str
     quarantine_output_path: str
-    processed_partition_column: str | None
-    quarantine_partition_column: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> CleansingJobConfig:
@@ -33,10 +31,5 @@ class CleansingJobConfig:
             quarantine_output_path=source.get(
                 "CLEANSING_QUARANTINE_OUTPUT_PATH",
                 "data/local-lake/silver/sensor_event_quarantine",
-            ),
-            # 격리 행의 event_date는 파싱 실패 시 NULL이라 격리 시각에서 파생한 컬럼으로 나눈다.
-            processed_partition_column=source.get("CLEANSING_SILVER_PARTITION_COLUMN"),
-            quarantine_partition_column=source.get(
-                "CLEANSING_QUARANTINE_PARTITION_COLUMN", "rejected_date"
             ),
         )
