@@ -23,7 +23,8 @@ A simulation run should record at least:
 - road-environment snapshot ID
 - endpoint-selection algorithm version and seed
 - routing algorithm and graph version
-- vehicle-profile version
+- vehicle-profile set and, when the mix mode is used, the vehicle-mix name,
+  mix version, and assignment seed
 - motion-model version
 - sensor sampling frequency
 - event-contract version
@@ -47,7 +48,13 @@ simulation offsets.
 4. Find valid canonical-road points inside pickup and drop-off taxi zones using a
    stable spatial ordering plus a deterministic seed derived from the trip ID.
 5. Route between endpoints over the canonical road graph.
-6. Assign a vehicle type using a configured deterministic strategy.
+6. Assign one vehicle profile per trip. Two exclusive modes exist: a fixed profile
+   for every trip (`--vehicle-profile-id`, the default) or a deterministic draw from
+   a configured share table (`--vehicle-mix`). The draw is
+   `sha256("vehicle-mix:{seed}:{trip_id}")` mapped onto the cumulative shares, so it
+   is reproducible rather than random. The mix name is deliberately excluded from the
+   hash input: adjusting one share then moves only the trips near the shifted
+   boundary instead of reshuffling every assignment.
 7. Convert route geometry and the pickup-to-drop-off duration into
    configured-frequency passenger-journey progress and motion states.
 8. Apply road attributes, humps, turns, speed changes, and vehicle parameters to
@@ -141,6 +148,27 @@ wheelbase. It is bounded to -35 through 35 degrees; positive values represent
 right turns and negative values represent left turns. Near-zero speed is
 reported as zero because a heading-derived estimate is unstable there.
 
+### Vehicle response
+
+`damping_factor` deliberately runs opposite to the response factors: it appears as
+`exp(-distance * damping_factor)`, so a larger value settles motion faster and a
+lower value means the body keeps swaying. It reaches the signal through two paths.
+
+- A low-frequency body-sway term added to pavement roughness, with amplitude
+  `baseline_damping / damping_factor`. `VP_SEDAN_LARGE` normalises this to 1.0. Sway
+  uses a much longer wavelength (0.35 rad/m) than the wheel-level roughness term
+  (1.7 rad/m).
+- Residual ringing after a mapped speed hump, present only once the vehicle has
+  passed the hump.
+
+The sway term exists because `damping_factor` would otherwise be nearly inert. In the
+checked-in smoke run only 0.34% of samples were near a mapped hump (162 of 46,960)
+while 87% carried a pavement rating, so a hump-only coefficient would not
+differentiate vehicles on ordinary road. Approximating *persistence* as *amplitude*
+is a deliberate simplification: a steady-state sinusoid has no decay time, and a true
+second-order response would require carrying state between samples. These values are
+not damping ratios.
+
 `steering_vibration` is a non-negative RMS-like amplitude in m/s² rather than a
 steering angle. It combines road-induced vertical acceleration and lateral
 steering activity, attenuates road vibration near zero speed, and applies a
@@ -155,8 +183,15 @@ reconstruction of the source taxi's actual dynamics.
 
 The supplied schema declares `event_id` as the primary key. The producer stores
 it as a deterministic UUID string derived from run, trip, vehicle profile, and
-sequence. `(trip_id, trip_seq)` remains the ordering and replay key when each trip
-has one assigned profile; multi-profile trip identity is still open.
+sequence. `(trip_id, trip_seq)` is the ordering and replay key, which requires
+that **one `trip_id` identify exactly one vehicle**. Per-trip profile assignment
+upholds this; replaying the same trip under several profiles would not, and is
+therefore not supported. Such a replay would interleave two vehicles inside one Kafka
+partition (the message key is `trip_id`) and, worse, inside the Silver per-trip
+windows in `sensor_features/events.py` and `sensor_features/steering.py`, which
+partition by `trip_id` alone - corrupting jerk and steering-episode features without
+raising an error. Supporting it would require changing the message key to
+`{trip_id}:{vehicle_profile_id}` and those window keys together.
 
 Known trip-level feasibility failures do not abort the complete replay. Missing
 taxi zones, zones without routable LION nodes, disconnected directed routes,
