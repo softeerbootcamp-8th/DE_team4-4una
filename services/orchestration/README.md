@@ -2,7 +2,8 @@
 
 Apache Airflow(LocalExecutor)를 로컬 개발 환경에서 부트스트랩하는 서비스다.
 `hello_world`(부트스트랩 동작 확인용)에 이어, `hourly_pipeline` DAG가
-batch-jobs 4단계 배치 파이프라인 중 cleanse 단계를 오케스트레이션한다(#162).
+batch-jobs 4단계 배치 파이프라인 중 cleanse(#162)·scoring(#169) 단계를
+오케스트레이션한다.
 
 ## 준비
 
@@ -24,6 +25,10 @@ batch-jobs 4단계 배치 파이프라인 중 cleanse 단계를 오케스트레�
   batch-jobs 이미지 태그. 아래 "hourly_pipeline 실행하기"에서 만든다.
 - `CLEANSING_BRONZE_INPUT_PATH` 등 `CLEANSING_*` 5개 키 — batch-jobs의
   `cleanse-sensor-events` 커맨드가 읽는 입출력 경로다. 기존 값을 그대로 쓰면 된다.
+- `HOURLY_COMFORT_INPUT_PATH` 등 `HOURLY_COMFORT_*` 4개 키 — batch-jobs의
+  `score-hourly-comfort` 커맨드가 읽는 입출력 경로다. 비워두면
+  `HourlyComfortJobConfig.from_env()`가 `data/local-lake` 하위 기본 경로로
+  대체하므로(의도된 동작이다), 로컬 개발에서는 채우지 않아도 된다.
 
 ## hourly_pipeline 실행하기 (cleanse 단계, 로컬 전용 배선)
 
@@ -65,6 +70,41 @@ Airflow는 공식 이미지를 그대로 쓰고(#70) pyspark를 섞지 않기 �
 **문제 해결**: `docker run` 단계에서 `permission denied`가 나면, host의
 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
+
+## hourly_pipeline 실행하기 (scoring 단계, 로컬 전용 배선)
+
+`scoring` TaskGroup도 `cleanse`와 동일한 방식(BashOperator + docker-outside-of-docker)
+으로 `score-hourly-comfort --run-id={{ run_id }}`를 실행한다. `run_id`는 Airflow
+템플릿으로 전달되고, 나머지 설정은 `HourlyComfortJobConfig.from_env()`가
+`HOURLY_COMFORT_*` 환경변수에서 읽는다.
+
+`features` TaskGroup은 아직 없어서 `cleanse >> scoring` 의존관계도 아직 연결돼
+있지 않다(다른 팀원과 조율해 나중에 연결). 그래서 로컬에서 `scoring`만 단독으로
+확인하려면, `score-hourly-comfort`가 읽는 `HOURLY_COMFORT_INPUT_PATH`
+(기본값 `data/local-lake/silver/hourly_segment_features`)에 최소 샘플
+`hourly_segment_features` parquet를 임시로 심어둬야 한다. 스키마는
+`batch_jobs.schemas.HOURLY_SEGMENT_FEATURE_SCHEMA`를 따르면 되고, 예시 행 구조는
+`services/batch-jobs/tests/test_hourly_comfort_job.py`의 `feature_row` 헬퍼를
+참고한다. 이 샘플 데이터는 검증용 임시 파일이며 `features` TaskGroup이 실제로
+연결되면 더 이상 필요 없다.
+
+1. (cleanse 단계에서 이미 `BATCH_JOBS_IMAGE_TAG`를 채웠다면 생략) batch-jobs
+   이미지를 빌드하고 `.env`의 `BATCH_JOBS_IMAGE_TAG`에 태그를 채운다.
+
+   ```bash
+   make build-batch-jobs-image
+   ```
+
+2. 위 스키마에 맞는 샘플 parquet를 `data/local-lake/silver/hourly_segment_features`
+   (또는 `.env`에 설정한 `HOURLY_COMFORT_INPUT_PATH`)에 심는다.
+
+3. `make up-airflow`로 Airflow를 띄운 뒤, `hourly_pipeline`을 트리거하고
+   `scoring` TaskGroup이 `success`로 끝나는지 확인한다.
+
+   ```bash
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags trigger hourly_pipeline
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags list-runs hourly_pipeline
+   ```
 
 ## 로컬에서 실행하기
 
@@ -120,8 +160,9 @@ docker compose -f infra/compose/postgres.yaml down
 
 ## 범위 밖
 
-- `hourly_pipeline`의 features/scoring/publish TaskGroup, Great Expectations
-  검증 task, Slack 실패 알림, EMR Serverless 실제 연결 (#157 후속 이슈)
+- `hourly_pipeline`의 features/publish TaskGroup, `cleanse >> features >> scoring`
+  실제 의존관계 연결, Great Expectations 검증 task, Slack 실패 알림,
+  EMR Serverless 실제 연결 (#157 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
 - 운영 배포, 인증/RBAC 설정
