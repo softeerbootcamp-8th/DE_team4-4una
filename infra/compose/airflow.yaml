@@ -16,6 +16,10 @@ x-airflow-common: &airflow-common
     CLEANSING_QUARANTINE_OUTPUT_PATH: ${CLEANSING_QUARANTINE_OUTPUT_PATH}
     CLEANSING_SILVER_PARTITION_COLUMN: ${CLEANSING_SILVER_PARTITION_COLUMN}
     CLEANSING_QUARANTINE_PARTITION_COLUMN: ${CLEANSING_QUARANTINE_PARTITION_COLUMN}
+    # features task의 필수 실행 설정. target_hour와 run_id는 Airflow 실행
+    # 컨텍스트에서 직접 전달한다(hourly_pipeline.py 참고).
+    HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
+    HOURLY_SEGMENT_FEATURE_VERSION: ${HOURLY_SEGMENT_FEATURE_VERSION}
     # hourly_pipeline의 scoring task가 쓰는 값. run_id는 여기 포함하지 않고
     # Airflow의 `{{ run_id }}` 템플릿으로 직접 전달한다(hourly_pipeline.py 참고).
     HOURLY_COMFORT_INPUT_PATH: ${HOURLY_COMFORT_INPUT_PATH}
