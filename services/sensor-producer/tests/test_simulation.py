@@ -449,3 +449,49 @@ def test_replay_does_not_hide_publisher_failure() -> None:
 
     with pytest.raises(RuntimeError, match="Kafka unavailable"):
         coordinator.replay([trip()])
+
+
+def test_vehicle_profiles_use_canonical_ids() -> None:
+    assert set(VEHICLE_PROFILES) == {1, 2, 3, 4, 5}
+
+
+def test_vehicle_profiles_use_expected_profile_names() -> None:
+    names = {profile_id: profile.profile_name for profile_id, profile in VEHICLE_PROFILES.items()}
+    assert names == {
+        1: "VP_SEDAN_COMPACT",
+        2: "VP_SEDAN_LARGE",
+        3: "VP_SUV_COMPACT",
+        4: "VP_SUV_LARGE",
+        5: "VP_MPV_LARGE",
+    }
+
+
+def test_simulation_config_accepts_every_canonical_vehicle_profile_id() -> None:
+    for profile_id in VEHICLE_PROFILES:
+        SimulationConfig("test-run", vehicle_profile_id=profile_id)
+
+
+def test_simulation_config_rejects_unknown_vehicle_profile_id() -> None:
+    with pytest.raises(ValueError, match="vehicle_profile_id"):
+        SimulationConfig("test-run", vehicle_profile_id=999)
+
+
+def test_sensor_response_differs_by_vehicle_profile() -> None:
+    plan = route(2.0, (50.0,))
+
+    def mean_abs_accel_z(profile_id: int) -> float:
+        events = list(
+            MotionSimulator().generate(
+                trip(duration_seconds=20),
+                plan,
+                VEHICLE_PROFILES[profile_id],
+                SimulationConfig(
+                    "test-run", vehicle_profile_id=profile_id, sample_hz=10, time_scale=0
+                ),
+            )
+        )
+        return sum(abs(event.accel_z) for event in events) / len(events)
+
+    means = {profile_id: mean_abs_accel_z(profile_id) for profile_id in VEHICLE_PROFILES}
+
+    assert len({round(value, 6) for value in means.values()}) == len(VEHICLE_PROFILES)
