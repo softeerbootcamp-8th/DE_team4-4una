@@ -1,9 +1,9 @@
 """batch-jobs 4단계 배치 파이프라인을 오케스트레이션하는 시간배치 DAG.
 
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
-scoring 단계를 추가한다. features/publish는 후속 이슈에서 순차 추가한다(#157).
-cleanse >> features >> scoring 실제 의존관계 연결은 features TaskGroup을
-작업 중인 다른 팀원과 조율해야 해서 이번 범위 밖이다.
+scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고
+cleanse >> features >> scoring 의존관계를 연결한다. publish는 후속 이슈에서
+추가한다(#157).
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -56,6 +56,32 @@ _RUN_CLEANSE_BASH_COMMAND = (
     "cleanse-sensor-events --run-id={{ run_id }}"
 )
 
+# 경로·feature 설정은 HourlySegmentFeatureJobConfig.from_env()가 환경변수에서
+# 읽는다. target_hour/run_id는 Airflow 실행 컨텍스트에서, road snapshot과 feature
+# version은 orchestration 환경의 필수 설정에서 CLI 인자로 전달한다.
+_RUN_FEATURES_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/processed:"
+    "/app/data/processed:ro "
+    "-e HOURLY_SEGMENT_FEATURE_INPUT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_OUTPUT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "build-hourly-segment-features "
+    "--target-hour='{{ data_interval_start.isoformat() }}' "
+    '--road-snapshot-date="${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE'
+    ':?HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE must be set}" '
+    '--feature-version="${HOURLY_SEGMENT_FEATURE_VERSION'
+    ':?HOURLY_SEGMENT_FEATURE_VERSION must be set}" '
+    "--run-id='{{ run_id }}'"
+)
+
 # run_id 외 나머지 설정은 HourlyComfortJobConfig.from_env()가 환경변수에서 읽는다.
 _RUN_SCORING_BASH_COMMAND = (
     "docker run --rm --network de4-local "
@@ -86,8 +112,16 @@ with DAG(
             bash_command=_RUN_CLEANSE_BASH_COMMAND,
         )
 
+    with TaskGroup(group_id="features") as features:
+        run_features = BashOperator(
+            task_id="run_features",
+            bash_command=_RUN_FEATURES_BASH_COMMAND,
+        )
+
     with TaskGroup(group_id="scoring") as scoring:
         run_scoring = BashOperator(
             task_id="run_scoring",
             bash_command=_RUN_SCORING_BASH_COMMAND,
         )
+
+    cleanse >> features >> scoring
