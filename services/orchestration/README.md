@@ -2,8 +2,8 @@
 
 Apache Airflow(LocalExecutor)를 로컬 개발 환경에서 부트스트랩하는 서비스다.
 `hello_world`(부트스트랩 동작 확인용)에 이어, `hourly_pipeline` DAG가
-batch-jobs 4단계 배치 파이프라인 중 cleanse(#162)·features(#171)·scoring(#169)
-단계를 오케스트레이션한다.
+batch-jobs 4단계 배치 파이프라인 중 cleanse(#162)·features(#171)·scoring(#169)·
+publish(#176) 단계를 오케스트레이션한다.
 
 ## 준비
 
@@ -33,6 +33,18 @@ batch-jobs 4단계 배치 파이프라인 중 cleanse(#162)·features(#171)·sco
   `score-hourly-comfort` 커맨드가 읽는 입출력 경로다. 비워두면
   `HourlyComfortJobConfig.from_env()`가 `data/local-lake` 하위 기본 경로로
   대체하므로(의도된 동작이다), 로컬 개발에서는 채우지 않아도 된다.
+- `SEGMENT_COMFORT_SCORE_DATA_LAKE_URI`, `SEGMENT_COMFORT_SCORE_WINDOW_HOURS`,
+  `SEGMENT_COMFORT_SCORE_CONFIG_PATH` — batch-jobs의
+  `load-segment-comfort-score` 커맨드(publish 단계)가 읽는 값이다. 비워두면
+  `SegmentComfortScoreJobConfig.from_env()`가 로컬 기본값으로 대체한다(scoring과
+  동일하게 의도된 동작).
+- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
+  `POSTGRES_PASSWORD` — publish 단계가 Gold 결과를 적재할 서빙 Postgres 접속
+  정보다. `SegmentComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
+  있으면(기본값 대체 없이) 즉시 실패한다. 로컬 개발에서는 `infra/compose/postgres.yaml`의
+  `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
+  가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야
+  한다 — 이 서비스 범위 밖의 사전 조건이다.
 
 ## hourly_pipeline 실행하기 (cleanse 단계, 로컬 전용 배선)
 
@@ -124,6 +136,43 @@ scoring 입력인 `hourly_segment_features`는 바로 앞의 `features` TaskGrou
    docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags list-runs hourly_pipeline
    ```
 
+## hourly_pipeline 실행하기 (publish 단계, 로컬 전용 배선)
+
+`publish` TaskGroup도 `cleanse`/`scoring`과 동일한 방식(BashOperator +
+docker-outside-of-docker)으로 `load-segment-comfort-score
+--as-of='{{ data_interval_end.isoformat() }}'`를 실행한다. `as_of`는 이
+run의 데이터 구간이 끝나는 시점이며(Gold job은 `[as_of - window_hours,
+as_of)` 윈도우를 집계), 나머지 설정은
+`SegmentComfortScoreJobConfig.from_env()`가 `SEGMENT_COMFORT_SCORE_*`/
+`POSTGRES_*` 환경변수에서 읽는다.
+
+> ⚠️ **이 이슈(#176) 범위 밖**: `scoring >> publish` 의존관계는 아직 연결하지
+> 않았다. 다른 작업(features 때와 동일한 조율)이 정리되는 시점에 후속
+> 이슈에서 연결한다. 지금은 `publish`를 단독으로 트리거해서 검증한다.
+
+1. 서빙 Postgres에 마이그레이션이 적용돼 있어야 한다(사전 조건, 이 서비스
+   범위 밖). 아직이면 batch-jobs의 `migrate-database` 커맨드로 먼저 적용한다.
+2. `hourly_comfort_score`가 아직 없다면(features/scoring을 아직 안 돌렸다면)
+   검증용 샘플 Parquet를 `data/local-lake` 아래 임시로 심는다.
+3. (다른 단계에서 이미 채웠다면 생략) batch-jobs 이미지를 빌드하고 `.env`의
+   `BATCH_JOBS_IMAGE_TAG`를 채운다.
+
+   ```bash
+   make build-batch-jobs-image
+   ```
+
+4. `make up-airflow`로 Airflow를 띄운 뒤, `publish` TaskGroup만 골라 트리거하고
+   성공 여부를 확인한다.
+
+   ```bash
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
+     airflow tasks test hourly_pipeline publish.run_publish <run-date>
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
+     airflow dags trigger hourly_pipeline
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
+     airflow dags list-runs hourly_pipeline
+   ```
+
 ## 로컬에서 실행하기
 
 1. Airflow 메타데이터 DB용 Postgres를 띄운다.
@@ -178,8 +227,8 @@ docker compose -f infra/compose/postgres.yaml down
 
 ## 범위 밖
 
-- `hourly_pipeline`의 publish TaskGroup, Great Expectations 검증 task,
-  Slack 실패 알림, EMR Serverless 실제 연결 (#157 후속 이슈)
+- `hourly_pipeline`의 `scoring >> publish` 의존관계 연결, Great Expectations
+  검증 task, Slack 실패 알림, EMR Serverless 실제 연결 (#157 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
 - 운영 배포, 인증/RBAC 설정

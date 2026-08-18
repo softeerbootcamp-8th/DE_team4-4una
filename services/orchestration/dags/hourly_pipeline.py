@@ -2,8 +2,9 @@
 
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
 scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고
-cleanse >> features >> scoring 의존관계를 연결한다. publish는 후속 이슈에서
-추가한다(#157).
+cleanse >> features >> scoring 의존관계를 연결한다. 이슈 #176: publish 단계를
+추가한다(#157의 마지막 진행). scoring >> publish 의존관계 연결은 이 이슈
+범위 밖이라 아직 연결하지 않는다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -93,6 +94,24 @@ _RUN_SCORING_BASH_COMMAND = (
     "score-hourly-comfort --run-id={{ run_id }}"
 )
 
+# publish는 local-lake를 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 다른
+# 단계와 달리 쓰기 마운트가 필요 없다. 나머지 설정(SegmentComfortScoreJobConfig)은
+# SEGMENT_COMFORT_SCORE_*(옵션, 기본값 있음)와 POSTGRES_*(필수, 없으면 즉시
+# 실패) 환경변수에서 읽는다. as_of는 `[as_of - window_hours, as_of)` 윈도우의
+# 끝을 의미하므로, 방금 끝난 데이터 구간의 끝인 data_interval_end를 쓴다
+# (features가 처리 대상 구간의 시작인 data_interval_start를 쓰는 것과 대칭).
+_RUN_PUBLISH_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake:ro "
+    "-e SEGMENT_COMFORT_SCORE_DATA_LAKE_URI -e SEGMENT_COMFORT_SCORE_WINDOW_HOURS "
+    "-e SEGMENT_COMFORT_SCORE_CONFIG_PATH "
+    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "load-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
+)
+
 with DAG(
     dag_id="hourly_pipeline",
     description="cleanse -> features -> scoring -> publish 4단계 시간배치 파이프라인",
@@ -122,6 +141,13 @@ with DAG(
         run_scoring = BashOperator(
             task_id="run_scoring",
             bash_command=_RUN_SCORING_BASH_COMMAND,
+        )
+
+    with TaskGroup(group_id="publish") as publish:
+        # scoring >> publish 의존관계 연결은 이슈 #176 범위 밖(후속 이슈에서 연결).
+        run_publish = BashOperator(
+            task_id="run_publish",
+            bash_command=_RUN_PUBLISH_BASH_COMMAND,
         )
 
     cleanse >> features >> scoring
