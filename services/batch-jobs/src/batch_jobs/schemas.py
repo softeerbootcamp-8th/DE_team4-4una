@@ -70,6 +70,17 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
     ]
 )
 
+# event_date/event_hour는 Silver1 디렉터리에서 복원되는 파티션 컬럼이다.
+# event_hour는 저장 직전에 생성되므로 위 논리 행 스키마에는 없고, 두 컬럼 모두
+# 개별 Parquet 파일의 물리 스키마에서는 제외된다.
+PROCESSED_SENSOR_EVENT_FILE_SCHEMA = StructType(
+    [
+        field
+        for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
+        if field.name != "event_date"
+    ]
+)
+
 # event_id/trip_id/event_date는 파싱 실패 시 추출 자체가 안 될 수 있어 nullable,
 # 격리 시각에서 파생한 rejected_date로 파티셔닝
 SENSOR_EVENT_QUARANTINE_SCHEMA = StructType(

@@ -23,13 +23,6 @@ PROCESSED_SENSOR_EVENT_PARTITIONED_SCHEMA = StructType(
         StructField("event_hour", IntegerType(), nullable=False),
     ]
 )
-PROCESSED_SENSOR_EVENT_FILE_SCHEMA = StructType(
-    [
-        field
-        for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
-        if field.name != "event_date"
-    ]
-)
 
 
 @dataclass(frozen=True, slots=True)

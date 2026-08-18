@@ -41,6 +41,7 @@ from batch_jobs.sensor_features.events import (
 from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
 from pyproj import Transformer
 from pyspark.sql import Row, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
     BooleanType,
     DateType,
@@ -1344,8 +1345,12 @@ class TestHourlySegmentFeatureJob:
 
     def write_sensor_events(self, spark, tmp_path, rows: list[tuple]) -> str:
         path = str(tmp_path / "processed_sensor_event")
-        spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA).write.mode("overwrite").parquet(
-            path
+        (
+            spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA)
+            .withColumn("event_hour", F.hour("event_time"))
+            .write.mode("overwrite")
+            .partitionBy("event_date", "event_hour")
+            .parquet(path)
         )
         return path
 
