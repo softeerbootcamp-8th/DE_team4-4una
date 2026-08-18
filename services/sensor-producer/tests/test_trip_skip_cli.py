@@ -15,6 +15,7 @@ def replay_result(skipped: int) -> ReplayResult:
         unique_segments=1,
         rated_samples=3,
         hump_samples=0,
+        profile_trip_counts={"VP_SEDAN_COMPACT": 2 - skipped},
     )
 
 
