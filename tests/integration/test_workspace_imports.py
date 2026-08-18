@@ -11,7 +11,6 @@ import pytest
         "stream_processor",
         "batch_jobs",
         "orchestration",
-        "gold_loader",
         "serving_api",
         "dashboard",
     ],

@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-18
 ---
 
 # Service Map
@@ -16,7 +16,6 @@ and does not by itself settle those boundaries.
 | `services/batch-jobs` | Download, snapshot, validate, and normalize reference data; prepare deterministic TLC sample; run Spark map-matching and monthly score jobs if no separate Spark package is added | NYC/OSM reference sources, HVFHV data, S3 Bronze | Road environment, trip sample, Silver matches, monthly Gold dataset |
 | `services/sensor-producer` | Route trips and replay deterministic synthetic vehicle observations with `trip_seq` in wall-clock time | Road environment, trip sample, vehicle profiles | Kafka dispatch and Bronze-shape sensor events without `segment_id` |
 | `services/stream-processor` | Validate and persist Kafka sensor records without changing their raw meaning | Kafka events, shared contracts | Immutable S3 Bronze `sensor_event` records |
-| `services/gold-loader` | Load a completed monthly gold snapshot into the serving store idempotently | Gold score dataset | Serving records and load audit |
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance | Serving store | HTTP API responses |
 | `services/orchestration` | Coordinate monthly reference jobs, replay runs, score jobs, and publication | Schedules and run configuration | Workflow state and run metadata |
 | `services/dashboard` | Visualize coverage, latest scores, pipeline status, and possibly simulated movement | Serving API and operational metadata | Human-facing views |
@@ -31,10 +30,11 @@ are package resources under
 `services/batch-jobs/src/batch_jobs/resources/`, so they remain available from
 an installed wheel rather than depending on the repository working directory.
 
-The service currently exposes Gold calculation/publication and database
-migration commands even though the target boundary above assigns Gold loading
-to `services/gold-loader`, whose entry point remains a skeleton. OQ-040 records
-the required ownership decision; this document does not resolve it implicitly.
+The service exposes Gold calculation/publication and database migration
+commands. [ADR-0003](../docs/adr/0003-gold-publication-owned-by-batch-jobs.md)
+settles OQ-040 by confirming this is the accepted boundary: `services/batch-jobs`
+owns Gold publication and serving-database migrations, and the former
+`services/gold-loader` skeleton has been removed.
 
 ## Boundary rules
 
@@ -58,5 +58,3 @@ The following boundaries require an explicit decision before implementation:
 - Whether trip sampling belongs to the monthly orchestration workflow or to a
   simulation-specific preparation command.
 - Whether the dashboard is required for the first end-to-end milestone.
-- Whether serving-store migrations and Gold publication remain in `batch-jobs`
-  or move to `gold-loader` (OQ-040).
