@@ -8,7 +8,46 @@ replay scale is real time: one simulated second takes one wall-clock second.
 The motion model is intentionally a data-engineering fixture, not a calibrated
 vehicle-dynamics model. Street Pavement Ratings control the vertical vibration
 amplitude, mapped speed humps add a localized impact and damped response, and the
-selected synthetic vehicle profile scales those responses.
+assigned vehicle profile scales those responses.
+
+## Vehicle assignment
+
+One profile is assigned per trip at dispatch time, in one of two exclusive modes:
+
+```bash
+--vehicle-profile-id 3        # 모든 trip에 한 프로필 고정 (기본값: 1)
+--vehicle-mix nyc-hvfhv-v1    # trip마다 결정론적으로 배정
+```
+
+The mix draw is `sha256("vehicle-mix:{seed}:{trip_id}")` mapped onto cumulative
+shares - deterministic, not random. Adjusting one share moves only the trips near the
+shifted boundary, so two runs stay comparable. `run_summary.json` records the mode,
+mix name, mix version, seed, configured shares, and the realised per-profile trip
+counts.
+
+One `trip_id` always identifies exactly one vehicle. Replaying a trip under several
+profiles is not supported: the Kafka message key and the Silver per-trip feature
+windows both key on `trip_id` alone.
+
+Profile definitions and their response factors live in `vehicle_profile`
+(`context/data/schema-catalog.md`, migration `0005_define_vehicle_profiles.sql`) and
+are mirrored in `domain.py::VEHICLE_PROFILES`.
+
+## Vertical response and damping
+
+`damping` runs opposite to the response factors: it is applied as
+`exp(-distance * damping)`, so a **larger** value settles motion faster. A low value
+means a long-lasting sway, which is why `VP_MPV_LARGE` pairs the smallest vertical
+response with the smallest damping.
+
+Because `damping` would otherwise only matter next to a mapped speed hump (0.34% of
+samples in the checked-in smoke run, against 87% carrying a pavement rating), it also
+drives a low-frequency body-sway component added to pavement roughness, normalised so
+`VP_SEDAN_LARGE` scales it by 1.0. Persistence is approximated as amplitude; these are
+not damping ratios.
+
+`longitudinal_response` is 1.00 for every profile - acceleration and braking are
+treated as driver behaviour, so `accel_x` and `jerk_x` do not vary by profile.
 
 ## Quick start
 
@@ -128,8 +167,10 @@ docker run --rm \
 - `steering_vibration` is a non-negative RMS-like steering-wheel acceleration
   amplitude in m/s². It approximates vibration transferred from vertical road
   motion plus lateral steering activity, fades toward zero at low speed, and is
-  scaled by the synthetic vehicle profile. It is not a calibrated steering
-  column measurement.
+  scaled by the vehicle profile's `steering_vibration_response`. It is not a
+  calibrated steering column measurement.
+- Residual ringing after a speed hump appears only once the vehicle has passed the
+  hump, and decays at a rate set by the profile's `damping`.
 
 The checked-in execution evidence and exact input checksums are in
 [`context/runs/2026-08-10-nyc-sensor-smoke.md`](../../context/runs/2026-08-10-nyc-sensor-smoke.md).

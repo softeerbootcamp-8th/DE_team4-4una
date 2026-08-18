@@ -1,6 +1,7 @@
 """Shared Bronze input samples and helpers for the cleansing tests."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 # 실제 sensor-producer 출력에서 가져온 한 행. 컬럼이 서로 뒤바뀌는 실수가 드러나도록
@@ -29,13 +30,18 @@ VALID_EVENT = {
 
 # 중괄호와 문자열이 닫히지 않은 채 잘린 값
 MALFORMED_VALUE = '{"event_id":"a1b2","trip_seq":1,"event_time":"2024-02-01T05:39'
+BRONZE_TIMESTAMP = datetime(2024, 2, 1, 5, 39, 41, 700000, tzinfo=UTC)
 
 
 def write_bronze_parquet(spark, directory: Path, *values: str) -> Path:
     """stream-processor가 적재하는 형태로 Parquet을 쓴다."""
     path = directory / "bronze"
-    rows = [(value,) for value in values]
-    spark.createDataFrame(rows, "value string").write.parquet(str(path))
+    rows = [(value, BRONZE_TIMESTAMP) for value in values]
+    (
+        spark.createDataFrame(rows, "value string, timestamp timestamp")
+        .write.mode("overwrite")
+        .parquet(str(path))
+    )
     return path
 
 

@@ -1,9 +1,10 @@
 """batch-jobs 4단계 배치 파이프라인을 오케스트레이션하는 시간배치 DAG.
 
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
-scoring 단계를 추가한다. features/publish는 후속 이슈에서 순차 추가한다(#157).
-cleanse >> features >> scoring 실제 의존관계 연결은 features TaskGroup을
-작업 중인 다른 팀원과 조율해야 해서 이번 범위 밖이다.
+scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고
+cleanse >> features >> scoring 의존관계를 연결한다. 이슈 #176: publish 단계를
+추가한다(#157의 마지막 진행). scoring >> publish 의존관계 연결은 이 이슈
+범위 밖이라 아직 연결하지 않는다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -53,7 +54,35 @@ _RUN_CLEANSE_BASH_COMMAND = (
     # 직접 exec하므로, `batch-jobs`(uv venv 안의 엔트리포인트)만 주면 PATH에서
     # 못 찾아 실패한다.
     "uv run --no-sync --package batch-jobs batch-jobs "
-    "cleanse-sensor-events --run-id={{ run_id }}"
+    "cleanse-sensor-events "
+    "--target-hour='{{ data_interval_start.isoformat() }}' "
+    "--run-id='{{ run_id }}'"
+)
+
+# 경로·feature 설정은 HourlySegmentFeatureJobConfig.from_env()가 환경변수에서
+# 읽는다. target_hour/run_id는 Airflow 실행 컨텍스트에서, road snapshot과 feature
+# version은 orchestration 환경의 필수 설정에서 CLI 인자로 전달한다.
+_RUN_FEATURES_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/processed:"
+    "/app/data/processed:ro "
+    "-e HOURLY_SEGMENT_FEATURE_INPUT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_OUTPUT_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "build-hourly-segment-features "
+    "--target-hour='{{ data_interval_start.isoformat() }}' "
+    '--road-snapshot-date="${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE'
+    ':?HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE must be set}" '
+    '--feature-version="${HOURLY_SEGMENT_FEATURE_VERSION'
+    ':?HOURLY_SEGMENT_FEATURE_VERSION must be set}" '
+    "--run-id='{{ run_id }}'"
 )
 
 # run_id 외 나머지 설정은 HourlyComfortJobConfig.from_env()가 환경변수에서 읽는다.
@@ -65,6 +94,24 @@ _RUN_SCORING_BASH_COMMAND = (
     "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
     "uv run --no-sync --package batch-jobs batch-jobs "
     "score-hourly-comfort --run-id={{ run_id }}"
+)
+
+# publish는 local-lake를 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 다른
+# 단계와 달리 쓰기 마운트가 필요 없다. 나머지 설정(SegmentComfortScoreJobConfig)은
+# SEGMENT_COMFORT_SCORE_*(옵션, 기본값 있음)와 POSTGRES_*(필수, 없으면 즉시
+# 실패) 환경변수에서 읽는다. as_of는 `[as_of - window_hours, as_of)` 윈도우의
+# 끝을 의미하므로, 방금 끝난 데이터 구간의 끝인 data_interval_end를 쓴다
+# (features가 처리 대상 구간의 시작인 data_interval_start를 쓰는 것과 대칭).
+_RUN_PUBLISH_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake:ro "
+    "-e SEGMENT_COMFORT_SCORE_DATA_LAKE_URI -e SEGMENT_COMFORT_SCORE_WINDOW_HOURS "
+    "-e SEGMENT_COMFORT_SCORE_CONFIG_PATH "
+    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "load-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
 )
 
 with DAG(
@@ -86,8 +133,23 @@ with DAG(
             bash_command=_RUN_CLEANSE_BASH_COMMAND,
         )
 
+    with TaskGroup(group_id="features") as features:
+        run_features = BashOperator(
+            task_id="run_features",
+            bash_command=_RUN_FEATURES_BASH_COMMAND,
+        )
+
     with TaskGroup(group_id="scoring") as scoring:
         run_scoring = BashOperator(
             task_id="run_scoring",
             bash_command=_RUN_SCORING_BASH_COMMAND,
         )
+
+    with TaskGroup(group_id="publish") as publish:
+        # scoring >> publish 의존관계 연결은 이슈 #176 범위 밖(후속 이슈에서 연결).
+        run_publish = BashOperator(
+            task_id="run_publish",
+            bash_command=_RUN_PUBLISH_BASH_COMMAND,
+        )
+
+    cleanse >> features >> scoring

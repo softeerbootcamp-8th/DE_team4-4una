@@ -10,7 +10,12 @@ from datetime import date
 from itertools import islice
 from pathlib import Path
 
-from sensor_producer.domain import SimulationConfig, TripRecord
+from sensor_producer.domain import (
+    VEHICLE_MIXES,
+    VEHICLE_PROFILES,
+    SimulationConfig,
+    TripRecord,
+)
 from sensor_producer.environment import RoadEnvironment
 from sensor_producer.nyc_data import DEFAULT_HVFHV_URL, fetch_nyc_sample, load_trips
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
@@ -66,7 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--run-id", default="nyc-smoke-v1")
     run_parser.add_argument("--sample-hz", type=int, default=10)
     run_parser.add_argument("--time-scale", type=float, default=1.0)
-    run_parser.add_argument("--vehicle-profile-id", type=int, default=1)
+    # 배정 모드는 배타적이다. 아무것도 주지 않으면 기존과 같이 프로필 1로 고정한다.
+    assignment = run_parser.add_mutually_exclusive_group()
+    assignment.add_argument("--vehicle-profile-id", type=int)
+    assignment.add_argument("--vehicle-mix", choices=sorted(VEHICLE_MIXES))
     run_parser.add_argument("--max-trips", type=int)
     run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
     return parser
@@ -88,11 +96,13 @@ def main(argv: list[str] | None = None) -> None:
     input_dir: Path | None = arguments.input_dir
     environment, sources, environment_summary = resolve_environment(arguments)
     trips, trip_input_summary = resolve_trips(arguments, input_dir)
+    use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,
         sample_hz=arguments.sample_hz,
         time_scale=arguments.time_scale,
-        vehicle_profile_id=arguments.vehicle_profile_id,
+        vehicle_profile_id=None if use_mix else (arguments.vehicle_profile_id or 1),
+        vehicle_mix=arguments.vehicle_mix,
     )
     if arguments.publisher == "kafka":
         publisher = KafkaPublisher(arguments.bootstrap_servers.split(","), arguments.topic)
@@ -112,7 +122,7 @@ def main(argv: list[str] | None = None) -> None:
         "topic": arguments.topic if arguments.publisher == "kafka" else None,
         "sample_hz": config.sample_hz,
         "time_scale": config.time_scale,
-        "vehicle_profile_id": config.vehicle_profile_id,
+        "vehicle_assignment": vehicle_assignment(config, result),
         "max_trip_skip_ratio": arguments.max_trip_skip_ratio,
         "trips_attempted": result.trips_attempted,
         "trips_planned": result.trips_planned,
@@ -214,6 +224,30 @@ def resolve_trips(
 def optional_date_env(name: str) -> date | None:
     value = os.getenv(name)
     return date.fromisoformat(value) if value else None
+
+
+def vehicle_assignment(config: SimulationConfig, result: ReplayResult) -> dict[str, object]:
+    """Record how vehicle profiles were chosen so a run can be reproduced."""
+    if config.vehicle_mix is not None:
+        return {
+            "mode": "mix",
+            "mix_name": config.vehicle_mix,
+            "mix_version": config.vehicle_mix_version,
+            "seed": config.seed,
+            "shares": {
+                VEHICLE_PROFILES[profile_id].profile_name: share
+                for profile_id, share in VEHICLE_MIXES[config.vehicle_mix]
+            },
+            "profile_trip_counts": result.profile_trip_counts,
+        }
+    assert config.vehicle_profile_id is not None
+    profile = VEHICLE_PROFILES[config.vehicle_profile_id]
+    return {
+        "mode": "fixed",
+        "vehicle_profile_id": profile.vehicle_profile_id,
+        "profile_name": profile.profile_name,
+        "profile_trip_counts": result.profile_trip_counts,
+    }
 
 
 def enforce_trip_skip_ratio(result: ReplayResult, maximum: float | None) -> None:

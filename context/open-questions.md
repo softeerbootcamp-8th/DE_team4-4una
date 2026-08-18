@@ -20,7 +20,7 @@ ADR when the choice affects multiple components.
 | OQ-004 | Which database will serve latest scores? | Controls gold loading, indexing, and API implementation | Open |
 | OQ-005 | Which routing engine or algorithm will operate on the canonical segment network? | Prototype uses deterministic Dijkstra routing over directed LION nodes and SegmentIDs | Prototype accepted 2026-08-10 |
 | OQ-006 | What is the comfort-score direction, formula, component weights, and minimum coverage? | The 0-100 range is confirmed; remaining semantics control Gold and API behavior | Proposed 2026-08-15 — see `context/comfort-score.md` (issue #102); still needs formal acceptance |
-| OQ-040 | Which service owns PostgreSQL migrations and Gold score publication? | The target boundary assigns publication to `gold-loader`, but the current migration resources and `load-segment-comfort-score` command are packaged in `batch-jobs`; deployment, permissions, and long-term ownership depend on resolving the mismatch | Open |
+| OQ-040 | Which service owns PostgreSQL migrations and Gold score publication? | Resolved: `services/batch-jobs` owns Gold score publication and serving-database migrations; `services/gold-loader` is removed | Accepted 2026-08-18 — see `docs/adr/0003-gold-publication-owned-by-batch-jobs.md` (issue #175) |
 
 ## Data decisions
 

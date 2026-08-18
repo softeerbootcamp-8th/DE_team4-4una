@@ -16,11 +16,11 @@ and database-migration commands. Its importable modules, default YAML
 configuration, and SQL migrations are packaged under the single `batch_jobs`
 namespace.
 
-The data flow below remains the target architecture. In particular, it assigns
-Gold publication to `services/gold-loader`, while the current command and
-migrations reside in `services/batch-jobs`. OQ-040 tracks that unresolved
-ownership mismatch; the current implementation must not be treated as an
-accepted boundary change.
+The data flow below reflects the target architecture as decided in
+[ADR-0003](../docs/adr/0003-gold-publication-owned-by-batch-jobs.md): Gold
+score publication and serving-database migrations remain owned by
+`services/batch-jobs`. `services/gold-loader` has been removed; it no longer
+exists as a workspace member.
 
 ## Target local-first flow
 
@@ -46,8 +46,7 @@ flowchart LR
     RS --> S
     S --> GO[(Gold comfort scores)]
 
-    GO --> GL[gold-loader]
-    GL --> DB[(Serving store)]
+    GO --> DB[(Serving store)]
     DB --> API[serving-api]
     API --> D[dashboard / clients]
 

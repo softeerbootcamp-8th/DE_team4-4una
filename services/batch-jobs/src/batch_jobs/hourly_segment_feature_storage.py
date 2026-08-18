@@ -15,7 +15,7 @@ from batch_jobs.sensor_features.aggregation import validate_hourly_segment_featu
 
 _STAGING_DIRNAME = "_staging"
 _BACKUP_SUFFIX = ".bak"
-_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.:+-]+$")
 
 
 @dataclass(frozen=True, slots=True)

@@ -54,6 +54,44 @@ VEHICLE_PROFILES: dict[int, VehicleProfile] = {
     5: VehicleProfile(5, "VP_MPV_LARGE", 0.96, 0.61, 1.00, 1.10, 0.98),
 }
 
+# 차체 흔들림 항을 정규화하는 기준 차량. 세 반응계수가 모두 1.00인 프로필이다.
+BASELINE_DAMPING = VEHICLE_PROFILES[2].damping
+
+# 배정 비율 세트의 버전. 비율이 바뀌면 함께 올려 run_summary에 남긴다.
+VEHICLE_MIX_VERSION = "v1-heuristic"
+
+# trip별 차종 배정 비율. 세단 우위와 MPV 희소를 표현한 가정치이며 실측 분포가 아니다.
+VEHICLE_MIXES: dict[str, tuple[tuple[int, float], ...]] = {
+    "nyc-hvfhv-v1": (
+        (1, 0.42),  # VP_SEDAN_COMPACT
+        (2, 0.12),  # VP_SEDAN_LARGE
+        (3, 0.26),  # VP_SUV_COMPACT
+        (4, 0.16),  # VP_SUV_LARGE
+        (5, 0.04),  # VP_MPV_LARGE
+    ),
+}
+
+
+def _validate_vehicle_mixes() -> None:
+    """CDF 순서가 dict 작성 순서에 좌우되지 않도록 id 오름차순까지 함께 검증한다."""
+    for name, shares in VEHICLE_MIXES.items():
+        if not shares:
+            raise ValueError(f"vehicle mix {name} must not be empty")
+        profile_ids = [profile_id for profile_id, _ in shares]
+        if profile_ids != sorted(profile_ids):
+            raise ValueError(f"vehicle mix {name} must be ordered by vehicle_profile_id")
+        if len(set(profile_ids)) != len(profile_ids):
+            raise ValueError(f"vehicle mix {name} repeats a vehicle_profile_id")
+        if unknown := [value for value in profile_ids if value not in VEHICLE_PROFILES]:
+            raise ValueError(f"vehicle mix {name} references unknown profiles: {unknown}")
+        if any(share <= 0 for _, share in shares):
+            raise ValueError(f"vehicle mix {name} shares must be positive")
+        if abs(sum(share for _, share in shares) - 1.0) > 1e-9:
+            raise ValueError(f"vehicle mix {name} shares must sum to 1")
+
+
+_validate_vehicle_mixes()
+
 
 @dataclass(slots=True)
 class RoadSegment:
@@ -101,10 +139,14 @@ class SimulationConfig:
     sample_hz: int = 10
     time_scale: float = 1.0
     seed: int = 4
-    vehicle_profile_id: int = 1
+    # 배정 모드는 배타적이다. vehicle_profile_id는 모든 trip에 한 프로필을 고정하고,
+    # vehicle_mix는 trip마다 결정론적으로 프로필을 뽑는다.
+    vehicle_profile_id: int | None = 1
+    vehicle_mix: str | None = None
     pavement_model_version: str = "pavement-v1"
     hump_model_version: str = "hump-v1"
     motion_model_version: str = "motion-v1"
+    vehicle_mix_version: str = VEHICLE_MIX_VERSION
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -113,8 +155,15 @@ class SimulationConfig:
             raise ValueError("sample_hz must be in [1, 100]")
         if self.time_scale < 0:
             raise ValueError("time_scale must be non-negative")
-        if self.vehicle_profile_id not in VEHICLE_PROFILES:
+        if (self.vehicle_profile_id is None) == (self.vehicle_mix is None):
+            raise ValueError("set exactly one of vehicle_profile_id and vehicle_mix")
+        if (
+            self.vehicle_profile_id is not None
+            and self.vehicle_profile_id not in VEHICLE_PROFILES
+        ):
             raise ValueError("unknown vehicle_profile_id")
+        if self.vehicle_mix is not None and self.vehicle_mix not in VEHICLE_MIXES:
+            raise ValueError("unknown vehicle_mix")
 
     @property
     def interval_seconds(self) -> float:
