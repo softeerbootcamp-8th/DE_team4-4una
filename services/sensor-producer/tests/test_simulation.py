@@ -9,20 +9,27 @@ from sensor_producer.domain import (
     SimulationConfig,
     TripRecord,
 )
+from sensor_producer.errors import TripInfeasibleError, TripSkipReason
 from sensor_producer.publisher import MemoryPublisher
 from sensor_producer.simulation import MotionSimulator, ReplayCoordinator, SpeedProfile
 from shapely.geometry import LineString
 
 
-def trip(duration_seconds: int = 2) -> TripRecord:
+def trip(
+    duration_seconds: int = 2,
+    *,
+    trip_id: str = "trip-1",
+    pu_location_id: int = 181,
+    do_location_id: int = 181,
+) -> TripRecord:
     pickup = datetime(2024, 2, 1, 10, 5, tzinfo=UTC)
     return TripRecord(
-        trip_id="trip-1",
+        trip_id=trip_id,
         request_datetime=pickup - timedelta(minutes=5),
         pickup_datetime=pickup,
         dropoff_datetime=pickup + timedelta(seconds=duration_seconds),
-        pu_location_id=181,
-        do_location_id=181,
+        pu_location_id=pu_location_id,
+        do_location_id=do_location_id,
         trip_miles=0.1,
     )
 
@@ -315,3 +322,130 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
     ]
     assert [event.event_time for event in publisher.events] == clock.times[1:]
     assert result.events_published == 3
+
+
+def test_replay_skips_infeasible_trip_and_continues(caplog) -> None:
+    class SelectiveRouter:
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            if trip_id == "trip-bad":
+                raise TripInfeasibleError(
+                    TripSkipReason.NO_DIRECTED_ROUTE,
+                    "test route is disconnected",
+                )
+            return route(8.0, length_m=10.0)
+
+    publisher = MemoryPublisher()
+    coordinator = ReplayCoordinator(
+        SelectiveRouter(),  # type: ignore[arg-type]
+        {181: object()},
+        publisher,
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    result = coordinator.replay(
+        [trip(trip_id="trip-bad"), trip(trip_id="trip-good")]
+    )
+
+    assert {event.trip_id for event in publisher.events} == {"trip-good"}
+    assert result.trips_attempted == 2
+    assert result.trips_planned == 1
+    assert result.trips_skipped == 1
+    assert result.trip_skip_ratio == 0.5
+    assert result.skip_reason_counts == {"NO_DIRECTED_ROUTE": 1}
+    assert "trip_id=trip-bad" in caplog.text
+    assert "reason=NO_DIRECTED_ROUTE" in caplog.text
+
+
+def test_replay_aggregates_missing_zone_reason() -> None:
+    class RecordingRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            self.calls += 1
+            return route(8.0, length_m=10.0)
+
+    router = RecordingRouter()
+    coordinator = ReplayCoordinator(
+        router,  # type: ignore[arg-type]
+        {181: object()},
+        MemoryPublisher(),
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    result = coordinator.replay(
+        [trip(trip_id="trip-missing", pu_location_id=999), trip(trip_id="trip-valid")]
+    )
+
+    assert router.calls == 1
+    assert result.skip_reason_counts == {"PICKUP_ZONE_NOT_FOUND": 1}
+
+
+def test_replay_skips_infeasible_speed_profile() -> None:
+    class LongRouteRouter:
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            return route(8.0, length_m=100.0)
+
+    publisher = MemoryPublisher()
+    coordinator = ReplayCoordinator(
+        LongRouteRouter(),  # type: ignore[arg-type]
+        {181: object()},
+        publisher,
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    result = coordinator.replay([trip(duration_seconds=2)])
+
+    assert publisher.events == []
+    assert result.skip_reason_counts == {"SPEED_PROFILE_INFEASIBLE": 1}
+
+
+def test_replay_does_not_hide_publisher_failure() -> None:
+    class RecordingRouter:
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            return route(8.0, length_m=10.0)
+
+    class FailingPublisher:
+        def publish(self, event: object) -> None:
+            raise RuntimeError("Kafka unavailable")
+
+        def flush(self) -> None:
+            return
+
+    coordinator = ReplayCoordinator(
+        RecordingRouter(),  # type: ignore[arg-type]
+        {181: object()},
+        FailingPublisher(),  # type: ignore[arg-type]
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    with pytest.raises(RuntimeError, match="Kafka unavailable"):
+        coordinator.replay([trip()])

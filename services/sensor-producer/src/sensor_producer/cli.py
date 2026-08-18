@@ -13,7 +13,14 @@ from sensor_producer.environment import RoadEnvironment
 from sensor_producer.nyc_data import DEFAULT_HVFHV_URL, fetch_nyc_sample, load_trips
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
-from sensor_producer.simulation import ReplayCoordinator
+from sensor_producer.simulation import ReplayCoordinator, ReplayResult
+
+
+def ratio(value: str) -> float:
+    parsed = float(value)
+    if not 0 <= parsed <= 1:
+        raise argparse.ArgumentTypeError("ratio must be between 0 and 1")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--time-scale", type=float, default=1.0)
     run_parser.add_argument("--vehicle-profile-id", type=int, default=1)
     run_parser.add_argument("--max-trips", type=int)
+    run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
     return parser
 
 
@@ -90,7 +98,12 @@ def main(argv: list[str] | None = None) -> None:
         "sample_hz": config.sample_hz,
         "time_scale": config.time_scale,
         "vehicle_profile_id": config.vehicle_profile_id,
+        "max_trip_skip_ratio": arguments.max_trip_skip_ratio,
+        "trips_attempted": result.trips_attempted,
         "trips_planned": result.trips_planned,
+        "trips_skipped": result.trips_skipped,
+        "trip_skip_ratio": result.trip_skip_ratio,
+        "trip_skip_reasons": result.skip_reason_counts,
         "events_published": result.events_published,
         "unique_segments": result.unique_segments,
         "rated_samples": result.rated_samples,
@@ -99,3 +112,11 @@ def main(argv: list[str] | None = None) -> None:
     }
     (input_dir / "run_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, indent=2, sort_keys=True))
+    enforce_trip_skip_ratio(result, arguments.max_trip_skip_ratio)
+
+
+def enforce_trip_skip_ratio(result: ReplayResult, maximum: float | None) -> None:
+    if maximum is not None and result.trip_skip_ratio > maximum:
+        raise SystemExit(
+            f"trip skip ratio {result.trip_skip_ratio:.3f} exceeds maximum {maximum:.3f}"
+        )

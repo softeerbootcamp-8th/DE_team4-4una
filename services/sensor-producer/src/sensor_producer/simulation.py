@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import logging
 import math
 import time
 import uuid
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from sensor_producer.domain import (
     TripRecord,
     VehicleProfile,
 )
+from sensor_producer.errors import TripInfeasibleError, TripSkipReason
 from sensor_producer.geo import point_and_heading
 from sensor_producer.publisher import EventPublisher
 from sensor_producer.routing import METERS_PER_MILE, RoadRouter
@@ -34,15 +37,25 @@ REPRESENTATIVE_WHEELBASE_M = 2.8
 MIN_STEERING_SPEED_MPS = 0.5
 MAX_STEERING_ANGLE_DEG = 35.0
 STEERING_ANGLE_DEADBAND_DEG = 0.05
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
 class ReplayResult:
+    trips_attempted: int
     trips_planned: int
+    trips_skipped: int
+    skip_reason_counts: dict[str, int]
     events_published: int
     unique_segments: int
     rated_samples: int
     hump_samples: int
+
+    @property
+    def trip_skip_ratio(self) -> float:
+        if self.trips_attempted == 0:
+            return 0.0
+        return self.trips_skipped / self.trips_attempted
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,8 +111,9 @@ class SpeedProfile:
             length / limit
             for length, limit in zip(leg_lengths_m, leg_speed_limits_mps, strict=True)
         ) > cruise_seconds:
-            raise ValueError(
-                "route cannot be completed within TLC duration and posted speed limit"
+            raise TripInfeasibleError(
+                TripSkipReason.SPEED_PROFILE_INFEASIBLE,
+                "route cannot be completed within TLC duration and posted speed limit",
             )
 
         lower_speed = 0.0
@@ -330,6 +344,8 @@ class ReplayCoordinator:
             counter += 1
 
         trips_planned = 0
+        trips_attempted = 0
+        skip_reasons: Counter[TripSkipReason] = Counter()
         events_published = 0
         segments: set[str] = set()
         rated_samples = 0
@@ -342,17 +358,48 @@ class ReplayCoordinator:
             if action == "dispatch":
                 trip = value
                 assert isinstance(trip, TripRecord)
-                route = self.router.plan_for_zones(
-                    trip.trip_id,
-                    trip.request_datetime,
-                    self.taxi_zones[trip.pu_location_id],
-                    self.taxi_zones[trip.do_location_id],
-                    target_distance_m=trip.trip_miles * METERS_PER_MILE,
-                )
+                trips_attempted += 1
+                try:
+                    pickup_zone = self._taxi_zone(
+                        trip.pu_location_id,
+                        TripSkipReason.PICKUP_ZONE_NOT_FOUND,
+                    )
+                    dropoff_zone = self._taxi_zone(
+                        trip.do_location_id,
+                        TripSkipReason.DROPOFF_ZONE_NOT_FOUND,
+                    )
+                    route = self.router.plan_for_zones(
+                        trip.trip_id,
+                        trip.request_datetime,
+                        pickup_zone,
+                        dropoff_zone,
+                        target_distance_m=trip.trip_miles * METERS_PER_MILE,
+                    )
+                    event_iterator = self.simulator.generate(
+                        trip, route, profile, self.config
+                    )
+                    # 첫 샘플 생성 시 속도 프로파일까지 검증한다
+                    first_event = next(event_iterator)
+                except TripInfeasibleError as error:
+                    skip_reasons[error.reason] += 1
+                    logger.warning(
+                        "trip skipped trip_id=%s reason=%s detail=%s",
+                        trip.trip_id,
+                        error.reason,
+                        error,
+                    )
+                    continue
+                except StopIteration:
+                    reason = TripSkipReason.EMPTY_SENSOR_STREAM
+                    skip_reasons[reason] += 1
+                    logger.warning(
+                        "trip skipped trip_id=%s reason=%s detail=no sensor samples",
+                        trip.trip_id,
+                        reason,
+                    )
+                    continue
                 trips_planned += 1
                 segments.update(route.segment_ids)
-                event_iterator = self.simulator.generate(trip, route, profile, self.config)
-                first_event = next(event_iterator)
                 heapq.heappush(
                     queue,
                     (
@@ -399,12 +446,27 @@ class ReplayCoordinator:
 
         self.publisher.flush()
         return ReplayResult(
+            trips_attempted=trips_attempted,
             trips_planned=trips_planned,
+            trips_skipped=sum(skip_reasons.values()),
+            skip_reason_counts={
+                reason.value: count
+                for reason, count in sorted(skip_reasons.items(), key=lambda item: item[0].value)
+            },
             events_published=events_published,
             unique_segments=len(segments),
             rated_samples=rated_samples,
             hump_samples=hump_samples,
         )
+
+    def _taxi_zone(self, location_id: int, reason: TripSkipReason) -> object:
+        try:
+            return self.taxi_zones[location_id]
+        except KeyError as error:
+            raise TripInfeasibleError(
+                reason,
+                f"taxi zone {location_id} is not present in the environment",
+            ) from error
 
 
 def distance_for_event(
