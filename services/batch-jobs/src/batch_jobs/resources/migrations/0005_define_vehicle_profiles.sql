@@ -20,8 +20,10 @@ ALTER TABLE vehicle_profile
     ADD COLUMN longitudinal_response_factor DOUBLE PRECISION,
     ADD COLUMN lateral_response_factor DOUBLE PRECISION,
     ADD COLUMN damping_factor DOUBLE PRECISION,
-    ADD COLUMN steering_vibration_factor DOUBLE PRECISION,
-    ADD COLUMN profile_version TEXT;
+    ADD COLUMN steering_vibration_factor DOUBLE PRECISION;
+
+ALTER TABLE vehicle_profile
+    ADD CONSTRAINT uq_vehicle_profile_name UNIQUE (profile_name);
 
 -- sentinel(0)은 차량 구분 없는 집계용이라 반응계수를 중립값(1.0)으로 채운다.
 UPDATE vehicle_profile
@@ -30,8 +32,7 @@ SET size_class = 'ALL',
     longitudinal_response_factor = 1.0,
     lateral_response_factor = 1.0,
     damping_factor = 1.0,
-    steering_vibration_factor = 1.0,
-    profile_version = 'v1-heuristic'
+    steering_vibration_factor = 1.0
 WHERE vehicle_profile_id = 0;
 
 -- sensor_producer.domain.VEHICLE_PROFILES와 동일한 값이어야 한다(같은 5개
@@ -40,13 +41,13 @@ INSERT INTO vehicle_profile (
     vehicle_profile_id, profile_name, body_type, size_class,
     vertical_response_factor, longitudinal_response_factor,
     lateral_response_factor, damping_factor, steering_vibration_factor,
-    profile_version, is_active, created_at, updated_at
+    is_active, created_at, updated_at
 ) VALUES
-    (1, 'VP_SEDAN_COMPACT', 'SEDAN', 'COMPACT', 1.05, 1.00, 1.00, 0.68, 1.03, 'v1-heuristic', TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
-    (2, 'VP_SEDAN_LARGE',   'SEDAN', 'LARGE',   1.00, 1.00, 1.00, 0.77, 1.00, 'v1-heuristic', TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
-    (3, 'VP_SUV_COMPACT',   'SUV',   'COMPACT', 1.08, 1.00, 1.06, 0.70, 1.04, 'v1-heuristic', TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
-    (4, 'VP_SUV_LARGE',     'SUV',   'LARGE',   1.01, 1.00, 1.08, 0.66, 1.00, 'v1-heuristic', TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
-    (5, 'VP_MPV_LARGE',     'MPV',   'LARGE',   0.96, 1.00, 1.10, 0.61, 0.98, 'v1-heuristic', TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z')
+    (1, 'VP_SEDAN_COMPACT', 'SEDAN', 'COMPACT', 1.05, 1.00, 1.00, 0.68, 1.03, TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
+    (2, 'VP_SEDAN_LARGE',   'SEDAN', 'LARGE',   1.00, 1.00, 1.00, 0.77, 1.00, TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
+    (3, 'VP_SUV_COMPACT',   'SUV',   'COMPACT', 1.08, 1.00, 1.06, 0.70, 1.04, TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
+    (4, 'VP_SUV_LARGE',     'SUV',   'LARGE',   1.01, 1.00, 1.08, 0.66, 1.00, TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'),
+    (5, 'VP_MPV_LARGE',     'MPV',   'LARGE',   0.96, 1.00, 1.10, 0.61, 0.98, TRUE, '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z')
 -- 옛 genesis/grandeur 등 모델 값이 남아있는 기존 행도 새 분류로 덮어써야 한다.
 ON CONFLICT (vehicle_profile_id) DO UPDATE SET
     profile_name = EXCLUDED.profile_name,
@@ -57,19 +58,14 @@ ON CONFLICT (vehicle_profile_id) DO UPDATE SET
     lateral_response_factor = EXCLUDED.lateral_response_factor,
     damping_factor = EXCLUDED.damping_factor,
     steering_vibration_factor = EXCLUDED.steering_vibration_factor,
-    profile_version = EXCLUDED.profile_version,
     is_active = EXCLUDED.is_active,
     updated_at = EXCLUDED.updated_at;
 
--- 모든 행이 값을 갖게 됐으니 이제 필수로 만들고, (profile_name, profile_version) 유일성을 보장한다.
+-- 모든 행이 값을 갖게 됐으니 이제 필수로 만든다.
 ALTER TABLE vehicle_profile
     ALTER COLUMN size_class SET NOT NULL,
     ALTER COLUMN vertical_response_factor SET NOT NULL,
     ALTER COLUMN longitudinal_response_factor SET NOT NULL,
     ALTER COLUMN lateral_response_factor SET NOT NULL,
     ALTER COLUMN damping_factor SET NOT NULL,
-    ALTER COLUMN steering_vibration_factor SET NOT NULL,
-    ALTER COLUMN profile_version SET NOT NULL;
-
-ALTER TABLE vehicle_profile
-    ADD CONSTRAINT uq_vehicle_profile_name_version UNIQUE (profile_name, profile_version);
+    ALTER COLUMN steering_vibration_factor SET NOT NULL;

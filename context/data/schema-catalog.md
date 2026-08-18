@@ -174,7 +174,7 @@ runtime read from Postgres; see `OQ-028`).
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Vehicle profile ID | `vehicle_profile_id` | INTEGER | N | PK | Unique vehicle profile identifier |
-| Profile name | `profile_name` | STRING | N | UK* | For example `VP_SEDAN_COMPACT` |
+| Profile name | `profile_name` | STRING | N | UK | For example `VP_SEDAN_COMPACT` |
 | Body type | `body_type` | STRING | N |  | `SEDAN`, `SUV`, `MPV`, or `ALL` for the sentinel |
 | Size class | `size_class` | STRING | N |  | `COMPACT`, `LARGE`, or `ALL` for the sentinel |
 | Vertical response factor | `vertical_response_factor` | DOUBLE | N |  | Multiplier on vertical shock/acceleration response; mirrors `VehicleProfile.vertical_response` |
@@ -182,13 +182,9 @@ runtime read from Postgres; see `OQ-028`).
 | Lateral response factor | `lateral_response_factor` | DOUBLE | N |  | Multiplier on cornering/lateral response; mirrors `VehicleProfile.lateral_response` |
 | Damping factor | `damping_factor` | DOUBLE | N |  | How quickly post-shock vibration decays; mirrors `VehicleProfile.damping` |
 | Steering vibration factor | `steering_vibration_factor` | DOUBLE | N |  | Multiplier on vibration transmitted to the steering wheel; mirrors `VehicleProfile.steering_vibration_response` |
-| Profile version | `profile_version` | STRING | N | UK* | For example `v1-heuristic` |
 | Active flag | `is_active` | BOOLEAN | N |  | Whether the profile is currently in use |
 | Created time | `created_at` | TIMESTAMPTZ | N |  | Profile creation time |
 | Updated time | `updated_at` | TIMESTAMPTZ | N |  | Last modification time |
-
-\* `UNIQUE(profile_name, profile_version)` is a composite constraint, not two
-independent single-column ones.
 
 ## `sensor_event`
 
