@@ -1823,13 +1823,33 @@ class TestHourlySegmentFeatureStorage:
         assert [row["segment_id"] for row in rows] == ["ORIGINAL"]
         self.assert_staging_is_empty(output_root)
 
-    @pytest.mark.parametrize("unsafe_run_id", ["../escape", "a/b", "", "run id"])
+    @pytest.mark.parametrize(
+        "unsafe_run_id",
+        ["../escape", "a/b", "", "run id", "../../danger", "abc/def", "abc\\def"],
+    )
     def test_rejects_unsafe_run_id(self, spark, tmp_path, unsafe_run_id: str) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
         df = self.feature_rows_df(spark, [self.feature_row()])
 
         with pytest.raises(ValueError, match="run_id"):
             write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, unsafe_run_id)
+
+    @pytest.mark.parametrize(
+        "run_id",
+        [
+            "manual__2026-08-18T07:00:00+00:00",
+            "scheduled__2026-08-18T07:00:00+00:00",
+        ],
+    )
+    def test_accepts_airflow_style_run_ids(self, spark, tmp_path, run_id: str) -> None:
+        # Airflow의 기본 run_id 형식(manual__/scheduled__ + ISO8601 timestamp)은
+        # ':'와 '+'를 포함한다 — 이 값을 그대로 run_id로 받아도 안전하게 써져야 한다.
+        output_root = str(tmp_path / "hourly_segment_features")
+        df = self.feature_rows_df(spark, [self.feature_row()])
+
+        result = write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, run_id)
+
+        assert result.row_count == 1
 
     def test_recovers_from_a_stale_backup_before_writing(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
