@@ -13,7 +13,6 @@ members = [
     "dashboard",
     "de4",
     "de4-core",
-    "gold-loader",
     "orchestration",
     "sensor-producer",
     "serving-api",
@@ -743,17 +742,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/39/a9/0478b74a33aea6682
 wheels = [
     { url = "https://files.pythonhosted.org/packages/59/a8/bd530cc264e62ddbc1d1bb7225823992e6f2432c664693e9281bb6b9c359/geopandas-1.1.4-py3-none-any.whl", hash = "sha256:1a0c459cbdb1537cd154dafe6174be20d1760844b7f1c967dc8520b180f2e773", size = 343292, upload-time = "2026-06-26T17:23:53.112Z" },
 ]
-
-[[package]]
-name = "gold-loader"
-version = "0.1.0"
-source = { editable = "services/gold-loader" }
-dependencies = [
-    { name = "de4-core" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "de4-core", editable = "libs/de4-core" }]
 
 [[package]]
 name = "googleapis-common-protos"
