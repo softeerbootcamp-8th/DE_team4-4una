@@ -44,7 +44,15 @@ uv run --package sensor-producer sensor-producer run \
 
 Use `--time-scale 0` to remove waits during automated smoke tests. Use
 `--publisher jsonl --output <path>` to inspect the exact Kafka value payload
-without a broker.
+without a broker. Known trip-level feasibility failures are skipped so another
+trip can continue. The warning log includes `trip_id` and a bounded reason code,
+and `run_summary.json` includes attempted, planned, and skipped trip counts plus
+the per-reason totals.
+
+Set `--max-trip-skip-ratio <0..1>` when a run should exit unsuccessfully after
+the replay if its skipped-trip ratio is too high. The option is disabled by
+default. The producer still flushes published events and writes the run summary
+before enforcing the threshold.
 
 ## Timing and delivery contracts
 

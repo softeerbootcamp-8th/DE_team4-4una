@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from batch_jobs.comfort_score.gold_writer import (
+    _MERGE_SQL,
     EXPECTED_STAGING_COLUMNS,
     _acquire_lock,
     _merge,
@@ -105,3 +106,17 @@ def test_merge_returns_inserted_and_updated_counts():
 
     assert (inserted, updated) == (7, 3)
     assert "ON CONFLICT" in cursor.executed[-1]
+
+
+def test_expected_staging_columns_include_data_period_bounds():
+    assert EXPECTED_STAGING_COLUMNS["data_period_start"] == "timestamp with time zone"
+    assert EXPECTED_STAGING_COLUMNS["data_period_end"] == "timestamp with time zone"
+
+
+def test_merge_sql_carries_data_period_bounds_through_insert_and_update():
+    # PK(segment_id, vehicle_profile_id)는 그대로 두되, 기간 컬럼은 매 rerun마다
+    # 갱신돼야 한다 — 그렇지 않으면 창이 옮겨가도 예전 값이 그대로 남는다.
+    assert "data_period_start" in _MERGE_SQL
+    assert "data_period_end" in _MERGE_SQL
+    assert "data_period_start = EXCLUDED.data_period_start" in _MERGE_SQL
+    assert "data_period_end = EXCLUDED.data_period_end" in _MERGE_SQL

@@ -26,6 +26,8 @@ TARGET_TABLE = "segment_comfort_score"
 EXPECTED_STAGING_COLUMNS = {
     "segment_id": "text",
     "vehicle_profile_id": "integer",
+    "data_period_start": "timestamp with time zone",
+    "data_period_end": "timestamp with time zone",
     "comfort_score": "double precision",
     "confidence_score": "double precision",
     "sample_count": "bigint",
@@ -36,12 +38,14 @@ EXPECTED_STAGING_COLUMNS = {
 _MERGE_SQL = f"""
 WITH upserted AS (
     INSERT INTO {TARGET_TABLE}
-      (segment_id, vehicle_profile_id, comfort_score, confidence_score,
-       sample_count, score_version, calculated_at)
-    SELECT segment_id, vehicle_profile_id, comfort_score, confidence_score,
-           sample_count, score_version, calculated_at
+      (segment_id, vehicle_profile_id, data_period_start, data_period_end,
+       comfort_score, confidence_score, sample_count, score_version, calculated_at)
+    SELECT segment_id, vehicle_profile_id, data_period_start, data_period_end,
+           comfort_score, confidence_score, sample_count, score_version, calculated_at
     FROM {STAGING_TABLE}
     ON CONFLICT (segment_id, vehicle_profile_id) DO UPDATE SET
+      data_period_start = EXCLUDED.data_period_start,
+      data_period_end = EXCLUDED.data_period_end,
       comfort_score = EXCLUDED.comfort_score,
       confidence_score = EXCLUDED.confidence_score,
       sample_count = EXCLUDED.sample_count,

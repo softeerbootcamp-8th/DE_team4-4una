@@ -11,6 +11,7 @@ from datetime import datetime
 from shapely.geometry import Point
 
 from sensor_producer.domain import RoadSegment, RouteLeg, RoutePlan
+from sensor_producer.errors import TripInfeasibleError, TripSkipReason
 from sensor_producer.geo import reversed_line
 
 METERS_PER_MILE = 1609.344
@@ -58,8 +59,16 @@ class RoadRouter:
             raise ValueError("target route distance must be positive")
         pickup_nodes = self._nodes_inside(pickup_zone)
         dropoff_nodes = self._nodes_inside(dropoff_zone)
-        if not pickup_nodes or not dropoff_nodes:
-            raise ValueError("taxi zone has no routable LION nodes in the downloaded environment")
+        if not pickup_nodes:
+            raise TripInfeasibleError(
+                TripSkipReason.PICKUP_ZONE_NO_ROUTABLE_NODES,
+                "pickup taxi zone has no routable LION nodes",
+            )
+        if not dropoff_nodes:
+            raise TripInfeasibleError(
+                TripSkipReason.DROPOFF_ZONE_NO_ROUTABLE_NODES,
+                "drop-off taxi zone has no routable LION nodes",
+            )
 
         seed = int.from_bytes(hashlib.sha256(trip_id.encode()).digest()[:8], "big")
         pickup_offset = seed % len(pickup_nodes)
@@ -90,7 +99,10 @@ class RoadRouter:
         if best is not None:
             _, start_node, end_node, edges = best
             return self._to_plan(trip_id, planned_at, start_node, end_node, edges)
-        raise ValueError("no directed LION route found between deterministic zone points")
+        raise TripInfeasibleError(
+            TripSkipReason.NO_DIRECTED_ROUTE,
+            "no directed LION route found between deterministic zone points",
+        )
 
     def shortest_path(self, start_node: str, end_node: str) -> tuple[GraphEdge, ...]:
         queue: list[tuple[float, str]] = [(0.0, start_node)]

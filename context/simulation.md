@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-18
 ---
 
 # Deterministic Trip Simulation
@@ -158,6 +158,15 @@ it as a deterministic UUID string derived from run, trip, vehicle profile, and
 sequence. `(trip_id, trip_seq)` remains the ordering and replay key when each trip
 has one assigned profile; multi-profile trip identity is still open.
 
-Trips without valid endpoints or routes should be written to a rejection dataset
-with a reason code. They should not disappear silently or receive fabricated
-cross-zone straight-line routes.
+Known trip-level feasibility failures do not abort the complete replay. Missing
+taxi zones, zones without routable LION nodes, disconnected directed routes,
+infeasible speed profiles, and empty sensor streams are logged with `trip_id`
+and a bounded reason code. The run summary records attempted, planned, and
+skipped trips, the skip ratio, and counts by reason. An optional maximum skip
+ratio fails the command only after completed events are flushed and the summary
+is written. Kafka publishing failures and unexpected exceptions still abort the
+run.
+
+Persisting each skipped trip as a row-level rejection dataset remains a target,
+not current repository behavior. Skipped trips must not disappear silently or
+receive fabricated cross-zone straight-line routes.

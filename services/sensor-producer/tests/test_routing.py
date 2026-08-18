@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 
+import pytest
 from sensor_producer.domain import RoadSegment
+from sensor_producer.errors import TripInfeasibleError, TripSkipReason
 from sensor_producer.routing import RoadRouter
 from shapely.geometry import LineString, box
 
@@ -76,3 +78,19 @@ def test_router_selects_route_close_to_tlc_distance() -> None:
     )
 
     assert plan.total_length_m == 200.0
+
+
+def test_router_reports_zone_without_routable_nodes() -> None:
+    router = RoadRouter(
+        [segment("s1", "n1", "n2", "T", [(-74.0, 40.0), (-73.999, 40.0)])]
+    )
+
+    with pytest.raises(TripInfeasibleError) as captured:
+        router.plan_for_zones(
+            "trip-1",
+            datetime(2024, 2, 1, 10, tzinfo=UTC),
+            box(-73.0, 41.0, -72.9, 41.1),
+            box(-74.001, 39.999, -73.998, 40.001),
+        )
+
+    assert captured.value.reason == TripSkipReason.PICKUP_ZONE_NO_ROUTABLE_NODES

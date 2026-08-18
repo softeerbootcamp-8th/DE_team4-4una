@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from batch_jobs.comfort_score.config import ComfortScoreConfig
@@ -34,8 +34,8 @@ TEST_CONFIG = ComfortScoreConfig(
 
 HOURLY_SCHEMA = (
     "segment_id string, vehicle_profile_id int, data_period_start timestamp, "
-    "vertical_score double, longitudinal_score double, lateral_score double, "
-    "trip_count long, sample_count long"
+    "data_period_end timestamp, vertical_score double, longitudinal_score double, "
+    "lateral_score double, trip_count long, sample_count long"
 )
 
 
@@ -56,16 +56,21 @@ def hour(
     segment_id: str = "seg-1",
     vehicle_profile_id: int = 1,
     data_period_start: datetime = datetime(2026, 8, 1, 0, 0, 0),  # noqa: DTZ001
+    data_period_end: datetime | None = None,
     vertical_score: float = 0.0,
     longitudinal_score: float = 0.0,
     lateral_score: float = 0.0,
     trip_count: int = 10,
     sample_count: int = 0,
 ) -> tuple:
+    # 기본값은 호출부에서 매번 안 넘겨도 되게 data_period_start + 1시간으로 맞춘다.
+    if data_period_end is None:
+        data_period_end = data_period_start + timedelta(hours=1)
     return (
         segment_id,
         vehicle_profile_id,
         data_period_start,
+        data_period_end,
         vertical_score,
         longitudinal_score,
         lateral_score,
@@ -131,6 +136,23 @@ def test_shrinks_toward_the_population_mean_across_segments(spark):
     assert rows[("seg-y", 1)].comfort_score == pytest.approx((1 * 0 + 4 * 30) / 5)
 
 
+def test_rolls_up_data_period_bounds_across_qualifying_hours(spark):
+    df = hourly_df(
+        spark,
+        hour(data_period_start=datetime(2026, 8, 1, 3, 0, 0), trip_count=10),  # noqa: DTZ001
+        hour(data_period_start=datetime(2026, 8, 1, 5, 0, 0), trip_count=10),  # noqa: DTZ001
+        # T_min 미달이라 qualify하지 않는 시간 — MIN/MAX 계산에서 제외돼야 한다.
+        hour(data_period_start=datetime(2026, 8, 1, 0, 0, 0), trip_count=2),  # noqa: DTZ001
+        hour(data_period_start=datetime(2026, 8, 1, 9, 0, 0), trip_count=2),  # noqa: DTZ001
+    )
+
+    result = compute_segment_comfort_scores(df, TEST_CONFIG)
+
+    row = per_vehicle_rows(result)[("seg-1", 1)]
+    assert row.data_period_start == datetime(2026, 8, 1, 3, 0, 0)  # noqa: DTZ001
+    assert row.data_period_end == datetime(2026, 8, 1, 6, 0, 0)  # noqa: DTZ001
+
+
 def test_a_pair_with_hours_that_never_qualify_falls_back_to_the_population_mean(spark):
     df = hourly_df(
         spark,
@@ -149,6 +171,10 @@ def test_a_pair_with_hours_that_never_qualify_falls_back_to_the_population_mean(
     assert z_row.sample_count == 0
     assert z_row.comfort_score == pytest.approx(30.0)
     assert z_row.confidence_score == pytest.approx(0.0)
+    # qualifying hour가 0개라 MIN/MAX로 롤업할 시간이 없다 — NULL로 남기고,
+    # 실제 배치 윈도우 경계로 채우는 건 gold_job.py의 책임이다.
+    assert z_row.data_period_start is None
+    assert z_row.data_period_end is None
 
 
 def vehicle_agnostic_row(result, segment_id: str):
@@ -193,6 +219,21 @@ def test_vehicle_agnostic_row_pools_profiles_in_the_same_hour_weighted_by_traffi
     # 차량별 행(profile 1, 2)도 vehicle-agnostic 행과 함께 그대로 남아 있어야 한다.
     by_key = per_vehicle_rows(result)
     assert {1, 2} <= {vehicle_profile_id for (_, vehicle_profile_id) in by_key}
+
+
+def test_vehicle_agnostic_row_rolls_up_data_period_bounds_across_pooled_profiles(spark):
+    same_hour = datetime(2026, 8, 1, 3, 0, 0)  # noqa: DTZ001
+    df = hourly_df(
+        spark,
+        hour(vehicle_profile_id=1, data_period_start=same_hour, trip_count=10),
+        hour(vehicle_profile_id=2, data_period_start=same_hour, trip_count=30),
+    )
+
+    result = compute_segment_comfort_scores(df, TEST_CONFIG)
+
+    row = vehicle_agnostic_row(result, "seg-1")
+    assert row.data_period_start == same_hour
+    assert row.data_period_end == same_hour + timedelta(hours=1)
 
 
 def test_vehicle_agnostic_row_shrinks_toward_the_global_population_mean(spark):

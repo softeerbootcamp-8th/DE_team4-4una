@@ -1,7 +1,8 @@
 import os
 import shutil
 import time
-from datetime import UTC, date, datetime, timedelta
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,22 @@ TARGET_HOUR = datetime(2026, 8, 16, 10, 0, 0, tzinfo=UTC)
 RUN_ID = "run-1"
 
 
+@contextmanager
+def host_timezone(tz_name: str):
+    # Spark JVM은 이미 떠 있어도, naive datetime 변환은 파이썬 프로세스의 현재 TZ를 그대로 따른다.
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = tz_name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
 @pytest.fixture(scope="module")
 def spark():
     session = (
@@ -42,8 +59,10 @@ def feature_row(
     row = {
         "segment_id": segment_id,
         "vehicle_profile_id": 1,
-        "data_period_start": target_hour.replace(tzinfo=None),
-        "data_period_end": (target_hour + timedelta(hours=1)).replace(tzinfo=None),
+        # 실제 파이프라인은 date_trunc()로 이 값을 만들어 UTC 순간을 그대로 보존하므로,
+        # 테스트도 tzinfo를 떼지 않고 UTC-aware로 둬야 호스트 타임존과 무관하게 재현된다.
+        "data_period_start": target_hour,
+        "data_period_end": target_hour + timedelta(hours=1),
         "road_snapshot_date": SNAPSHOT,
         "avg_speed_mps": 10.0,
         "rms_accel_x": 1.0,
@@ -163,6 +182,55 @@ def test_rejects_rows_outside_the_target_hour(spark, tmp_path) -> None:
         write_hourly_segment_features(spark, df, output_root, TARGET_HOUR, RUN_ID)
 
     assert not (tmp_path / "hourly_segment_features").exists()
+
+
+@pytest.mark.parametrize("host_tz", ["UTC", "Asia/Seoul"])
+def test_write_succeeds_regardless_of_host_timezone(spark, tmp_path, host_tz) -> None:
+    with host_timezone(host_tz):
+        output_root = str(tmp_path / "hourly_segment_features")
+        df = feature_rows_df(spark, [feature_row()])
+
+        result = write_hourly_segment_features(spark, df, output_root, TARGET_HOUR, RUN_ID)
+
+        assert result.row_count == 1
+        assert result.output_path == hour_output_path(output_root, TARGET_HOUR)
+
+
+@pytest.mark.parametrize("host_tz", ["UTC", "Asia/Seoul"])
+def test_rejects_rows_outside_the_target_hour_regardless_of_host_timezone(
+    spark, tmp_path, host_tz
+) -> None:
+    with host_timezone(host_tz):
+        output_root = str(tmp_path / "hourly_segment_features")
+        other_hour = TARGET_HOUR.replace(hour=11)
+        df = feature_rows_df(spark, [feature_row(target_hour=other_hour)])
+
+        with pytest.raises(ValueError, match="target_hour"):
+            write_hourly_segment_features(spark, df, output_root, TARGET_HOUR, RUN_ID)
+
+
+@pytest.mark.parametrize(
+    "invalid_target_hour",
+    [
+        TARGET_HOUR.replace(tzinfo=None),  # naive
+        TARGET_HOUR.astimezone(timezone(timedelta(hours=9))),  # UTC가 아닌 offset(KST)
+        TARGET_HOUR.replace(minute=30),  # 정각이 아님
+    ],
+    ids=["naive", "non-utc-offset", "not-truncated"],
+)
+def test_rejects_invalid_target_hour(spark, tmp_path, invalid_target_hour) -> None:
+    output_root = str(tmp_path / "hourly_segment_features")
+    df = feature_rows_df(spark, [feature_row()])
+
+    with pytest.raises(ValueError):
+        write_hourly_segment_features(spark, df, output_root, invalid_target_hour, RUN_ID)
+
+
+def test_hour_output_path_uses_utc_date_and_hour_regardless_of_host_timezone() -> None:
+    with host_timezone("Asia/Seoul"):
+        path = hour_output_path("out", TARGET_HOUR)
+
+    assert path == "out/data_period_date=2026-08-16/hour=10"
 
 
 def test_rejects_an_empty_result_without_touching_existing_data(spark, tmp_path) -> None:
