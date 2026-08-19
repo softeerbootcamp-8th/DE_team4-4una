@@ -61,9 +61,20 @@ snapshot (issue #193; see "Column calculation mapping" under
 `score_as_of` is the run's fixed schedule time; it is stored separately from
 the `data_period_start`/`data_period_end` window actually rolled up into the
 score, so a run with zero qualifying hours (`N = 0`) still gets a real
-`score_as_of`-keyed row with `data_period_start`/`data_period_end` left
-`NULL`. This weather-unadjusted score is the input to the weather-adjusted
+`score_as_of`-keyed row. Both period columns are `NOT NULL`: when `N = 0`
+there is no qualifying hour to roll up, so the standard job fills them with
+the batch run's own window `[as_of - window_hours, as_of)` (issue #198).
+This weather-unadjusted score is the input to the weather-adjusted
 current score below — it is never itself weather-adjusted.
+
+The three directional scores stored on `standard_segment_comfort_score`
+(`vertical_score`, `longitudinal_score`, `lateral_score`) are produced by
+applying Steps 2-5 below to each direction separately. Every step is linear,
+so this does not change `comfort_score`: combining the three shrunk
+directional scores with the Step 1 weights gives exactly the same value as
+shrinking the already-combined `c_h`. That identity holds because the
+qualifying-hour set `H` is shared across directions — Step 2 filters on
+`trip_count`, which is direction-independent.
 
 ### Step 1 - Combine the three directional scores into one hourly score
 
@@ -317,7 +328,9 @@ the new path is proven end to end:
    `latest_zone_weather`, `current_segment_comfort_score`) via migration,
    alongside the existing `segment_comfort_score`.
 2. Implement standard score calculation and hourly append/update into
-   `standard_segment_comfort_score`.
+   `standard_segment_comfort_score`. **Done** (issue #198):
+   `batch_jobs.comfort_score.standard_job`, run through the
+   `load-standard-segment-comfort-score` command.
 3. Implement Open-Meteo weather collection into `latest_zone_weather`,
    reading each zone's query point from `zone_master.representative_latitude`/
    `.representative_longitude` (schema-catalog.md).
