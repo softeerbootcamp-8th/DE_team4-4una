@@ -294,13 +294,11 @@ class TestWeatherSnapshotJobIntegration:
 
     @staticmethod
     def _truncate() -> None:
-        # current_segment_comfort_score가 FK로 참조하므로 같은 TRUNCATE 문에 나열.
+        # #209: current_segment_comfort_score의 weather FK가 없어져 latest_zone_weather만 비우면 된다.
         connection = _connect()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    "TRUNCATE zone_weather_snapshot, current_segment_comfort_score"
-                )
+                cursor.execute("TRUNCATE latest_zone_weather")
             connection.commit()
         finally:
             connection.close()
@@ -336,7 +334,7 @@ class TestWeatherSnapshotJobIntegration:
         ).to_parquet(path)
         return path
 
-    def test_upserts_without_duplicating_on_rerun(self, tmp_path):
+    def test_a_rerun_at_the_same_target_time_updates_the_row(self, tmp_path):
         zone_master_path = self.write_zone_master(tmp_path)
         config = self.make_config(zone_master_path)
         connection = _connect()
@@ -351,12 +349,35 @@ class TestWeatherSnapshotJobIntegration:
 
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT rain_mm, weather_state FROM zone_weather_snapshot "
-                    "WHERE location_id = 181 AND weather_time = %s",
-                    (TARGET_TIME,),
+                    "SELECT rain_mm, weather_state FROM latest_zone_weather "
+                    "WHERE location_id = 181"
                 )
                 rows = cursor.fetchall()
             assert rows == [(5.0, "rain")]
+        finally:
+            connection.close()
+
+    def test_a_later_target_time_updates_the_same_row_instead_of_inserting(self, tmp_path):
+        # #209: PK가 location_id뿐이라, 새 weather_time이 와도 존당 행은 하나로 유지돼야 한다.
+        zone_master_path = self.write_zone_master(tmp_path)
+        config = self.make_config(zone_master_path)
+        connection = _connect()
+        try:
+            session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
+            run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
+
+            later_target_time = TARGET_TIME + timedelta(minutes=15)
+            later_target_key = "2026-08-19T10:30"
+            session = FakeSession([[location_payload([later_target_key], rain=[5.0])]])
+            run_weather_snapshot_job(config, later_target_time, connection, session=session)
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT weather_time, rain_mm, weather_state FROM latest_zone_weather "
+                    "WHERE location_id = 181"
+                )
+                rows = cursor.fetchall()
+            assert rows == [(later_target_time, 5.0, "rain")]
         finally:
             connection.close()
 
@@ -380,9 +401,8 @@ class TestWeatherSnapshotJobIntegration:
 
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT latitude, longitude FROM zone_weather_snapshot "
-                    "WHERE location_id = 181 AND weather_time = %s",
-                    (TARGET_TIME,),
+                    "SELECT latitude, longitude FROM latest_zone_weather "
+                    "WHERE location_id = 181"
                 )
                 rows = cursor.fetchall()
             assert rows == [(41.0, -74.5)]
@@ -414,7 +434,7 @@ class TestWeatherSnapshotJobIntegration:
                 run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
 
             with connection.cursor() as cursor:
-                cursor.execute("SELECT count(*) FROM zone_weather_snapshot")
+                cursor.execute("SELECT count(*) FROM latest_zone_weather")
                 (count,) = cursor.fetchone()
             assert count == 0
         finally:

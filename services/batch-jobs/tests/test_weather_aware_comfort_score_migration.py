@@ -1,10 +1,4 @@
-"""Integration tests for migration 0006 (#196): standard/weather/current
-comfort score tables.
-
-RUN_INTEGRATION 미설정 시 skip(로컬 편의). RUN_INTEGRATION=1인데 Postgres
-접속이 실패하면 skip이 아니라 fail한다 (test_segment_comfort_score.py와
-동일한 정책).
-"""
+# migration 0006(#196) 통합 테스트 — 0007(#209)의 rename/weather FK 제거를 반영해 갱신함.
 
 from __future__ import annotations
 
@@ -129,8 +123,7 @@ class TestWeatherAwareComfortScoreMigration:
         try:
             run_migrations(MigrationConfig.from_env().migrations_dir, connection)
             with connection.cursor() as cursor:
-                # 0005가 이미 심어 두지만, 다른 테스트 클래스가 재정의했을 수도
-                # 있으니 FK 대상이 확실히 존재하도록 독립적으로 보장한다.
+                # 0005가 심어두지만, 다른 테스트 클래스가 바꿨을 수도 있어 독립적으로 보장한다.
                 cursor.execute(
                     "INSERT INTO vehicle_profile "
                     "(vehicle_profile_id, profile_name, body_type, size_class, "
@@ -152,7 +145,7 @@ class TestWeatherAwareComfortScoreMigration:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "TRUNCATE standard_segment_comfort_score, "
-                    "zone_weather_snapshot, current_segment_comfort_score"
+                    "latest_zone_weather, current_segment_comfort_score"
                 )
             connection.commit()
         finally:
@@ -161,10 +154,7 @@ class TestWeatherAwareComfortScoreMigration:
     @staticmethod
     @pytest.fixture(autouse=True)
     def clean_tables():
-        # 앞뒤로 모두 비운다 — 뒤도 비우지 않으면 여기서 심은
-        # vehicle_profile_id=1 참조 행이 남아, 다른 테스트 파일이
-        # "DELETE FROM vehicle_profile WHERE vehicle_profile_id != 0"로
-        # 정리하려 할 때 FK 위반으로 실패한다.
+        # 앞뒤로 비운다 — 안 그러면 다른 테스트 파일의 vehicle_profile 정리가 FK 위반으로 실패한다.
         TestWeatherAwareComfortScoreMigration._truncate()
         yield
         TestWeatherAwareComfortScoreMigration._truncate()
@@ -247,9 +237,9 @@ class TestWeatherAwareComfortScoreMigration:
     def test_weather_rejects_duplicate_primary_key(self):
         connection = _connect()
         try:
-            _insert(connection, "zone_weather_snapshot", weather_row())
+            _insert(connection, "latest_zone_weather", weather_row())
             with pytest.raises(psycopg2.errors.UniqueViolation):
-                _insert(connection, "zone_weather_snapshot", weather_row())
+                _insert(connection, "latest_zone_weather", weather_row())
         finally:
             connection.rollback()
             connection.close()
@@ -290,12 +280,12 @@ class TestWeatherAwareComfortScoreMigration:
             connection.rollback()
             connection.close()
 
-    def test_current_rejects_a_weather_observation_that_does_not_exist(self):
+    def test_current_allows_a_weather_observation_that_does_not_exist(self):
+        # #209: weather FK 제거 — latest_zone_weather에 없는 조합이어도 삽입이 막히면 안 된다.
         connection = _connect()
         try:
             _insert(connection, "standard_segment_comfort_score", standard_row())
-            with pytest.raises(psycopg2.errors.ForeignKeyViolation):
-                _insert(connection, "current_segment_comfort_score", current_row())
+            _insert(connection, "current_segment_comfort_score", current_row())
         finally:
             connection.rollback()
             connection.close()
@@ -304,7 +294,7 @@ class TestWeatherAwareComfortScoreMigration:
         connection = _connect()
         try:
             _insert(connection, "standard_segment_comfort_score", standard_row())
-            _insert(connection, "zone_weather_snapshot", weather_row())
+            _insert(connection, "latest_zone_weather", weather_row())
             _insert(connection, "current_segment_comfort_score", current_row())
         finally:
             connection.rollback()
