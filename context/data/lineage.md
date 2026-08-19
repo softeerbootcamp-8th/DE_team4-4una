@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-18
 ---
 
 # Data Lineage
@@ -40,6 +40,8 @@ identity, stage, reason code, and run ID.
 
 ## Score lineage
 
+The target lineage remains:
+
 ```text
 S3 Bronze `sensor_event`
   -> contract validation and sequence-aware deduplication
@@ -51,6 +53,24 @@ S3 Bronze `sensor_event`
   -> idempotent serving-store load
   -> latest-score API response
 ```
+
+The implemented local hourly path is orchestrated by `hourly_pipeline` in the
+following dependency order:
+
+```text
+Bronze `sensor_event`
+  -> hourly contract validation and cleansing
+  -> Silver `processed_sensor_event` + cleansing quarantine
+  -> hourly GPS-to-road-segment matching and segment x vehicle-profile features
+  -> hourly comfort scoring + rejected output
+  -> Gold window aggregation
+  -> idempotent PostgreSQL upsert
+```
+
+The Airflow data interval is an explicit UTC hourly interval. Cleansing and
+feature generation use its start as the target hour, while publication uses the
+exclusive interval end as `as_of`. This keeps the just-completed hour inside the
+Gold aggregation window.
 
 ## Required traceability
 
