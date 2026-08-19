@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 from psycopg2.extras import execute_values
 
 from .weather_rules import (
@@ -134,7 +134,11 @@ class CurrentScoreJobSummary:
 
 # road_segment(Parquet)에서 segment -> zone 매핑을 읽는다. 이 매핑은 Postgres에 없다.
 def load_segment_zones(road_segment_path: Path, road_snapshot_date: date) -> dict[str, int]:
-    table = pq.read_table(road_segment_path, columns=["segment_id", "snapshot_date", "location_id"])
+    # partitioning=None으로 디렉터리 파티션을 무시한다. road_segment는 snapshot_date를
+    # 파일 안(date32)에도, 경로(snapshot_date=2024-02-01)에도 갖고 있어서, 기본
+    # hive 파티션 추론을 쓰면 같은 컬럼이 date32와 문자열로 두 번 잡혀 읽기가 실패한다.
+    dataset = ds.dataset(road_segment_path, format="parquet", partitioning=None)
+    table = dataset.to_table(columns=["segment_id", "snapshot_date", "location_id"])
     snapshot_dates = set(pc.unique(table.column("snapshot_date")).to_pylist())
     # 엉뚱한 snapshot을 넘겨받았으면 점수를 만들기 전에 실패시킨다
     # (batch_jobs.hourly_segment_feature_job과 같은 방침).

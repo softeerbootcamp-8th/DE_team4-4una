@@ -153,6 +153,15 @@ class TestLoadSegmentZones:
 
         assert load_segment_zones(path, SNAPSHOT_DATE) == {"2": 12}
 
+    def test_reads_a_hive_partitioned_dataset(self, tmp_path):
+        # road_segment는 snapshot_date를 파일 안에도, 경로에도 갖고 있다. 파티션 추론을
+        # 켜두면 같은 컬럼이 date32와 문자열로 두 번 잡혀 읽기가 실패한다.
+        partition = tmp_path / "road_segment" / f"snapshot_date={SNAPSHOT_DATE}" / "build_id=z76"
+        partition.mkdir(parents=True)
+        write_road_segment(partition, [("1", SNAPSHOT_DATE, 76)])
+
+        assert load_segment_zones(tmp_path / "road_segment", SNAPSHOT_DATE) == {"1": 76}
+
     def test_rejects_another_snapshot(self, tmp_path):
         path = write_road_segment(tmp_path, [("1", date(2024, 1, 1), 76)])
 
