@@ -16,10 +16,43 @@ def test_cleanse_command_requires_and_parses_target_hour() -> None:
             "scheduled__2026-08-18T05:00:00+00:00",
             "--target-hour",
             "2026-08-18T05:00:00+00:00",
+            "--road-snapshot-date",
+            "2026-08-18",
+            "--feature-version",
+            "v1",
         ]
     )
 
     assert arguments.target_hour == datetime(2026, 8, 18, 5, tzinfo=UTC)
+
+
+def test_cleanse_command_accepts_pipeline_paths() -> None:
+    arguments = cli.build_parser().parse_args(
+        [
+            "cleanse-sensor-events",
+            "--run-id",
+            "run-1",
+            "--target-hour",
+            "2026-08-18T05:00:00+00:00",
+            "--road-snapshot-date",
+            "2026-08-18",
+            "--feature-version",
+            "v1",
+            "--bronze-input-path",
+            "/bronze",
+            "--quarantine-output-path",
+            "/quarantine",
+            "--road-segment-path",
+            "/roads",
+            "--output-path",
+            "/features",
+        ]
+    )
+
+    assert arguments.bronze_input_path == "/bronze"
+    assert arguments.quarantine_output_path == "/quarantine"
+    assert arguments.road_segment_path == "/roads"
+    assert arguments.output_path == "/features"
 
 
 def test_main_returns_after_load_segment_comfort_score_without_falling_through(

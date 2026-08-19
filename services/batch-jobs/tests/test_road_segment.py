@@ -65,7 +65,6 @@ from batch_jobs.road_segment.validate import (
 from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
 from pyproj import CRS, Transformer
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
 from shapely import STRtree
 from shapely import wkt as shapely_wkt
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, mapping
@@ -1025,7 +1024,6 @@ class TestBuild:
             "T1",
             0,
             cls.TARGET_HOUR,
-            cls.TARGET_HOUR.date(),
             cls.BASE_LAT,
             cls.BASE_LON,
             10.0,
@@ -1188,27 +1186,19 @@ class TestBuild:
         )
 
         # 4. Transform 2가 경로를 추가로 조립하지 않고 Manifest URI를 그대로 읽어 실제 GPS를 매칭하는지
-        sensor_path = str(tmp_path / "processed_sensor_event")
-        (
-            spark.createDataFrame(
-                [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
-            )
-            .withColumn("event_hour", F.hour("event_time"))
-            .write.mode("overwrite")
-            .partitionBy("event_date", "event_hour")
-            .parquet(sensor_path)
+        sensor_df = spark.createDataFrame(
+            [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
         )
 
         config = HourlySegmentFeatureJobConfig.from_env(
             {
-                "HOURLY_SEGMENT_FEATURE_INPUT_PATH": sensor_path,
                 "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH": road_segment_uri,
                 "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH": str(tmp_path / "hourly_segment_features"),
             }
         )
 
         summary = run_hourly_segment_feature_job(
-            spark, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION,
+            spark, sensor_df, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION,
             self.RUN_ID, self.PROCESSED_AT,
         )
 
@@ -1234,20 +1224,12 @@ class TestBuild:
         )
         road_segment_uri = result.manifest.artifact("road_segment").uri
 
-        sensor_path = str(tmp_path / "processed_sensor_event")
-        (
-            spark.createDataFrame(
-                [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
-            )
-            .withColumn("event_hour", F.hour("event_time"))
-            .write.mode("overwrite")
-            .partitionBy("event_date", "event_hour")
-            .parquet(sensor_path)
+        sensor_df = spark.createDataFrame(
+            [self.sensor_row("e1")], PROCESSED_SENSOR_EVENT_SCHEMA
         )
 
         config = HourlySegmentFeatureJobConfig.from_env(
             {
-                "HOURLY_SEGMENT_FEATURE_INPUT_PATH": sensor_path,
                 "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH": road_segment_uri,
                 "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH": str(tmp_path / "hourly_segment_features"),
             }
@@ -1256,6 +1238,7 @@ class TestBuild:
         wrong_snapshot_date = date(2020, 1, 1)
         with pytest.raises(ValueError, match="snapshot_date"):
             run_hourly_segment_feature_job(
-                spark, config, self.TARGET_HOUR, wrong_snapshot_date, self.FEATURE_VERSION,
+                spark, sensor_df, config, self.TARGET_HOUR, wrong_snapshot_date,
+                self.FEATURE_VERSION,
                 self.RUN_ID, self.PROCESSED_AT,
             )

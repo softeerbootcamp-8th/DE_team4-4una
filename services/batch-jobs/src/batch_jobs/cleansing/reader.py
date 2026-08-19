@@ -61,12 +61,27 @@ def filter_bronze_sensor_events_for_hour(
     event time, so its Kafka source timestamp is used for deterministic quarantine.
     """
     _require_utc_hour(target_hour)
-    target_hour_end = target_hour + timedelta(hours=1)
+    return filter_bronze_sensor_events_for_window(
+        bronze, target_hour, target_hour + timedelta(hours=1)
+    )
+
+
+def filter_bronze_sensor_events_for_window(
+    bronze: DataFrame,
+    window_start: datetime,
+    window_end: datetime,
+) -> DataFrame:
+    """Keep records assigned to a half-open UTC interval."""
+    if window_start.utcoffset() != timedelta(0) or window_end.utcoffset() != timedelta(0):
+        raise ValueError("window bounds must be UTC timezone-aware")
+    if window_end <= window_start:
+        raise ValueError("window_end must be later than window_start")
+
     event_time = F.try_to_timestamp(F.col("event_time"))
     assigned_time = F.coalesce(event_time, F.col(SOURCE_TIMESTAMP_COLUMN))
     return bronze.filter(
-        (assigned_time >= F.lit(target_hour))
-        & (assigned_time < F.lit(target_hour_end))
+        (assigned_time >= F.lit(window_start))
+        & (assigned_time < F.lit(window_end))
     )
 
 

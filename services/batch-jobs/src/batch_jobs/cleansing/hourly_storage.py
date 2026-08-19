@@ -1,4 +1,4 @@
-"""Stage, validate, and replace one hourly cleansing output partition."""
+"""Stage, validate, and replace one hourly cleansing quarantine partition."""
 
 from __future__ import annotations
 
@@ -8,42 +8,18 @@ from datetime import datetime, timedelta
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType, StructField, StructType
+from pyspark.sql.types import StructType
 
-from batch_jobs.schemas import (
-    PROCESSED_SENSOR_EVENT_SCHEMA,
-    SENSOR_EVENT_QUARANTINE_SCHEMA,
-)
+from batch_jobs.schemas import SENSOR_EVENT_QUARANTINE_SCHEMA
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.:+-]+$")
 _STAGING_DIRNAME = "_staging"
-PROCESSED_SENSOR_EVENT_PARTITIONED_SCHEMA = StructType(
-    [
-        *PROCESSED_SENSOR_EVENT_SCHEMA.fields,
-        StructField("event_hour", IntegerType(), nullable=False),
-    ]
-)
 
 
 @dataclass(frozen=True, slots=True)
-class CleansingWriteResult:
-    processed_output_path: str
-    quarantine_output_path: str
-    processed_count: int
-    quarantined_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class _PartitionReplacement:
-    final_path: str
-    staged_path: str | None
-
-
-def processed_hour_path(output_root: str, target_hour: datetime) -> str:
-    return (
-        f"{output_root.rstrip('/')}/event_date={target_hour.date().isoformat()}"
-        f"/event_hour={target_hour.hour:02d}"
-    )
+class QuarantineWriteResult:
+    output_path: str
+    row_count: int
 
 
 def quarantine_hour_path(output_root: str, target_hour: datetime) -> str:
@@ -53,92 +29,35 @@ def quarantine_hour_path(output_root: str, target_hour: datetime) -> str:
     )
 
 
-def write_hourly_cleansing_results(
+def write_hourly_quarantine(
     spark: SparkSession,
-    processed: DataFrame,
     quarantined: DataFrame,
-    processed_output_root: str,
     quarantine_output_root: str,
     target_hour: datetime,
     run_id: str,
-) -> CleansingWriteResult:
-    """Replace only the requested UTC hour after validating staged Parquet."""
+) -> QuarantineWriteResult:
+    """Replace only the requested UTC-hour quarantine after validation."""
     _require_safe_run_id(run_id)
     _require_utc_hour(target_hour)
-    _require_schema(processed, PROCESSED_SENSOR_EVENT_PARTITIONED_SCHEMA)
     _require_schema(quarantined, SENSOR_EVENT_QUARANTINE_SCHEMA)
-    _require_processed_target_hour(processed, target_hour)
 
-    processed_staging_root = (
-        f"{processed_output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
-    )
-    quarantine_staging_root = (
-        f"{quarantine_output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
-    )
-    processed_count = processed.count()
-    quarantined_count = quarantined.count()
+    staging_root = f"{quarantine_output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
+    row_count = quarantined.count()
 
     try:
-        processed_staged_path = _stage_processed(
-            spark,
-            processed,
-            processed_staging_root,
-            target_hour,
-            processed_count,
-        )
-        quarantine_staged_path = _stage_quarantine(
+        staged_path = _stage_quarantine(
             spark,
             quarantined,
-            quarantine_staging_root,
+            staging_root,
             target_hour,
-            quarantined_count,
+            row_count,
         )
-        processed_final_path = processed_hour_path(processed_output_root, target_hour)
-        quarantine_final_path = quarantine_hour_path(quarantine_output_root, target_hour)
-        _replace_partitions(
-            spark,
-            (
-                _PartitionReplacement(processed_final_path, processed_staged_path),
-                _PartitionReplacement(quarantine_final_path, quarantine_staged_path),
-            ),
-        )
+        final_path = quarantine_hour_path(quarantine_output_root, target_hour)
+        _replace_partition(spark, final_path, staged_path)
     finally:
-        _delete_path(spark, processed_staging_root)
-        _delete_path(spark, quarantine_staging_root)
+        _delete_path(spark, staging_root)
 
-    return CleansingWriteResult(
-        processed_output_path=processed_final_path,
-        quarantine_output_path=quarantine_final_path,
-        processed_count=processed_count,
-        quarantined_count=quarantined_count,
-    )
-
-
-def _stage_processed(
-    spark: SparkSession,
-    processed: DataFrame,
-    staging_root: str,
-    target_hour: datetime,
-    expected_count: int,
-) -> str | None:
-    (
-        processed.write.mode("overwrite")
-        .partitionBy("event_date", "event_hour")
-        .parquet(staging_root)
-    )
-    if expected_count == 0:
-        return None
-
-    staged = spark.read.parquet(staging_root)
-    _require_schema(staged, PROCESSED_SENSOR_EVENT_PARTITIONED_SCHEMA)
-    _require_processed_target_hour(staged, target_hour)
-    if staged.count() != expected_count:
-        raise ValueError("staged processed row count does not match computed result")
-
-    return (
-        f"{staging_root}/event_date={target_hour.date().isoformat()}"
-        f"/event_hour={target_hour.hour}"
-    )
+    return QuarantineWriteResult(output_path=final_path, row_count=row_count)
 
 
 def _stage_quarantine(
@@ -192,46 +111,32 @@ def _require_schema(df: DataFrame, expected: StructType) -> None:
         )
 
 
-def _require_processed_target_hour(processed: DataFrame, target_hour: datetime) -> None:
-    target_hour_end = target_hour + timedelta(hours=1)
-    invalid = processed.filter(
-        F.col("event_time").isNull()
-        | (F.col("event_time") < F.lit(target_hour))
-        | (F.col("event_time") >= F.lit(target_hour_end))
-        | (F.col("event_date") != F.lit(target_hour.date()))
-        | (F.col("event_hour") != F.lit(target_hour.hour))
-    )
-    if invalid.limit(1).count():
-        raise ValueError("processed result contains rows outside target_hour")
-
-
-def _replace_partitions(
-    spark: SparkSession, replacements: tuple[_PartitionReplacement, ...]
+def _replace_partition(
+    spark: SparkSession,
+    final_path: str,
+    staged_path: str | None,
 ) -> None:
-    backups: list[tuple[str, str]] = []
-    promoted: list[str] = []
+    backup_path = _backup_path(final_path)
+    had_existing = False
+    promoted = False
     try:
-        for replacement in replacements:
-            backup_path = _backup_path(replacement.final_path)
-            _recover_backup(spark, replacement.final_path, backup_path)
-            if _path_exists(spark, replacement.final_path):
-                _rename_path(spark, replacement.final_path, backup_path)
-                backups.append((replacement.final_path, backup_path))
+        _recover_backup(spark, final_path, backup_path)
+        if _path_exists(spark, final_path):
+            _rename_path(spark, final_path, backup_path)
+            had_existing = True
 
-        for replacement in replacements:
-            if replacement.staged_path is None:
-                continue
-            _make_parent_directory(spark, replacement.final_path)
-            _rename_path(spark, replacement.staged_path, replacement.final_path)
-            promoted.append(replacement.final_path)
+        if staged_path is not None:
+            _make_parent_directory(spark, final_path)
+            _rename_path(spark, staged_path, final_path)
+            promoted = True
     except Exception:
-        for final_path in reversed(promoted):
+        if promoted:
             _delete_path(spark, final_path)
-        for final_path, backup_path in reversed(backups):
+        if had_existing:
             _rename_path(spark, backup_path, final_path)
         raise
     else:
-        for _, backup_path in backups:
+        if had_existing:
             _delete_path(spark, backup_path)
 
 
