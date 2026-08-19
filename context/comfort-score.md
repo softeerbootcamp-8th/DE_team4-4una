@@ -22,8 +22,11 @@ weather refresh:
 - **`standard_segment_comfort_score`** — the weather-unadjusted score below,
   computed hourly from `hourly_comfort_score` and kept as one row per scoring
   hour (a time series).
-- **`zone_weather_snapshot`** — Open-Meteo observations collected every 15
-  minutes per zone, independent of any segment.
+- **`latest_zone_weather`** — each zone's latest Open-Meteo observation,
+  refreshed every 15 minutes, independent of any segment. Originally
+  designed as a `zone_weather_snapshot` history table (one row per zone per
+  15-minute tick); #209 changed it to one row per zone, UPSERTed in place,
+  since nothing downstream needed the history.
 - **`current_segment_comfort_score`** — the single current-state row per
   segment x vehicle profile, combining the latest standard snapshot with the
   latest applicable weather (see "Weather-adjusted current score" below).
@@ -190,14 +193,15 @@ qualifying data (`context/data/schema-catalog.md`).
 
 Grain: one `(segment_id, vehicle_profile_id)` row — the segment's current
 (latest) state, always derived from its latest
-`standard_segment_comfort_score` snapshot plus its zone's latest
-`zone_weather_snapshot` row (issue #193; schema in
-`context/data/schema-catalog.md`).
+`standard_segment_comfort_score` snapshot plus its zone's `latest_zone_weather`
+row (issue #193; schema in `context/data/schema-catalog.md`).
 
 ### Step A - Detect whether the zone's weather changed
 
-Compare the zone's new `zone_weather_snapshot.impact_signature` against the
-value from its previous `weather_time` row for that zone.
+`latest_zone_weather` holds only one row per zone (#209) — there is no
+separate history row to query. Whatever job collects the new Open-Meteo
+observation must read that zone's existing `impact_signature` **before**
+UPSERTing the new one, then compare old vs. new:
 
 - Unchanged `impact_signature` -> no recompute; every segment in that zone
   keeps its existing `current_segment_comfort_score` row untouched.
@@ -213,7 +217,7 @@ observation directly, never a delta or trend from the prior one.
 Starting from the segment's latest `standard_segment_comfort_score`
 (`vertical_score`, `longitudinal_score`, `lateral_score`), apply a
 weather-derived adjustment per direction, using the zone's current
-`zone_weather_snapshot` fields:
+`latest_zone_weather` fields:
 
 | Weather condition | Adjusted direction(s) |
 | --- | --- |
@@ -310,11 +314,11 @@ part of it. The follow-up implementation work proceeds in this order, so that
 the new path is proven end to end:
 
 1. Create the new tables (`standard_segment_comfort_score`,
-   `zone_weather_snapshot`, `current_segment_comfort_score`) via migration,
+   `latest_zone_weather`, `current_segment_comfort_score`) via migration,
    alongside the existing `segment_comfort_score`.
 2. Implement standard score calculation and hourly append/update into
    `standard_segment_comfort_score`.
-3. Implement Open-Meteo weather collection into `zone_weather_snapshot`,
+3. Implement Open-Meteo weather collection into `latest_zone_weather`,
    reading each zone's query point from `zone_master.representative_latitude`/
    `.representative_longitude` (schema-catalog.md).
 4. Implement current score calculation ("Weather-adjusted current score"
