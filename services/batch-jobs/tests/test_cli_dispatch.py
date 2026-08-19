@@ -35,3 +35,22 @@ def test_main_returns_after_load_segment_comfort_score_without_falling_through(
     cli.main(["load-segment-comfort-score", "--as-of", "2026-08-16T00:00:00+00:00"])
 
     assert len(calls) == 1
+
+
+def test_collect_weather_snapshots_command_parses_target_time() -> None:
+    arguments = cli.build_parser().parse_args(
+        ["collect-weather-snapshots", "--target-time", "2026-08-19T10:15:00+00:00"]
+    )
+
+    assert arguments.target_time == "2026-08-19T10:15:00+00:00"
+
+
+def test_main_returns_after_collect_weather_snapshots_without_falling_through(
+    monkeypatch,
+) -> None:
+    calls: list[argparse.Namespace] = []
+    monkeypatch.setattr(cli, "run_weather_snapshot_collection", calls.append)
+
+    cli.main(["collect-weather-snapshots", "--target-time", "2026-08-19T10:15:00+00:00"])
+
+    assert len(calls) == 1
