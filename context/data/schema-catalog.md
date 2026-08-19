@@ -493,7 +493,7 @@ traversed a segment").
 | Road segment | `segment_id` | STRING | N | PK, FK | References `road_segment.segment_id` |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile.vehicle_profile_id`; sentinel `0` is the vehicle-agnostic row (OQ-038) |
 | Score as-of | `score_as_of` | TIMESTAMP | N | PK | The standard job's scheduled run time; identifies which run produced this row, independent of how much qualifying data existed for it |
-| Data-period start | `data_period_start` | TIMESTAMP | Y |  | Start of the trailing window actually used, `MIN(hourly_comfort_score.data_period_start)` over the qualifying hours in `H_{s,p}`; `NULL` when `N = 0` (no qualifying hour) |
+| Data-period start | `data_period_start` | TIMESTAMP | Y |  | Start of the trailing window actually used, `MIN(hourly_comfort_score.data_period_start)` over the qualifying hours in `H_{s,p}`; `NULL` when `N = 0` (no qualifying hour). Co-nullable with `data_period_end` — enforced by a `CHECK ((data_period_start IS NULL) = (data_period_end IS NULL))` |
 | Data-period end | `data_period_end` | TIMESTAMP | Y |  | End of the trailing window actually used, `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}`; `NULL` when `N = 0` |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-unadjusted vertical directional score for this window |
 | Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Weather-unadjusted longitudinal directional score for this window |
@@ -597,7 +597,7 @@ vehicle profile at all times; no period is part of the key.
 | Sensor sample count | `sample_count` | BIGINT | N |  | Copied from the referenced `standard_segment_comfort_score.sample_count` |
 | Confidence score | `confidence_score` | DOUBLE | N |  | Copied from the referenced `standard_segment_comfort_score.confidence_score`; weather adjustment does not change confidence |
 | Standard score version | `standard_score_version` | STRING | N |  | Copied from the referenced `standard_segment_comfort_score.score_version` |
-| Weather rule version | `weather_rule_version` | STRING | N |  | Version of the weather-adjustment rule set (thresholds and score deductions); versioned independently of `standard_score_version` since it changes on its own schedule (finalized in a follow-up issue) |
+| Weather rule version | `weather_rule_version` | STRING | Y |  | Version of the weather-adjustment rule set (thresholds and score deductions); versioned independently of `standard_score_version` since it changes on its own schedule (finalized in a follow-up issue). `NULL` exactly when `weather_time` is `NULL` (before the zone's first weather snapshot) — enforced by a `CHECK ((weather_time IS NULL) = (weather_rule_version IS NULL))` |
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Time this row was last upserted |
 
 ### Relationships
