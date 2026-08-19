@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-18
+last_reviewed: 2026-08-19
 ---
 
 # Data Lineage
@@ -54,23 +54,30 @@ S3 Bronze `sensor_event`
   -> latest-score API response
 ```
 
-The implemented local hourly path is orchestrated by `hourly_pipeline` in the
-following dependency order:
+The implemented `batch-jobs` hourly path now follows this dependency order:
 
 ```text
 Bronze `sensor_event`
   -> hourly contract validation and cleansing
-  -> Silver `processed_sensor_event` + cleansing quarantine
-  -> hourly GPS-to-road-segment matching and segment x vehicle-profile features
+     -> target-hour cleansing quarantine (persisted)
+     -> accepted events with derived `event_date` (execution-local DataFrame)
+        -> hourly GPS-to-road-segment matching
+        -> segment x vehicle-profile features (persisted)
   -> hourly comfort scoring + rejected output
   -> Gold window aggregation
   -> idempotent PostgreSQL upsert
 ```
 
-The Airflow data interval is an explicit UTC hourly interval. Cleansing and
-feature generation use its start as the target hour, while publication uses the
-exclusive interval end as `as_of`. This keeps the just-completed hour inside the
-Gold aggregation window.
+T1 and T2 run in the same Spark session. T1 cleanses every whole Bronze hour
+overlapping T2's exact lookback/lookahead interval, while only the requested
+target hour's quarantine is replaced. T2 filters the passed DataFrame to its
+exact event-time interval before feature calculation. No cleansed-event dataset
+is written to and read back from S3.
+
+The Airflow integration is a follow-up change. It must invoke the combined
+command with the data interval start as the target hour and preserve the current
+exclusive interval end as publication `as_of`; the existing DAG still contains
+the former separate cleansing and feature commands.
 
 ## Required traceability
 
