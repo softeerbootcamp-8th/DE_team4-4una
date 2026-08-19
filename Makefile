@@ -12,7 +12,7 @@ help:
 	@echo "test                    전체 테스트 실행"
 	@echo "package-jobs            batch-jobs 배포 패키지 빌드"
 	@echo "build-batch-jobs-image  batch-jobs docker 이미지를 git SHA로 태깅해 빌드"
-	@echo "                        (hourly_pipeline DAG의 cleanse task가 이 태그를 참조;"
+	@echo "                        (hourly_pipeline의 sensor_processing task가 이 태그를 참조;"
 	@echo "                        결과 태그를 .env의 BATCH_JOBS_IMAGE_TAG에 넣어야 함)"
 	@echo "up-<component>          infra/compose/<component>.yaml 실행"
 	@echo "migrate                 DB 마이그레이션 실행(도구 구성 후 MIGRATE_CMD 지정)"

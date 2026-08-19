@@ -1,12 +1,13 @@
 """hourly_pipeline DAG의 구조를 docker 없이 검증하는 테스트.
 
 실제 task 실행(batch-jobs 컨테이너 기동)은 로컬 Airflow에서 수동으로 확인하고,
-여기서는 DAG가 정상 파싱되는지와 cleanse/features/scoring/publish TaskGroup의
+여기서는 DAG가 정상 파싱되는지와 sensor_processing/scoring/publish TaskGroup의
 골격이 의도대로 구성됐는지만 확인한다.
 """
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import sys
 from pathlib import Path
@@ -59,21 +60,19 @@ def test_dag_uses_one_hour_utc_data_interval():
     )
 
 
-def test_cleanse_task_group_contains_only_run_cleanse():
+def test_dag_preserves_retry_policy():
+    module = _load_dag_module()
+
+    for task in module.dag.tasks:
+        assert task.retries == 1
+        assert task.retry_delay == datetime.timedelta(minutes=5)
+
+
+def test_sensor_processing_task_group_contains_only_combined_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert "cleanse.run_cleanse" in task_ids
-
-
-def test_run_cleanse_passes_target_hour_and_run_id():
-    module = _load_dag_module()
-
-    run_cleanse = module.dag.get_task("cleanse.run_cleanse")
-    command = run_cleanse.bash_command
-    assert "cleanse-sensor-events" in command
-    assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
-    assert "--run-id='{{ run_id }}'" in command
+    assert "sensor_processing.run_sensor_processing" in task_ids
 
 
 def test_scoring_task_group_contains_only_run_scoring():
@@ -83,23 +82,33 @@ def test_scoring_task_group_contains_only_run_scoring():
     assert "scoring.run_scoring" in task_ids
 
 
-def test_features_task_group_contains_only_run_features():
+def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     module = _load_dag_module()
 
-    task_ids = {task.task_id for task in module.dag.tasks}
-    assert "features.run_features" in task_ids
-
-
-def test_run_features_invokes_feature_job_with_required_arguments():
-    module = _load_dag_module()
-
-    run_features = module.dag.get_task("features.run_features")
-    command = run_features.bash_command
-    assert "build-hourly-segment-features" in command
+    run_sensor_processing = module.dag.get_task(
+        "sensor_processing.run_sensor_processing"
+    )
+    command = run_sensor_processing.bash_command
+    assert "cleanse-sensor-events" in command
     assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
     assert "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE" in command
     assert "HOURLY_SEGMENT_FEATURE_VERSION" in command
+    assert "--bronze-input-path=" in command
+    assert "CLEANSING_BRONZE_INPUT_PATH" in command
+    assert "--quarantine-output-path=" in command
+    assert "CLEANSING_QUARANTINE_OUTPUT_PATH" in command
+    assert "--road-segment-path=" in command
+    assert "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH" in command
+    assert "--output-path=" in command
+    assert "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH" in command
+    assert "-e CLEANSING_CONFIG_PATH" in command
+    assert "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH" in command
+    assert "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH" in command
+    assert "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH" in command
     assert "--run-id='{{ run_id }}'" in command
+    assert "build-hourly-segment-features" not in command
+    assert "CLEANSING_SILVER_OUTPUT_PATH" not in command
+    assert "HOURLY_SEGMENT_FEATURE_INPUT_PATH" not in command
 
 
 def test_run_scoring_invokes_score_hourly_comfort_with_templated_run_id():
@@ -134,8 +143,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
-        "cleanse.run_cleanse",
-        "features.run_features",
+        "sensor_processing.run_sensor_processing",
         "scoring.run_scoring",
         "publish.run_publish",
     }
@@ -144,14 +152,15 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
 def test_task_groups_follow_hourly_pipeline_order():
     module = _load_dag_module()
 
-    run_cleanse = module.dag.get_task("cleanse.run_cleanse")
-    run_features = module.dag.get_task("features.run_features")
+    run_sensor_processing = module.dag.get_task(
+        "sensor_processing.run_sensor_processing"
+    )
     run_scoring = module.dag.get_task("scoring.run_scoring")
     run_publish = module.dag.get_task("publish.run_publish")
 
-    assert run_cleanse.downstream_task_ids == {"features.run_features"}
-    assert run_features.upstream_task_ids == {"cleanse.run_cleanse"}
-    assert run_features.downstream_task_ids == {"scoring.run_scoring"}
-    assert run_scoring.upstream_task_ids == {"features.run_features"}
+    assert run_sensor_processing.downstream_task_ids == {"scoring.run_scoring"}
+    assert run_scoring.upstream_task_ids == {
+        "sensor_processing.run_sensor_processing"
+    }
     assert run_scoring.downstream_task_ids == {"publish.run_publish"}
     assert run_publish.upstream_task_ids == {"scoring.run_scoring"}

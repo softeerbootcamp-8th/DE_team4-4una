@@ -74,10 +74,9 @@ target hour's quarantine is replaced. T2 filters the passed DataFrame to its
 exact event-time interval before feature calculation. No cleansed-event dataset
 is written to and read back from S3.
 
-The Airflow integration is a follow-up change. It must invoke the combined
-command with the data interval start as the target hour and preserve the current
-exclusive interval end as publication `as_of`; the existing DAG still contains
-the former separate cleansing and feature commands.
+The Airflow `sensor_processing` task invokes the combined command with the data
+interval start as the target hour. The DAG then runs scoring and publication in
+order, preserving the exclusive interval end as publication `as_of`.
 
 ## Required traceability
 
