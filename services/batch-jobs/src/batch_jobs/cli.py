@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gold_parser = subparsers.add_parser("load-segment-comfort-score")
     gold_parser.add_argument("--as-of", required=True)
+
+    weather_parser = subparsers.add_parser("collect-weather-snapshots")
+    weather_parser.add_argument("--target-time", required=True)
     return parser
 
 
@@ -263,6 +266,43 @@ def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
         )
     finally:
         connection.close()
+
+
+def run_weather_snapshot_collection(arguments: argparse.Namespace) -> None:
+    import psycopg2
+
+    from batch_jobs.weather_snapshot_job import (
+        WeatherSnapshotJobConfig,
+        run_weather_snapshot_job,
+    )
+
+    # tz 필수/15분 경계 검증은 run_weather_snapshot_job이 한다(weather_snapshot_job.py).
+    target_time = datetime.fromisoformat(arguments.target_time)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = WeatherSnapshotJobConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_weather_snapshot_job(config, target_time, connection)
+        print(
+            json.dumps(
+                {
+                    "requested_zone_count": summary.requested_zone_count,
+                    "collected_count": summary.collected_count,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -276,6 +316,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "load-segment-comfort-score":
         run_segment_comfort_score_loading(arguments)
+        return
+    if arguments.command == "collect-weather-snapshots":
+        run_weather_snapshot_collection(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(
