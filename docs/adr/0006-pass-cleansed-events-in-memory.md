@@ -17,15 +17,13 @@ superseded_by:
 
 T2는 대상 시간의 이벤트를 계산할 때 직전 이벤트와 다음 이벤트가 필요하므로
 lookback/lookahead 구간을 읽는다. 중간 저장을 없애더라도 이 시간 경계 계산과
-기존 시간별 중복 제거 의미는 유지해야 한다. 또한 T2가 사용하던 `event_date`는
-기존 S3 경로가 아니라 클렌징 결과에서 파생할 위치를 명시해야 한다.
+기존 시간별 중복 제거 의미는 유지해야 한다.
 
 ## 결정
 
 T1과 T2를 하나의 Spark 애플리케이션과 세션에서 실행한다. T1이 T2의 정확한
 lookback/lookahead 구간과 겹치는 Bronze 시간들을 읽어 시간별로 클렌징하고,
-검증된 `event_time`에서 `event_date`를 파생한 typed DataFrame을 T2 함수에 직접
-전달한다.
+typed DataFrame을 T2 함수에 직접 전달한다.
 
 `processed_sensor_event`는 S3에 저장하지 않으며 T2도 이를 다시 읽지 않는다.
 영속 산출물은 대상 시간의 클렌징 quarantine과 최종
@@ -48,8 +46,8 @@ Airflow는 기존 T1/T2 개별 명령 대신 이 결합된 명령을 한 번 실
 - 중간 Parquet 쓰기와 읽기, `event_hour` 파티션 관리가 제거된다.
 - T1과 T2는 하나의 Spark 실행 단위가 되며 T2만 중간 결과에서 독립 재시작할
   수 없다. 실패 시 immutable Bronze부터 해당 시간을 다시 처리한다.
-- `event_date`는 저장 경로에서 복원하지 않고 T1이 검증된 `event_time`에서
-  파생한다.
+- `event_date`와 `event_hour`는 T1→T2 인메모리 계약에 포함하지 않는다. T2
+  출력 경로의 날짜와 시간은 실행 인자인 `target_hour`에서 결정한다.
 - T2의 lookback/lookahead를 충족하기 위해 T1은 대상 시간뿐 아니라 경계와
   겹치는 인접 Bronze 시간도 클렌징한다. 시간별 중복 제거 의미를 유지하고,
   quarantine 교체는 대상 시간에만 수행한다.

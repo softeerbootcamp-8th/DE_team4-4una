@@ -19,7 +19,6 @@ def to_processed_sensor_events(
     event_time = F.to_timestamp("event_time")
     overrides: dict[str, Column] = {
         "event_time": event_time,
-        "event_date": F.to_date(event_time),
         "_processed_at": F.lit(processed_at),
         "_run_id": F.lit(run_id),
     }

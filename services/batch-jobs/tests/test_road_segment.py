@@ -1024,7 +1024,6 @@ class TestBuild:
             "T1",
             0,
             cls.TARGET_HOUR,
-            cls.TARGET_HOUR.date(),
             cls.BASE_LAT,
             cls.BASE_LON,
             10.0,

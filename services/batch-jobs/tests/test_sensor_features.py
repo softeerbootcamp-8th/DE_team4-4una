@@ -1322,7 +1322,6 @@ class TestHourlySegmentFeatureJob:
             trip_id,
             trip_seq,
             event_time,
-            event_time.date(),
             latitude,
             longitude,
             10.0,

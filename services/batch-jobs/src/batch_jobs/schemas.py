@@ -52,7 +52,6 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("trip_id", StringType(), nullable=False),
         StructField("trip_seq", LongType(), nullable=False),
         StructField("event_time", TimestampType(), nullable=False),
-        StructField("event_date", DateType(), nullable=False),
         StructField("latitude", DoubleType(), nullable=False),
         StructField("longitude", DoubleType(), nullable=False),
         StructField("speed_mps", DoubleType(), nullable=False),

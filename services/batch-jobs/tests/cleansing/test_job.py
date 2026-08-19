@@ -82,7 +82,7 @@ def test_job_passes_typed_rows_directly_to_features(spark, tmp_path, monkeypatch
     assert summary.processed_count == 2
     assert summary.quarantined_count == 2
     assert {row["event_id"] for row in rows} == {"first", "second"}
-    assert {row["event_date"] for row in rows} == {TARGET_HOUR.date()}
+    assert all("event_date" not in row for row in rows)
     assert not (tmp_path / "processed_sensor_event").exists()
 
 

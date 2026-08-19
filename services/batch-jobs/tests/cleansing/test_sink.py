@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from batch_jobs.cleansing.hourly_storage import (
@@ -42,10 +42,11 @@ def test_transform_matches_the_in_memory_feature_schema(spark, tmp_path):
     )
 
     assert typed_columns(processed) == schema_columns(PROCESSED_SENSOR_EVENT_SCHEMA)
+    assert "event_date" not in processed.columns
     assert "event_hour" not in processed.columns
 
 
-def test_transform_casts_event_time_and_derives_event_date(spark, tmp_path):
+def test_transform_casts_event_time_and_overwrites_lineage(spark, tmp_path):
     path = write_bronze_parquet(spark, tmp_path, valid_value())
 
     row = to_processed_sensor_events(
@@ -53,7 +54,6 @@ def test_transform_casts_event_time_and_derives_event_date(spark, tmp_path):
     ).collect()[0]
 
     assert row["event_time"] == EVENT_TIME.replace(tzinfo=None)
-    assert row["event_date"] == date(2024, 2, 1)
     assert row["_run_id"] == RUN_ID
     assert row["_processed_at"] == PROCESSED_AT.replace(tzinfo=None)
 

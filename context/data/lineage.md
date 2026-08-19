@@ -60,7 +60,7 @@ The implemented `batch-jobs` hourly path now follows this dependency order:
 Bronze `sensor_event`
   -> hourly contract validation and cleansing
      -> target-hour cleansing quarantine (persisted)
-     -> accepted events with derived `event_date` (execution-local DataFrame)
+     -> accepted typed events (execution-local DataFrame)
         -> hourly GPS-to-road-segment matching
         -> segment x vehicle-profile features (persisted)
   -> hourly comfort scoring + rejected output

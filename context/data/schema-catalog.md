@@ -306,9 +306,9 @@ because processing occurred later. Audit history requirements remain open.
 **Role:** execution-local Spark DataFrame. **Storage:** not persisted. **Grain:**
 one accepted, deduplicated Bronze `sensor_event` row.
 
-T1 parses and validates `event_time`, derives `event_date`, applies cleansing and
-deduplication rules, and passes the typed DataFrame directly to T2 in the same
-Spark session. `event_hour` is not part of the contract because the DataFrame is
+T1 parses and validates `event_time`, applies cleansing and deduplication rules,
+and passes the typed DataFrame directly to T2 in the same Spark session. Neither
+`event_date` nor `event_hour` is part of the contract because the DataFrame is
 not written as an hourly partitioned dataset. Rejected rows are stored in the
 separate cleansing quarantine; accepted rows are consumed immediately by map
 matching and hourly feature calculation.

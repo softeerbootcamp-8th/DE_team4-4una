@@ -121,12 +121,11 @@ flowchart LR
 ```
 
 T1 reads every Bronze hour touched by T2's lookback and lookahead window,
-validates and deduplicates each hour, derives `event_date` from the validated
-`event_time`, and passes accepted rows directly to T2 in the same Spark session.
-There is no persisted `processed_sensor_event` boundary. Only the target-hour
-quarantine and `hourly_segment_features` are stored. The Airflow DAG still needs
-the follow-up orchestration change that invokes this combined command instead of
-the former two-command sequence.
+validates and deduplicates each hour, and passes accepted rows directly to T2 in
+the same Spark session. There is no persisted `processed_sensor_event` boundary.
+Only the target-hour quarantine and `hourly_segment_features` are stored. The
+Airflow DAG still needs the follow-up orchestration change that invokes this
+combined command instead of the former two-command sequence.
 
 ### Silver map matching
 
