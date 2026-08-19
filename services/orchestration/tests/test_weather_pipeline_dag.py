@@ -50,11 +50,19 @@ def test_dag_uses_a_15_minute_utc_data_interval():
     assert run_info.data_interval.end == pendulum.datetime(2026, 8, 19, 10, 15, tz="UTC")
 
 
-def test_dag_contains_only_run_weather_collection():
+def test_dag_collects_then_recomputes_changed_zones():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert task_ids == {"run_weather_collection"}
+    assert task_ids == {"run_weather_collection", "run_changed_zone_recompute"}
+
+    collection = module.dag.get_task("run_weather_collection")
+    recompute = module.dag.get_task("run_changed_zone_recompute")
+
+    # 수집이 끝난 뒤에 비교해야 새 impact_signature가 이미 저장된 상태가 된다.
+    assert collection.downstream_task_ids == {"run_changed_zone_recompute"}
+    assert isinstance(recompute, PythonOperator)
+    assert recompute.python_callable is module._recompute_changed_zone_scores
 
 
 def test_run_weather_collection_is_a_python_task_calling_the_collector():
