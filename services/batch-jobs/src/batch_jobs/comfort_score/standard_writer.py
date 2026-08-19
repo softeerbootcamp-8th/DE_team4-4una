@@ -22,7 +22,7 @@ from batch_jobs.db_lock_keys import STANDARD_JOB_STAGING_LOCK_KEY
 STAGING_TABLE = "standard_segment_comfort_score_staging"
 TARGET_TABLE = "standard_segment_comfort_score"
 
-# resources/migrations/0007_finalize_standard_segment_comfort_score.sql의 staging
+# resources/migrations/0008_finalize_standard_segment_comfort_score.sql의 staging
 # DDL과 정확히 일치해야 한다. information_schema.columns.data_type이 실제로
 # 반환하는 문자열 그대로다.
 EXPECTED_STAGING_COLUMNS = {

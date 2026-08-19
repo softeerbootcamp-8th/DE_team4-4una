@@ -212,7 +212,7 @@ class TestWeatherAwareComfortScoreMigration:
         ],
     )
     def test_standard_rejects_a_null_data_period(self, overrides):
-        """0007이 두 컬럼을 NOT NULL로 바꿨다 (#198).
+        """0008이 두 컬럼을 NOT NULL로 바꿨다 (#198).
 
         N=0이어도 배치 윈도우로 채워 넣으므로 NULL이 올라올 일이 없고, 그래서 0006의
         "둘 다 NULL이거나 둘 다 값" 짝 CHECK도 함께 사라졌다 — 반쪽이든 양쪽이든
