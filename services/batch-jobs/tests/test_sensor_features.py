@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import time
@@ -8,10 +7,8 @@ from pathlib import Path
 
 import pytest
 import shapely
-from batch_jobs.cli import build_parser, run_hourly_segment_feature_building
 from batch_jobs.hourly_segment_feature_job import (
     HourlySegmentFeatureJobConfig,
-    HourlySegmentFeatureJobSummary,
     run_hourly_segment_feature_job,
 )
 from batch_jobs.hourly_segment_feature_storage import (
@@ -41,7 +38,6 @@ from batch_jobs.sensor_features.events import (
 from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
 from pyproj import Transformer
 from pyspark.sql import Row, SparkSession
-from pyspark.sql import functions as F
 from pyspark.sql.types import (
     BooleanType,
     DateType,
@@ -1343,32 +1339,28 @@ class TestHourlySegmentFeatureJob:
             self.RUN_ID,
         )
 
-    def write_sensor_events(self, spark, tmp_path, rows: list[tuple]) -> str:
-        path = str(tmp_path / "processed_sensor_event")
-        (
-            spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA)
-            .withColumn("event_hour", F.hour("event_time"))
-            .write.mode("overwrite")
-            .partitionBy("event_date", "event_hour")
-            .parquet(path)
-        )
-        return path
+    def sensor_events(self, spark, rows: list[tuple]):
+        return spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA)
 
-    def build_config(self, spark, tmp_path, rows: list[tuple]) -> HourlySegmentFeatureJobConfig:
-        sensor_path = self.write_sensor_events(spark, tmp_path, rows)
+    def build_config(self, spark, tmp_path) -> HourlySegmentFeatureJobConfig:
         road_segment_path = self.write_road_segment(spark, tmp_path)
         return HourlySegmentFeatureJobConfig.from_env(
             {
-                "HOURLY_SEGMENT_FEATURE_INPUT_PATH": sensor_path,
                 "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH": road_segment_path,
                 "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH": str(tmp_path / "hourly_segment_features"),
             }
         )
 
     def run_job(self, spark, tmp_path, rows: list[tuple]):
-        config = self.build_config(spark, tmp_path, rows)
+        config = self.build_config(spark, tmp_path)
         summary = run_hourly_segment_feature_job(
-            spark, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION, self.RUN_ID,
+            spark,
+            self.sensor_events(spark, rows),
+            config,
+            self.TARGET_HOUR,
+            self.SNAPSHOT,
+            self.FEATURE_VERSION,
+            self.RUN_ID,
             self.PROCESSED_AT,
         )
         return summary, spark.read.parquet(summary.output_path).collect()
@@ -1480,19 +1472,30 @@ class TestHourlySegmentFeatureJob:
         assert result[0]["sample_count"] == 1
 
     def test_rerunning_the_same_hour_replaces_the_stored_result(self, spark, tmp_path) -> None:
-        config = self.build_config(spark, tmp_path, [self.sensor_row(self.TARGET_HOUR, "e1")])
+        config = self.build_config(spark, tmp_path)
 
         first = run_hourly_segment_feature_job(
-            spark, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION, "run-1",
+            spark,
+            self.sensor_events(spark, [self.sensor_row(self.TARGET_HOUR, "e1")]),
+            config,
+            self.TARGET_HOUR,
+            self.SNAPSHOT,
+            self.FEATURE_VERSION,
+            "run-1",
             self.PROCESSED_AT,
         )
         rows = [
             self.sensor_row(self.TARGET_HOUR, "e2"),
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=1), "e3", vehicle_profile_id=2),
         ]
-        config = self.build_config(spark, tmp_path, rows)
         second = run_hourly_segment_feature_job(
-            spark, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION, "run-2",
+            spark,
+            self.sensor_events(spark, rows),
+            config,
+            self.TARGET_HOUR,
+            self.SNAPSHOT,
+            self.FEATURE_VERSION,
+            "run-2",
             self.PROCESSED_AT,
         )
 
@@ -1515,81 +1518,22 @@ class TestHourlySegmentFeatureJob:
     def test_rejects_invalid_arguments(
         self, spark, tmp_path, target_hour, feature_version, run_id, processed_at
     ) -> None:
-        config = self.build_config(spark, tmp_path, [self.sensor_row(self.TARGET_HOUR, "e1")])
+        config = self.build_config(spark, tmp_path)
+        sensor_df = self.sensor_events(
+            spark, [self.sensor_row(self.TARGET_HOUR, "e1")]
+        )
 
         with pytest.raises(ValueError):
             run_hourly_segment_feature_job(
-                spark, config, target_hour, self.SNAPSHOT, feature_version, run_id, processed_at
+                spark,
+                sensor_df,
+                config,
+                target_hour,
+                self.SNAPSHOT,
+                feature_version,
+                run_id,
+                processed_at,
             )
-
-    def cli_args(self, sensor_path: str, road_segment_path: str, run_id: str, output_path: str | None):
-        arguments = [
-            "build-hourly-segment-features",
-            "--target-hour",
-            self.TARGET_HOUR.isoformat(),
-            "--road-snapshot-date",
-            self.SNAPSHOT.isoformat(),
-            "--feature-version",
-            self.FEATURE_VERSION,
-            "--run-id",
-            run_id,
-            "--input-path",
-            sensor_path,
-            "--road-segment-path",
-            road_segment_path,
-        ]
-        if output_path is not None:
-            arguments += ["--output-path", output_path]
-        return build_parser().parse_args(arguments)
-
-    def test_cli_passes_output_path_argument_to_the_job(self, spark, tmp_path, monkeypatch) -> None:
-        sensor_path = self.write_sensor_events(spark, tmp_path, [self.sensor_row(self.TARGET_HOUR, "e1")])
-        road_segment_path = self.write_road_segment(spark, tmp_path)
-        output_path = str(tmp_path / "cli_output")
-        monkeypatch.setattr(spark, "stop", lambda: None)
-
-        args = self.cli_args(sensor_path, road_segment_path, "cli-run-1", output_path)
-        run_hourly_segment_feature_building(args)
-
-        assert Path(hour_output_path(output_path, self.TARGET_HOUR)).exists()
-
-    def test_cli_falls_back_to_env_output_path_when_not_given(self, spark, tmp_path, monkeypatch) -> None:
-        sensor_path = self.write_sensor_events(spark, tmp_path, [self.sensor_row(self.TARGET_HOUR, "e1")])
-        road_segment_path = self.write_road_segment(spark, tmp_path)
-        env_output_path = str(tmp_path / "env_output")
-        monkeypatch.setenv("HOURLY_SEGMENT_FEATURE_OUTPUT_PATH", env_output_path)
-        monkeypatch.setattr(spark, "stop", lambda: None)
-
-        # --output-path를 주지 않으면 환경변수 기본값을 써야 한다.
-        args = self.cli_args(sensor_path, road_segment_path, "cli-run-2", output_path=None)
-        run_hourly_segment_feature_building(args)
-
-        assert Path(hour_output_path(env_output_path, self.TARGET_HOUR)).exists()
-
-    def test_cli_prints_the_job_summary_as_json_without_extra_spark_actions(
-        self, spark, tmp_path, monkeypatch, capsys
-    ) -> None:
-        summary = HourlySegmentFeatureJobSummary(
-            result_count=3, output_path="/fake/path", target_hour=self.TARGET_HOUR, run_id="cli-run-3"
-        )
-        calls = []
-
-        def fake_run_job(*args, **kwargs):
-            calls.append((args, kwargs))
-            return summary
-
-        monkeypatch.setattr(
-            "batch_jobs.hourly_segment_feature_job.run_hourly_segment_feature_job", fake_run_job
-        )
-        monkeypatch.setattr(spark, "stop", lambda: None)
-
-        args = self.cli_args("unused", "unused", "cli-run-3", output_path="unused")
-        run_hourly_segment_feature_building(args)
-
-        # Job이 요약을 반환한 뒤 CLI가 result.count() 같은 추가 Spark Action 없이 그대로 출력하는지 확인한다.
-        assert len(calls) == 1
-        printed = json.loads(capsys.readouterr().out)
-        assert printed == {"result_count": 3, "output_path": "/fake/path", "run_id": "cli-run-3"}
 
 
 @contextmanager
