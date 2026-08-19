@@ -1,4 +1,4 @@
-"""Spark batch entry point for Silver-to-Silver2 hourly segment feature building."""
+"""Build hourly segment features from an in-memory cleansed sensor DataFrame."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from pyspark import StorageLevel
-from pyspark.sql import Column, DataFrame, SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from batch_jobs.hourly_segment_feature_storage import (
@@ -29,7 +29,6 @@ from batch_jobs.map_matching.config import (
 )
 from batch_jobs.map_matching.scoring import score_segment_candidates
 from batch_jobs.map_matching.selection import select_best_segment
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_FILE_SCHEMA
 from batch_jobs.sensor_features.aggregation import build_hourly_segment_features
 from batch_jobs.sensor_features.config import (
     DEFAULT_EVENT_FEATURE_CONFIG_PATH,
@@ -49,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class HourlySegmentFeatureJobConfig:
-    processed_sensor_event_path: str
     road_segment_path: str
     output_path: str
     event_feature_config_path: Path
@@ -60,10 +58,6 @@ class HourlySegmentFeatureJobConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> HourlySegmentFeatureJobConfig:
         source = env if env is not None else os.environ
         return cls(
-            processed_sensor_event_path=source.get(
-                "HOURLY_SEGMENT_FEATURE_INPUT_PATH",
-                "data/local-lake/silver/processed_sensor_event",
-            ),
             road_segment_path=source.get(
                 "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH", "data/processed/road_segment"
             ),
@@ -105,6 +99,7 @@ def build_spark_session() -> SparkSession:
 # Map Matching -> Steering/Event Feature -> Hourly 집계 순으로 연결해 한 시간을 처리하고 저장한다
 def run_hourly_segment_feature_job(
     spark: SparkSession,
+    sensor_df: DataFrame,
     config: HourlySegmentFeatureJobConfig,
     target_hour: datetime,
     road_snapshot_date: date,
@@ -118,19 +113,10 @@ def run_hourly_segment_feature_job(
     steering_config = load_steering_feature_config(config.steering_feature_config_path)
     matching_config = load_map_matching_config(config.map_matching_config_path)
 
+    window_start, window_end = feature_input_window(config, target_hour)
     target_hour_end = target_hour + timedelta(hours=1)
-    lookback = timedelta(
-        seconds=max(event_config.max_gap_seconds.value, steering_config.max_gap_seconds.value)
-    )
-    lookahead = timedelta(seconds=event_config.lookahead_seconds.value)
-    window_start = target_hour - lookback
-    window_end = target_hour_end + lookahead
-
-    sensor_df = (
-        spark.read.schema(PROCESSED_SENSOR_EVENT_FILE_SCHEMA)
-        .parquet(config.processed_sensor_event_path)
-        .filter(_hour_partition_filter(window_start, window_end))
-        .filter((F.col("event_time") >= window_start) & (F.col("event_time") < window_end))
+    sensor_df = sensor_df.filter(
+        (F.col("event_time") >= window_start) & (F.col("event_time") < window_end)
     )
 
     # config.road_segment_path는 Manifest의 road_segment Artifact URI 그대로다 — 경로를 추가로 조립하지 않는다.
@@ -203,19 +189,18 @@ def run_hourly_segment_feature_job(
         target_df.unpersist()
 
 
-def _hour_partition_filter(window_start: datetime, window_end: datetime) -> Column:
-    """Select only Silver1 hour partitions touched by the event window."""
-    partition_hour = window_start.replace(minute=0, second=0, microsecond=0)
-    predicate: Column | None = None
-    while partition_hour < window_end:
-        hour_predicate = (F.col("event_date") == F.lit(partition_hour.date())) & (
-            F.col("event_hour") == F.lit(partition_hour.hour)
-        )
-        predicate = hour_predicate if predicate is None else predicate | hour_predicate
-        partition_hour += timedelta(hours=1)
-    if predicate is None:
-        raise ValueError("sensor read window must not be empty")
-    return predicate
+def feature_input_window(
+    config: HourlySegmentFeatureJobConfig,
+    target_hour: datetime,
+) -> tuple[datetime, datetime]:
+    """Return the exact event-time interval T2 needs around one target hour."""
+    event_config = load_event_feature_config(config.event_feature_config_path)
+    steering_config = load_steering_feature_config(config.steering_feature_config_path)
+    lookback = timedelta(
+        seconds=max(event_config.max_gap_seconds.value, steering_config.max_gap_seconds.value)
+    )
+    lookahead = timedelta(seconds=event_config.lookahead_seconds.value)
+    return target_hour - lookback, target_hour + timedelta(hours=1) + lookahead
 
 
 def _validate_job_arguments(

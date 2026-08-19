@@ -34,6 +34,22 @@ def build_parser() -> argparse.ArgumentParser:
     cleanse_parser = subparsers.add_parser("cleanse-sensor-events")
     cleanse_parser.add_argument("--run-id", required=True)
     cleanse_parser.add_argument("--target-hour", type=datetime.fromisoformat, required=True)
+    cleanse_parser.add_argument("--road-snapshot-date", type=date.fromisoformat, required=True)
+    cleanse_parser.add_argument("--feature-version", required=True)
+    cleanse_parser.add_argument("--bronze-input-path")
+    cleanse_parser.add_argument("--quarantine-output-path")
+    cleanse_parser.add_argument("--cleansing-config-path", type=Path)
+    cleanse_parser.add_argument(
+        "--road-segment-path",
+        help=(
+            "build-road-environment Manifest의 road_segment Artifact URI를 그대로 전달한다 "
+            "(디렉터리 접두사가 아니라 실제 Parquet 파일/경로)."
+        ),
+    )
+    cleanse_parser.add_argument("--output-path")
+    cleanse_parser.add_argument("--event-config-path", type=Path)
+    cleanse_parser.add_argument("--steering-config-path", type=Path)
+    cleanse_parser.add_argument("--map-matching-config-path", type=Path)
 
     score_parser = subparsers.add_parser("score-hourly-comfort")
     score_parser.add_argument("--input-path")
@@ -46,23 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     gold_parser = subparsers.add_parser("load-segment-comfort-score")
     gold_parser.add_argument("--as-of", required=True)
-    feature_parser = subparsers.add_parser("build-hourly-segment-features")
-    feature_parser.add_argument("--target-hour", type=datetime.fromisoformat, required=True)
-    feature_parser.add_argument("--road-snapshot-date", type=date.fromisoformat, required=True)
-    feature_parser.add_argument("--feature-version", required=True)
-    feature_parser.add_argument("--run-id")
-    feature_parser.add_argument("--input-path")
-    feature_parser.add_argument(
-        "--road-segment-path",
-        help=(
-            "build-road-environment Manifest의 road_segment Artifact URI를 그대로 전달한다 "
-            "(디렉터리 접두사가 아니라 실제 Parquet 파일/경로)."
-        ),
-    )
-    feature_parser.add_argument("--output-path")
-    feature_parser.add_argument("--event-config-path", type=Path)
-    feature_parser.add_argument("--steering-config-path", type=Path)
-    feature_parser.add_argument("--map-matching-config-path", type=Path)
     return parser
 
 
@@ -91,19 +90,67 @@ def add_bbox_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def run_cleansing(run_id: str, target_hour: datetime) -> None:
+def run_cleansing(arguments: argparse.Namespace) -> None:
     from batch_jobs.cleansing.config import CleansingJobConfig
     from batch_jobs.cleansing.job import build_spark_session, run_cleansing_job
+    from batch_jobs.hourly_segment_feature_job import HourlySegmentFeatureJobConfig
+
+    cleansing_defaults = CleansingJobConfig.from_env()
+    feature_defaults = HourlySegmentFeatureJobConfig.from_env()
+    cleansing_config = CleansingJobConfig(
+        bronze_input_path=(
+            arguments.bronze_input_path or cleansing_defaults.bronze_input_path
+        ),
+        quarantine_output_path=(
+            arguments.quarantine_output_path
+            or cleansing_defaults.quarantine_output_path
+        ),
+        rules_config_path=(
+            arguments.cleansing_config_path or cleansing_defaults.rules_config_path
+        ),
+    )
+    feature_config = HourlySegmentFeatureJobConfig(
+        road_segment_path=(
+            arguments.road_segment_path or feature_defaults.road_segment_path
+        ),
+        output_path=arguments.output_path or feature_defaults.output_path,
+        event_feature_config_path=(
+            arguments.event_config_path or feature_defaults.event_feature_config_path
+        ),
+        steering_feature_config_path=(
+            arguments.steering_config_path
+            or feature_defaults.steering_feature_config_path
+        ),
+        map_matching_config_path=(
+            arguments.map_matching_config_path
+            or feature_defaults.map_matching_config_path
+        ),
+    )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     spark = build_spark_session()
     try:
-        run_cleansing_job(
+        summary = run_cleansing_job(
             spark,
-            CleansingJobConfig.from_env(),
-            run_id,
-            target_hour,
+            cleansing_config,
+            feature_config,
+            arguments.run_id,
+            arguments.target_hour,
+            arguments.road_snapshot_date,
+            arguments.feature_version,
             datetime.now(UTC),
+        )
+        print(
+            json.dumps(
+                {
+                    "processed_count": summary.processed_count,
+                    "quarantined_count": summary.quarantined_count,
+                    "result_count": summary.feature_summary.result_count,
+                    "output_path": summary.feature_summary.output_path,
+                    "run_id": summary.feature_summary.run_id,
+                },
+                sort_keys=True,
+            )
         )
     finally:
         spark.stop()
@@ -216,62 +263,10 @@ def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
         )
     finally:
         connection.close()
-def run_hourly_segment_feature_building(arguments: argparse.Namespace) -> None:
-    from batch_jobs.hourly_segment_feature_job import (
-        HourlySegmentFeatureJobConfig,
-        build_spark_session,
-        run_hourly_segment_feature_job,
-    )
-
-    defaults = HourlySegmentFeatureJobConfig.from_env()
-    run_id = arguments.run_id or os.getenv("HOURLY_SEGMENT_FEATURE_RUN_ID")
-    if not run_id:
-        raise ValueError("--run-id or HOURLY_SEGMENT_FEATURE_RUN_ID is required")
-    config = HourlySegmentFeatureJobConfig(
-        processed_sensor_event_path=arguments.input_path or defaults.processed_sensor_event_path,
-        road_segment_path=arguments.road_segment_path or defaults.road_segment_path,
-        output_path=arguments.output_path or defaults.output_path,
-        event_feature_config_path=(
-            arguments.event_config_path or defaults.event_feature_config_path
-        ),
-        steering_feature_config_path=(
-            arguments.steering_config_path or defaults.steering_feature_config_path
-        ),
-        map_matching_config_path=(
-            arguments.map_matching_config_path or defaults.map_matching_config_path
-        ),
-    )
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    spark = build_spark_session()
-    try:
-        summary = run_hourly_segment_feature_job(
-            spark,
-            config,
-            arguments.target_hour,
-            arguments.road_snapshot_date,
-            arguments.feature_version,
-            run_id,
-            datetime.now(UTC),
-        )
-        print(
-            json.dumps(
-                {
-                    "result_count": summary.result_count,
-                    "output_path": summary.output_path,
-                    "run_id": summary.run_id,
-                },
-                sort_keys=True,
-            )
-        )
-    finally:
-        spark.stop()
-
-
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
-        run_cleansing(arguments.run_id, arguments.target_hour)
+        run_cleansing(arguments)
         return
     if arguments.command == "score-hourly-comfort":
         run_hourly_scoring(arguments)
@@ -282,10 +277,6 @@ def main(argv: list[str] | None = None) -> None:
     if arguments.command == "load-segment-comfort-score":
         run_segment_comfort_score_loading(arguments)
         return
-    if arguments.command == "build-hourly-segment-features":
-        run_hourly_segment_feature_building(arguments)
-        return
-
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(
             arguments.output_dir,

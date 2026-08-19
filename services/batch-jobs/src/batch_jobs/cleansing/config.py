@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
+
+from batch_jobs.cleansing.rules import DEFAULT_CLEANSING_CONFIG_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,8 +15,8 @@ class CleansingJobConfig:
     """Runtime settings for the cleansing job, sourced entirely from the environment."""
 
     bronze_input_path: str
-    processed_output_path: str
     quarantine_output_path: str
+    rules_config_path: Path
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> CleansingJobConfig:
@@ -25,11 +28,11 @@ class CleansingJobConfig:
             bronze_input_path=source.get(
                 "CLEANSING_BRONZE_INPUT_PATH", "data/local-lake/bronze/sensor-events"
             ),
-            processed_output_path=source.get(
-                "CLEANSING_SILVER_OUTPUT_PATH", "data/local-lake/silver/processed_sensor_event"
-            ),
             quarantine_output_path=source.get(
                 "CLEANSING_QUARANTINE_OUTPUT_PATH",
                 "data/local-lake/silver/sensor_event_quarantine",
+            ),
+            rules_config_path=Path(
+                source.get("CLEANSING_CONFIG_PATH") or DEFAULT_CLEANSING_CONFIG_PATH
             ),
         )

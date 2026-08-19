@@ -1,4 +1,4 @@
-"""Spark schemas for the Bronze-to-Silver sensor-event cleansing job."""
+"""Spark schemas for sensor-event cleansing and feature processing."""
 
 from __future__ import annotations
 
@@ -67,17 +67,6 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("steering_angle", DoubleType(), nullable=True),
         StructField("_processed_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
-    ]
-)
-
-# event_date/event_hour는 Silver1 디렉터리에서 복원되는 파티션 컬럼이다.
-# event_hour는 저장 직전에 생성되므로 위 논리 행 스키마에는 없고, 두 컬럼 모두
-# 개별 Parquet 파일의 물리 스키마에서는 제외된다.
-PROCESSED_SENSOR_EVENT_FILE_SCHEMA = StructType(
-    [
-        field
-        for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
-        if field.name != "event_date"
     ]
 )
 

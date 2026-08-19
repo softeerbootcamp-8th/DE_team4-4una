@@ -1,4 +1,4 @@
-"""Turn cleansed Bronze rows into processed_sensor_event rows and store them."""
+"""Convert cleansed Bronze rows for in-memory feature processing."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def to_processed_sensor_events(
     run_id: str,
     processed_at: datetime,
 ) -> DataFrame:
-    """Convert cleansed rows into processed_sensor_event rows."""
+    """Convert cleansed rows into the typed DataFrame consumed by features."""
     event_time = F.to_timestamp("event_time")
     overrides: dict[str, Column] = {
         "event_time": event_time,
@@ -28,4 +28,4 @@ def to_processed_sensor_events(
             overrides.get(field.name, F.col(field.name)).alias(field.name)
             for field in PROCESSED_SENSOR_EVENT_SCHEMA.fields
         ]
-    ).withColumn("event_hour", F.hour(event_time))
+    )
