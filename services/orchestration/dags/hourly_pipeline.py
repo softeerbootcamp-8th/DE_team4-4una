@@ -1,10 +1,10 @@
-"""batch-jobs 4단계 배치 파이프라인을 오케스트레이션하는 시간배치 DAG.
+"""batch-jobs 3단계 배치 파이프라인을 오케스트레이션하는 시간배치 DAG.
 
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
-scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고
-cleanse >> features >> scoring 의존관계를 연결한다. 이슈 #176: publish 단계를
-추가한다(#157의 마지막 진행). 이슈 #189: scoring이 만든 시간별 점수를 publish가
-같은 실행에서 적재하도록 4단계 의존관계를 완성한다.
+scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고, 이슈 #176에서
+publish 단계를 추가했다. 이슈 #189: 4단계 의존관계를 완성했다. 이슈 #205:
+cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 단계로
+통합한다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -22,14 +22,6 @@ EMR Serverless로 연결되면(ADR 0001, 후속 이슈) 이 `docker run` 호출�
 `EmrServerlessStartJobOperator`로 교체된다. TaskGroup 경계·task 의존관계·
 `run_id` 템플릿 전달 방식은 그대로 유지된다.
 
-**알려진 한계(cleanse)**: `CleansingJobConfig.from_env()`(batch-jobs)가 누락된
-환경변수를 조용히 기본값으로 대체하기 때문에, 아래 `-e` 목록과 batch-jobs가
-기대하는 설정 키가 어긋나도 에러 없이 잘못된 경로로 실행될 수 있다. orchestration
-서비스 범위 밖이라 이번 이슈에서는 고치지 않는다.
-
-**scoring은 이 한계를 재현하지 않는다**: `HourlyComfortJobConfig.from_env()`도
-동일하게 `or` 패턴으로 기본값을 대체하지만, 이는 batch-jobs가 의도적으로
-설계한 동작이다(빈 값이 오면 로컬 기본 경로로 fallback).
 """
 
 from __future__ import annotations
@@ -42,14 +34,20 @@ from airflow.sdk import DAG, TaskGroup
 from airflow.timetables.interval import CronDataIntervalTimetable
 
 # BATCH_JOBS_IMAGE_TAG는 `make build-batch-jobs-image`가 만든 git-SHA 태그를
-# 가리켜야 한다(재현성). 값이 없으면 어떤 코드가 실행되는지 보장할 수 없으므로
-# `:?`로 즉시 실패시킨다.
-_RUN_CLEANSE_BASH_COMMAND = (
+# 가리켜야 한다(재현성). HOST_PROJECT_DIR와 BATCH_JOBS_IMAGE_TAG가 없으면
+# 셸의 `:?` 문법으로 docker 실행 전에 즉시 실패시킨다.
+#
+# T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
+# cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
+_RUN_SENSOR_PROCESSING_BASH_COMMAND = (
     "docker run --rm --network de4-local "
     "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:/app/data/local-lake "
-    "-e CLEANSING_BRONZE_INPUT_PATH -e CLEANSING_SILVER_OUTPUT_PATH "
-    "-e CLEANSING_QUARANTINE_OUTPUT_PATH -e CLEANSING_SILVER_PARTITION_COLUMN "
-    "-e CLEANSING_QUARANTINE_PARTITION_COLUMN "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/processed:"
+    "/app/data/processed:ro "
+    "-e CLEANSING_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH "
+    "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH "
     "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
     # 이미지의 기본 CMD(`uv run --no-sync --package batch-jobs batch-jobs`)를 그대로
     # 반복해야 한다. `docker run <image> <cmd>`는 CMD를 완전히 덮어써서 셸 없이
@@ -58,32 +56,17 @@ _RUN_CLEANSE_BASH_COMMAND = (
     "uv run --no-sync --package batch-jobs batch-jobs "
     "cleanse-sensor-events "
     "--target-hour='{{ data_interval_start.isoformat() }}' "
-    "--run-id='{{ run_id }}'"
-)
-
-# 경로·feature 설정은 HourlySegmentFeatureJobConfig.from_env()가 환경변수에서
-# 읽는다. target_hour/run_id는 Airflow 실행 컨텍스트에서, road snapshot과 feature
-# version은 orchestration 환경의 필수 설정에서 CLI 인자로 전달한다.
-_RUN_FEATURES_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
-    "/app/data/local-lake "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/processed:"
-    "/app/data/processed:ro "
-    "-e HOURLY_SEGMENT_FEATURE_INPUT_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_OUTPUT_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "build-hourly-segment-features "
-    "--target-hour='{{ data_interval_start.isoformat() }}' "
     '--road-snapshot-date="${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE'
     ':?HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE must be set}" '
     '--feature-version="${HOURLY_SEGMENT_FEATURE_VERSION'
     ':?HOURLY_SEGMENT_FEATURE_VERSION must be set}" '
+    '--bronze-input-path="${CLEANSING_BRONZE_INPUT_PATH:-data/local-lake/bronze/sensor-events}" '
+    '--quarantine-output-path="${CLEANSING_QUARANTINE_OUTPUT_PATH:-data/local-lake/silver/'
+    'sensor_event_quarantine}" '
+    '--road-segment-path="${HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH:-data/processed/'
+    'road_segment}" '
+    '--output-path="${HOURLY_SEGMENT_FEATURE_OUTPUT_PATH:-data/local-lake/silver/'
+    'hourly_segment_features}" '
     "--run-id='{{ run_id }}'"
 )
 
@@ -118,7 +101,7 @@ _RUN_PUBLISH_BASH_COMMAND = (
 
 with DAG(
     dag_id="hourly_pipeline",
-    description="cleanse -> features -> scoring -> publish 4단계 시간배치 파이프라인",
+    description="sensor processing -> scoring -> publish 3단계 시간배치 파이프라인",
     # Airflow 3의 bare cron 기본값인 CronTriggerTimetable은 data interval의
     # 시작과 끝을 같은 시각으로 만든다. 이 DAG는 09시 실행을 [09:00, 10:00)으로
     # 처리하고 publish의 as_of에 10:00을 넘겨야 하므로 interval timetable을
@@ -135,17 +118,10 @@ with DAG(
     },
     tags=["hourly-pipeline"],
 ) as dag:
-    with TaskGroup(group_id="cleanse") as cleanse:
-        # 후속 이슈에서 Great Expectations 검증 task가 이 TaskGroup 안에 추가될 자리.
-        run_cleanse = BashOperator(
-            task_id="run_cleanse",
-            bash_command=_RUN_CLEANSE_BASH_COMMAND,
-        )
-
-    with TaskGroup(group_id="features") as features:
-        run_features = BashOperator(
-            task_id="run_features",
-            bash_command=_RUN_FEATURES_BASH_COMMAND,
+    with TaskGroup(group_id="sensor_processing") as sensor_processing:
+        run_sensor_processing = BashOperator(
+            task_id="run_sensor_processing",
+            bash_command=_RUN_SENSOR_PROCESSING_BASH_COMMAND,
         )
 
     with TaskGroup(group_id="scoring") as scoring:
@@ -160,4 +136,4 @@ with DAG(
             bash_command=_RUN_PUBLISH_BASH_COMMAND,
         )
 
-    cleanse >> features >> scoring >> publish
+    sensor_processing >> scoring >> publish
