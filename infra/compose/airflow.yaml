@@ -1,6 +1,4 @@
-x-airflow-common: &airflow-common
-  image: apache/airflow:3.3.1-python3.12
-  environment:
+x-airflow-env: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_POSTGRES_DB}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
@@ -45,6 +43,11 @@ x-airflow-common: &airflow-common
     # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
     # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
     AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.1-python3.12
+  environment:
+    <<: *airflow-env
   volumes:
     - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
 
@@ -64,11 +67,25 @@ services:
     <<: *airflow-common
     command: scheduler
     # LocalExecutor는 task를 scheduler 프로세스 안에서 실행하므로, host의 docker에
-    # 위임하는(docker-outside-of-docker) BashOperator는 이 컨테이너에서만 동작하면 된다.
-    # 로컬 전용 배선이며, 이 소켓은 host docker에 대한 사실상의 제어권을 준다 —
-    # 공유/운영 환경으로 그대로 옮기지 않는다.
+    # 위임하는(docker-outside-of-docker) BashOperator나 weather_pipeline(#207)의
+    # PythonOperator 둘 다 이 컨테이너에서만 동작하면 된다 — dag-processor/webserver는
+    # task를 실행하지 않으므로 아래 jobs 배선이 필요 없다.
+    environment:
+      <<: *airflow-env
+      # weather_pipeline이 PythonOperator에서 jobs.weather를 임포트하기 위한 배선.
+      # jobs/를 아래 마운트하고 PYTHONPATH에 그 부모를 잡아 `from jobs.weather import ...`가
+      # 되게 한다. jobs.weather는 함수 안에서만 임포트되므로(지연 임포트) dag-processor는
+      # 이 값이 없어도 DAG를 정상 파싱한다.
+      PYTHONPATH: ${AIRFLOW_HOME}/orchestration
+      ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
+      # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
+      # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1"
     volumes:
       - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+      - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
+      # weather_pipeline의 task가 실제로 실행되는 컨테이너에만 필요 — zone_master.parquet 읽기용(:ro).
+      - ../../data/reference:${AIRFLOW_HOME}/data/reference:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-init:

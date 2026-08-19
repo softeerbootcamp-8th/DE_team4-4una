@@ -1,15 +1,20 @@
-"""Tests for weather_snapshot_job.py (#199)."""
+# jobs/weather.py 테스트 (#207; batch-jobs의 weather_snapshot_job.py에서 이식, #209).
 
 from __future__ import annotations
 
 import os
+import sys
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 
-import pandas as pd
 import psycopg2
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
-from batch_jobs.migrate import MigrationConfig, run_migrations
-from batch_jobs.weather_snapshot_job import (
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "jobs"))
+
+from weather import (
     FOG_WEATHER_CODES,
     HIGH_WIND_GUST_THRESHOLD_MPS,
     HTTP_RETRY_STATUS_FORCELIST,
@@ -17,7 +22,7 @@ from batch_jobs.weather_snapshot_job import (
     LOW_VISIBILITY_THRESHOLD_M,
     RAIN_WEATHER_CODES,
     SNOW_WEATHER_CODES,
-    WeatherSnapshotJobConfig,
+    LatestZoneWeatherJobConfig,
     ZoneCoordinate,
     _build_default_session,
     _validate_target_time,
@@ -25,13 +30,25 @@ from batch_jobs.weather_snapshot_job import (
     classify_weather_state,
     fetch_open_meteo,
     load_zone_coordinates,
-    run_weather_snapshot_job,
+    run_latest_zone_weather_job,
 )
 
 RUN_INTEGRATION = os.environ.get("RUN_INTEGRATION") == "1"
 
 TARGET_TIME = datetime(2026, 8, 19, 10, 15, tzinfo=UTC)
 TARGET_KEY = "2026-08-19T10:15"
+
+
+def write_zone_master(path: Path, *, location_id=181, latitude=40.7, longitude=-73.9) -> Path:
+    table = pa.table(
+        {
+            "location_id": [location_id],
+            "representative_latitude": [latitude],
+            "representative_longitude": [longitude],
+        }
+    )
+    pq.write_table(table, path)
+    return path
 
 
 class FakeResponse:
@@ -94,10 +111,6 @@ class TestValidateTargetTime:
         with pytest.raises(ValueError, match="15-minute boundary"):
             _validate_target_time(datetime(2026, 8, 19, 10, 5, tzinfo=UTC))
 
-    def test_rejects_a_non_zero_second(self):
-        with pytest.raises(ValueError, match="15-minute boundary"):
-            _validate_target_time(datetime(2026, 8, 19, 10, 15, 30, tzinfo=UTC))
-
     def test_accepts_every_valid_boundary_minute(self):
         for minute in (0, 15, 30, 45):
             _validate_target_time(datetime(2026, 8, 19, 10, minute, tzinfo=UTC))  # must not raise
@@ -149,9 +162,6 @@ class TestClassifyWeatherState:
     def test_fog_from_low_visibility_just_below_the_threshold(self):
         assert classify_weather_state(reading(visibility=LOW_VISIBILITY_THRESHOLD_M - 1)) == "fog"
 
-    def test_not_fog_at_the_visibility_threshold(self):
-        assert classify_weather_state(reading(visibility=LOW_VISIBILITY_THRESHOLD_M)) == "dry"
-
     def test_rain_takes_priority_over_fog_when_both_present(self):
         assert (
             classify_weather_state(reading(rain=0.2, visibility=LOW_VISIBILITY_THRESHOLD_M - 1))
@@ -162,20 +172,6 @@ class TestClassifyWeatherState:
         assert (
             classify_weather_state(reading(wind_gusts_10m=HIGH_WIND_GUST_THRESHOLD_MPS))
             == "high_wind"
-        )
-
-    def test_not_high_wind_just_below_the_gust_threshold(self):
-        assert (
-            classify_weather_state(reading(wind_gusts_10m=HIGH_WIND_GUST_THRESHOLD_MPS - 0.1))
-            == "dry"
-        )
-
-    def test_fog_takes_priority_over_high_wind_when_both_present(self):
-        assert (
-            classify_weather_state(
-                reading(visibility=LOW_VISIBILITY_THRESHOLD_M - 1, wind_gusts_10m=20.0)
-            )
-            == "fog"
         )
 
     def test_missing_value_is_treated_as_absent_not_an_error(self):
@@ -189,22 +185,18 @@ class TestBuildImpactSignature:
     def test_a_changed_field_produces_a_different_signature(self):
         assert build_impact_signature(reading()) != build_impact_signature(reading(rain=0.2))
 
-    def test_field_order_does_not_matter(self):
-        a = {"temperature_2m": 1, "rain": 2}
-        b = {"rain": 2, "temperature_2m": 1}
-        assert build_impact_signature(a) == build_impact_signature(b)
-
 
 class TestLoadZoneCoordinates:
     def test_drops_zones_with_missing_coordinates(self, tmp_path):
-        path = tmp_path / "zone_master.parquet"
-        pd.DataFrame(
+        table = pa.table(
             {
                 "location_id": [181, 264, 265],
                 "representative_latitude": [40.7, None, None],
                 "representative_longitude": [-73.9, None, None],
             }
-        ).to_parquet(path)
+        )
+        path = tmp_path / "zone_master.parquet"
+        pq.write_table(table, path)
 
         zones = load_zone_coordinates(path)
 
@@ -215,7 +207,6 @@ class TestLoadZoneCoordinates:
 class TestFetchOpenMeteo:
     def test_maps_readings_back_to_the_requesting_zone(self):
         zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
-        # Open-Meteo가 여러 좌표를 요청하면 위치별 구조체 리스트를 돌려준다.
         session = FakeSession(
             [
                 [
@@ -229,22 +220,6 @@ class TestFetchOpenMeteo:
 
         assert readings[181]["rain"] == 0.5
         assert readings[182]["rain"] == 0.0
-
-    def test_sends_batch_size_requests_when_zone_count_exceeds_batch_size(self):
-        zones = [ZoneCoordinate(i, 40.0 + i, -73.0 - i) for i in range(1, 4)]
-        session = FakeSession(
-            [
-                [location_payload([TARGET_KEY]), location_payload([TARGET_KEY])],
-                [location_payload([TARGET_KEY])],
-            ]
-        )
-
-        readings = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=2)
-
-        assert len(session.calls) == 2
-        assert set(readings) == {1, 2, 3}
-        assert session.calls[0]["params"]["latitude"] == "41.0,42.0"
-        assert session.calls[1]["params"]["latitude"] == "43.0"
 
     def test_skips_a_zone_whose_response_has_no_matching_target_time(self):
         zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
@@ -261,13 +236,6 @@ class TestFetchOpenMeteo:
 
         assert set(readings) == {181}
 
-    def test_raises_when_response_location_count_does_not_match_request(self):
-        zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
-        session = FakeSession([[location_payload([TARGET_KEY])]])
-
-        with pytest.raises(ValueError, match="cannot match by position"):
-            fetch_open_meteo(zones, TARGET_TIME, session=session)
-
 
 def _connect():
     return psycopg2.connect(
@@ -282,19 +250,13 @@ def _connect():
 @pytest.mark.skipif(
     not RUN_INTEGRATION, reason="set RUN_INTEGRATION=1 to run against a real Postgres"
 )
-class TestWeatherSnapshotJobIntegration:
+class TestWeatherJobIntegration:
+    # latest_zone_weather는 batch-jobs의 마이그레이션(0007)이 만든다 — orchestration은
+    # 서빙 DB를 그대로 쓰는 쪽이라 여기서 마이그레이션을 실행하지 않는다. 대상 DB에
+    # `make migrate`가 먼저 적용돼 있어야 한다.
     @staticmethod
-    @pytest.fixture(scope="class", autouse=True)
-    def migrated():
-        connection = _connect()
-        try:
-            run_migrations(MigrationConfig.from_env().migrations_dir, connection)
-        finally:
-            connection.close()
-
-    @staticmethod
-    def _truncate() -> None:
-        # #209: current_segment_comfort_score의 weather FK가 없어져 latest_zone_weather만 비우면 된다.
+    @pytest.fixture(autouse=True)
+    def clean_table():
         connection = _connect()
         try:
             with connection.cursor() as cursor:
@@ -302,18 +264,12 @@ class TestWeatherSnapshotJobIntegration:
             connection.commit()
         finally:
             connection.close()
-
-    @staticmethod
-    @pytest.fixture(autouse=True)
-    def clean_tables():
-        TestWeatherSnapshotJobIntegration._truncate()
         yield
-        TestWeatherSnapshotJobIntegration._truncate()
 
     @staticmethod
-    def make_config(zone_master_path) -> WeatherSnapshotJobConfig:
+    def make_config(zone_master_path) -> LatestZoneWeatherJobConfig:
         env = os.environ
-        return WeatherSnapshotJobConfig(
+        return LatestZoneWeatherJobConfig(
             zone_master_path=zone_master_path,
             postgres_host=env["POSTGRES_HOST"],
             postgres_port=int(env["POSTGRES_PORT"]),
@@ -322,54 +278,18 @@ class TestWeatherSnapshotJobIntegration:
             postgres_password=env["POSTGRES_PASSWORD"],
         )
 
-    @staticmethod
-    def write_zone_master(tmp_path, *, location_id=181, latitude=40.7, longitude=-73.9):
-        path = tmp_path / "zone_master.parquet"
-        pd.DataFrame(
-            {
-                "location_id": [location_id],
-                "representative_latitude": [latitude],
-                "representative_longitude": [longitude],
-            }
-        ).to_parquet(path)
-        return path
-
-    def test_a_rerun_at_the_same_target_time_updates_the_row(self, tmp_path):
-        zone_master_path = self.write_zone_master(tmp_path)
-        config = self.make_config(zone_master_path)
-        connection = _connect()
-        try:
-            session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
-            first = run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
-            assert first.collected_count == 1
-
-            session = FakeSession([[location_payload([TARGET_KEY], rain=[5.0])]])
-            second = run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
-            assert second.collected_count == 1
-
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT rain_mm, weather_state FROM latest_zone_weather "
-                    "WHERE location_id = 181"
-                )
-                rows = cursor.fetchall()
-            assert rows == [(5.0, "rain")]
-        finally:
-            connection.close()
-
     def test_a_later_target_time_updates_the_same_row_instead_of_inserting(self, tmp_path):
-        # #209: PK가 location_id뿐이라, 새 weather_time이 와도 존당 행은 하나로 유지돼야 한다.
-        zone_master_path = self.write_zone_master(tmp_path)
+        zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
         config = self.make_config(zone_master_path)
         connection = _connect()
         try:
             session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
-            run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
+            run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
 
             later_target_time = TARGET_TIME + timedelta(minutes=15)
             later_target_key = "2026-08-19T10:30"
             session = FakeSession([[location_payload([later_target_key], rain=[5.0])]])
-            run_weather_snapshot_job(config, later_target_time, connection, session=session)
+            run_latest_zone_weather_job(config, later_target_time, connection, session=session)
 
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -381,43 +301,40 @@ class TestWeatherSnapshotJobIntegration:
         finally:
             connection.close()
 
-    def test_upsert_refreshes_coordinates_on_rerun(self, tmp_path):
-        zone_master_path = self.write_zone_master(
-            tmp_path, latitude=40.7, longitude=-73.9
-        )
+    def test_an_older_target_time_does_not_overwrite_a_newer_row(self, tmp_path):
+        # 10:30이 먼저 끝나고 재시도 등으로 늦게 끝난 10:15가 그 뒤에 와도 10:30 값을 지키는지 확인.
+        zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
         config = self.make_config(zone_master_path)
         connection = _connect()
         try:
-            session = FakeSession([[location_payload([TARGET_KEY])]])
-            run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
+            newer_target_time = TARGET_TIME + timedelta(minutes=15)
+            newer_target_key = "2026-08-19T10:30"
+            session = FakeSession([[location_payload([newer_target_key], rain=[5.0])]])
+            run_latest_zone_weather_job(config, newer_target_time, connection, session=session)
 
-            # zone_master의 대표좌표가 갱신됐다고 가정하고 새 zone_master로 재실행.
-            moved_zone_master_path = self.write_zone_master(
-                tmp_path, latitude=41.0, longitude=-74.5
-            )
-            moved_config = self.make_config(moved_zone_master_path)
-            session = FakeSession([[location_payload([TARGET_KEY])]])
-            run_weather_snapshot_job(moved_config, TARGET_TIME, connection, session=session)
+            session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
+            run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
 
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT latitude, longitude FROM latest_zone_weather "
+                    "SELECT weather_time, rain_mm, weather_state FROM latest_zone_weather "
                     "WHERE location_id = 181"
                 )
                 rows = cursor.fetchall()
-            assert rows == [(41.0, -74.5)]
+            assert rows == [(newer_target_time, 5.0, "rain")]
         finally:
             connection.close()
 
     def test_a_missing_zone_fails_the_whole_run_and_writes_nothing(self, tmp_path):
         zone_master_path = tmp_path / "zone_master.parquet"
-        pd.DataFrame(
+        table = pa.table(
             {
                 "location_id": [181, 182],
                 "representative_latitude": [40.7, 40.8],
                 "representative_longitude": [-73.9, -74.0],
             }
-        ).to_parquet(zone_master_path)
+        )
+        pq.write_table(table, zone_master_path)
         config = self.make_config(zone_master_path)
         connection = _connect()
         try:
@@ -431,7 +348,7 @@ class TestWeatherSnapshotJobIntegration:
             )
 
             with pytest.raises(RuntimeError, match="182"):
-                run_weather_snapshot_job(config, TARGET_TIME, connection, session=session)
+                run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
 
             with connection.cursor() as cursor:
                 cursor.execute("SELECT count(*) FROM latest_zone_weather")

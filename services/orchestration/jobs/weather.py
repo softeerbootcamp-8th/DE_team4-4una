@@ -1,4 +1,5 @@
-# Open-Meteo 15분 날씨를 latest_zone_weather(존당 최신 1행)에 수집한다 (#199, #209).
+# Open-Meteo 15분 날씨를 latest_zone_weather(존당 최신 1행)에 수집한다 (#199, #209, #207).
+# batch-jobs(EMR/Spark 전용)가 아니라 orchestration의 lightweight Python job으로 둔다 — Spark가 필요 없다.
 
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pandas as pd
+import pyarrow.parquet as pq
 import requests
 from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
@@ -88,7 +89,9 @@ ON CONFLICT (location_id) DO UPDATE SET
     weather_state = EXCLUDED.weather_state,
     impact_signature = EXCLUDED.impact_signature,
     fetched_at = EXCLUDED.fetched_at
+WHERE {TABLE}.weather_time <= EXCLUDED.weather_time
 """
+# WHERE 없으면 늦게 끝난 옛 target_time 실행(재시도 등)이 더 최신 행을 덮어쓸 수 있다.
 
 # 날씨 상태 분류 임계값/코드(우선값, 최종 확정은 후속 이슈) — WMO weather_code 우선, 실측값 보완.
 HIGH_WIND_GUST_THRESHOLD_MPS = 15.0
@@ -106,7 +109,7 @@ class ZoneCoordinate:
 
 
 @dataclass(frozen=True, slots=True)
-class WeatherSnapshotJobConfig:
+class LatestZoneWeatherJobConfig:
     zone_master_path: Path
     postgres_host: str
     postgres_port: int
@@ -115,7 +118,7 @@ class WeatherSnapshotJobConfig:
     postgres_password: str
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> WeatherSnapshotJobConfig:
+    def from_env(cls, env: Mapping[str, str] | None = None) -> LatestZoneWeatherJobConfig:
         source = env if env is not None else os.environ
         return cls(
             zone_master_path=Path(
@@ -137,7 +140,7 @@ def _require(source: Mapping[str, str], key: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class WeatherSnapshotJobSummary:
+class LatestZoneWeatherJobSummary:
     requested_zone_count: int
     collected_count: int
 
@@ -176,18 +179,17 @@ def _build_default_session() -> requests.Session:
 
 # zone_master.parquet에서 location_id/대표좌표를 읽는다 — 좌표 없는 zone(264, 265)은 제외.
 def load_zone_coordinates(zone_master_path: Path) -> list[ZoneCoordinate]:
-    frame = pd.read_parquet(
+    table = pq.read_table(
         zone_master_path,
         columns=["location_id", "representative_latitude", "representative_longitude"],
     )
-    frame = frame.dropna(subset=["representative_latitude", "representative_longitude"])
+    location_ids = table.column("location_id").to_pylist()
+    latitudes = table.column("representative_latitude").to_pylist()
+    longitudes = table.column("representative_longitude").to_pylist()
     return [
-        ZoneCoordinate(
-            location_id=int(row.location_id),
-            latitude=float(row.representative_latitude),
-            longitude=float(row.representative_longitude),
-        )
-        for row in frame.itertuples()
+        ZoneCoordinate(location_id=int(location_id), latitude=float(latitude), longitude=float(longitude))
+        for location_id, latitude, longitude in zip(location_ids, latitudes, longitudes, strict=True)
+        if latitude is not None and longitude is not None
     ]
 
 
@@ -291,13 +293,13 @@ def upsert_latest_zone_weather(connection, rows: Sequence[Mapping[str, object]])
     return len(rows)
 
 
-def run_weather_snapshot_job(
-    config: WeatherSnapshotJobConfig,
+def run_latest_zone_weather_job(
+    config: LatestZoneWeatherJobConfig,
     target_time: datetime,
     connection,
     *,
     session: requests.Session | None = None,
-) -> WeatherSnapshotJobSummary:
+) -> LatestZoneWeatherJobSummary:
     target_time = _validate_target_time(target_time)
     zones = load_zone_coordinates(config.zone_master_path)
     zones_by_id = {zone.location_id: zone for zone in zones}
@@ -337,7 +339,7 @@ def run_weather_snapshot_job(
     ]
 
     collected_count = upsert_latest_zone_weather(connection, rows)
-    return WeatherSnapshotJobSummary(
+    return LatestZoneWeatherJobSummary(
         requested_zone_count=len(zones),
         collected_count=collected_count,
     )
