@@ -25,6 +25,7 @@ from batch_jobs.comfort_score.formula import (
     compute_standard_comfort_scores,
 )
 from batch_jobs.comfort_score.standard_job import (
+    POSTGRES_JDBC_PACKAGE,
     StandardComfortScoreJobConfig,
     _attach_score_as_of,
     _fill_missing_periods,
@@ -82,6 +83,11 @@ def spark():
         .master("local[1]")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
+        # 이 파일의 통합 테스트가 쓰는 JDBC 드라이버를 여기서도 같이 올린다.
+        # spark.jars.packages는 JVM이 뜰 때 한 번만 해석되므로, 이 fixture가 먼저
+        # 만든 세션에 드라이버가 없으면 뒤이어 build_spark_session()을 불러도
+        # classpath에 더 붙지 않아 JDBC write가 ClassNotFoundException으로 죽는다.
+        .config("spark.jars.packages", POSTGRES_JDBC_PACKAGE)
         .getOrCreate()
     )
     yield session
@@ -533,10 +539,30 @@ def _connect():
     )
 
 
+def _truncate_standard_tables() -> None:
+    connection = _connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"TRUNCATE {TARGET_TABLE}, {STAGING_TABLE} CASCADE")
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class TestStandardComfortScoreIntegration:
     """Integration tests against a real Postgres (#198).
 
     RUN_INTEGRATION 미설정 시 skip. 설정됐는데 접속이 실패하면 skip이 아니라 fail한다.
+
+    이 클래스는 자기 pytest 프로세스에서 돌려야 한다.
+
+        RUN_INTEGRATION=1 pytest services/batch-jobs/tests/test_standard_comfort_score.py
+
+    build_spark_session()이 JDBC 드라이버를 spark.jars.packages로 받아오는데, 그
+    해석은 JVM이 뜨는 시점에 끝난다. 전체 스위트처럼 앞선 모듈이 이미 SparkSession을
+    만든 프로세스에서는 세션을 stop/재생성해도 JVM classpath가 그대로라 드라이버를
+    더 붙일 수 없고, JDBC write가 ClassNotFoundException으로 실패한다. 같은 제약이
+    test_segment_comfort_score.py의 통합 테스트에도 그대로 적용된다.
     """
 
     pytestmark = pytest.mark.skipif(
@@ -564,10 +590,10 @@ class TestStandardComfortScoreIntegration:
     @staticmethod
     @pytest.fixture(autouse=True)
     def clean_tables():
+        _truncate_standard_tables()
         connection = _connect()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(f"TRUNCATE {TARGET_TABLE}, {STAGING_TABLE} CASCADE")
                 cursor.execute("DELETE FROM vehicle_profile WHERE vehicle_profile_id != 0")
                 cursor.execute(
                     "INSERT INTO vehicle_profile "
@@ -582,6 +608,11 @@ class TestStandardComfortScoreIntegration:
         finally:
             connection.close()
         yield
+        # 뒷정리를 반드시 한다. standard_segment_comfort_score는 vehicle_profile을
+        # 참조하는 FK를 갖고 있어서, 여기서 행을 남기면 다음 테스트(특히
+        # test_segment_comfort_score.py의 fixture)가 실행하는
+        # "DELETE FROM vehicle_profile"이 ForeignKeyViolation으로 실패한다.
+        _truncate_standard_tables()
 
     @staticmethod
     def hourly_row(**overrides):
