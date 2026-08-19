@@ -16,6 +16,7 @@ universe를 따로 읽어와야 한다.
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 from de4_core import ObjectStore, join_uri
 from pyspark.sql import DataFrame, SparkSession
@@ -50,7 +51,20 @@ def load_segment_ids(
 ) -> DataFrame:
     """활성 environment의 enriched_segment_reference에서 segment_id만 읽는다."""
     artifact_uri = resolve_segment_artifact_uri(data_lake_uri, store)
-    return spark.read.parquet(artifact_uri).select("segment_id").distinct()
+    return (
+        spark.read.parquet(_decode_local_file_uri(artifact_uri))
+        .select("segment_id")
+        .distinct()
+    )
+
+
+def _decode_local_file_uri(path: str) -> str:
+    # de4_core.join_uri()가 로컬 file:// URI에서 '='를 %3D로 인코딩하는데 Spark는
+    # 이를 못 읽어서 디코딩한다. Manifest의 artifact URI는 대부분
+    # reference_date=.../build_id=... 파티션 경로라 항상 이 인코딩을 거친다.
+    if path.startswith("file://"):
+        return urllib.parse.unquote(path)
+    return path
 
 
 def resolve_segment_artifact_uri(
