@@ -43,39 +43,38 @@ publish(#176) 단계를 오케스트레이션한다.
   정보다. `SegmentComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
   있으면(기본값 대체 없이) 즉시 실패한다. 로컬 개발에서는 `infra/compose/postgres.yaml`의
   `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
-  가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야
-  한다 — 이 서비스 범위 밖의 사전 조건이다.
+  가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
 
-## hourly_pipeline 실행하기 (cleanse 단계, 로컬 전용 배선)
+## hourly_pipeline 로컬 전용 배선
 
-`hourly_pipeline`의 `cleanse` TaskGroup은 BashOperator로 `docker run`을 호출해
-host에 별도의 `batch-jobs` 컨테이너를 직접 띄운다("docker-outside-of-docker").
-Airflow는 공식 이미지를 그대로 쓰고(#70) pyspark를 섞지 않기 위한 임시 배선이며,
-`airflow-scheduler` 컨테이너에 host의 docker socket을 마운트해 동작한다
-(`infra/compose/airflow.yaml`).
+`hourly_pipeline`은 UTC 기준 매시 정각에 `[logical_date, logical_date + 1시간)`
+구간을 처리하며, 아래 순서로 실행된다.
+
+```text
+cleanse >> features >> scoring >> publish
+```
+
+각 TaskGroup의 BashOperator는 `docker run`으로 host에 별도의 `batch-jobs`
+컨테이너를 띄운다("docker-outside-of-docker"). Airflow 공식 이미지에 pyspark를
+섞지 않기 위한 로컬 임시 배선이며, `airflow-scheduler` 컨테이너에 host의
+docker socket을 마운트해 동작한다(`infra/compose/airflow.yaml`).
+
+| 단계 | 실행 커맨드 | 주요 입출력 |
+| --- | --- | --- |
+| cleanse | `cleanse-sensor-events` | Bronze → `processed_sensor_event`, `sensor_event_quarantine` |
+| features | `build-hourly-segment-features` | processed events + road snapshot → `hourly_segment_features` |
+| scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
+| publish | `load-segment-comfort-score` | scoring 결과 → 서빙 PostgreSQL |
+
+publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 logical date가
+`2026-08-18 09:00 UTC`이면 cleanse/features는 09시 구간을 처리하고, publish는
+해당 구간의 끝인 `2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
 
 > ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
 > 사실상의 제어권을 준다. 로컬 개발 환경 밖(공유 서버, 운영 환경 등)으로 이
 > compose 설정을 그대로 옮기지 않는다. EMR Serverless로 연결되면(ADR 0001,
 > 후속 이슈) 이 소켓 마운트와 `docker run` 호출은 `EmrServerlessStartJobOperator`로
 > 대체되며 통째로 사라진다.
-
-1. batch-jobs 이미지를 git SHA로 태깅해 빌드하고, 나온 태그를 `.env`의
-   `BATCH_JOBS_IMAGE_TAG`에 넣는다(재현성 확보 — `latest` 등 버전 미고정 태그는
-   쓰지 않는다).
-
-   ```bash
-   make build-batch-jobs-image
-   # 출력된 태그(git SHA)를 .env의 BATCH_JOBS_IMAGE_TAG=... 에 채워 넣는다.
-   ```
-
-2. `make up-airflow`로 Airflow를 띄운 뒤, `hourly_pipeline`을 트리거하고
-   `cleanse` TaskGroup이 `success`로 끝나는지 확인한다.
-
-   ```bash
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags trigger hourly_pipeline
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags list-runs hourly_pipeline
-   ```
 
 **알려진 한계**: batch-jobs의 `CleansingJobConfig.from_env()`는 누락된
 환경변수를 에러 없이 기본값으로 대체한다. 그래서 `infra/compose/airflow.yaml`의
@@ -87,91 +86,119 @@ Airflow는 공식 이미지를 그대로 쓰고(#70) pyspark를 섞지 않기 �
 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
 
-## hourly_pipeline 실행하기 (features 단계, 로컬 전용 배선)
+## 통합 테스트 (#189)
 
-`features` TaskGroup은 `cleanse`와 동일한 방식으로
-`build-hourly-segment-features`를 실행한다. `target_hour`와 `run_id`는 Airflow
-실행 컨텍스트에서 전달하고, `road_snapshot_date`와 `feature_version`은 위의
-필수 환경변수에서 전달한다.
+### 테스트 데이터
 
-입출력과 feature 설정은 `HourlySegmentFeatureJobConfig.from_env()`의 로컬
-기본값을 사용한다.
+`data/`는 gitignore 대상이므로 통합 테스트 전에 로컬에 아래 fixture를 준비한다.
+같은 seed로 재생성했을 때 식별자와 이벤트 시간이 같도록 결정론적으로 만든다.
 
-- 입력: `data/local-lake/silver/processed_sensor_event`
-- road segment: `data/processed/road_segment`
-- 출력: `data/local-lake/silver/hourly_segment_features`
-- event/steering/map-matching 설정: batch-jobs 패키지 기본 설정
+| 경로 | 내용 |
+| --- | --- |
+| `data/local-lake/bronze/sensor-events` | 대상 시간 정상 100,000건, 비정상 100건, 시간 범위 밖 1,000건 |
+| `data/processed/road_segment/snapshot_date=2026-08-11` | 매칭 대상 road segment 20개 |
 
-`run_features`를 실행하기 전에 입력과 road segment Parquet가 위 경로에 있어야
-한다. `make up-airflow`로 Airflow를 띄운 뒤 `hourly_pipeline`을 트리거하면
-`cleanse >> features >> scoring` 순서로 실행된다.
+검증한 fixture는 500개 trip, 4개 vehicle profile을 포함한다. 비정상 100건은
+`2026-08-18 09:30 UTC` 구간에 있고, 범위 밖 1,000건은 09시 구간의 양쪽
+경계에 둔다. 실행 전에는 Bronze와 road snapshot만 남기고 이전
+`processed_sensor_event`, cleansing quarantine, features, scoring 산출물은
+제거하거나 별도 경로로 이동한다.
+
+### 사전 준비
+
+1. batch-jobs 이미지를 git SHA로 태깅해 빌드하고, 출력된 태그를 `.env`의
+   `BATCH_JOBS_IMAGE_TAG`에 넣는다.
+
+   ```bash
+   make build-batch-jobs-image
+   ```
+
+2. Postgres와 Airflow를 실행한다.
+
+   ```bash
+   make up-postgres
+   make up-airflow
+   ```
+
+3. 최초 실행이거나 마이그레이션이 추가됐다면 서빙 Postgres에 batch-jobs
+   마이그레이션을 적용한다.
+
+   ```bash
+   docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml run --rm \
+     airflow-scheduler bash -c '
+       docker run --rm --network de4-local \
+         -e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB \
+         -e POSTGRES_USER -e POSTGRES_PASSWORD \
+         batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} \
+         uv run --no-sync --package batch-jobs batch-jobs migrate-database
+     '
+   ```
+
+### 09시 구간 backfill
+
+수동 trigger 시각이 아니라 정확한 logical date를 쓰기 위해 backfill로 실행한다.
+일반 scheduler가 현재 시각의 scheduled run을 함께 만들지 않도록 중지하고,
+정규 스케줄 생성을 끈 테스트 전용 scheduler만 사용한다.
 
 ```bash
-docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags trigger hourly_pipeline
-docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags list-runs hourly_pipeline
+docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml \
+  stop airflow-scheduler
+
+docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
+  airflow-webserver airflow backfill create \
+  --dag-id hourly_pipeline \
+  --from-date 2026-08-18T09:00:00+00:00 \
+  --to-date 2026-08-18T09:00:00+00:00 \
+  --max-active-runs 1
+
+docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml run -d \
+  --name de4-airflow-backfill-scheduler \
+  -e AIRFLOW__SCHEDULER__USE_JOB_SCHEDULE=False airflow-scheduler
 ```
 
-## hourly_pipeline 실행하기 (scoring 단계, 로컬 전용 배선)
+Airflow 3에서 이 구간의 run ID는
+`backfill__2026-08-18T10:00:00+00:00`이고 logical date는 09시다. 상태 확인과
+테스트 전용 scheduler 종료는 다음과 같이 한다.
 
-`scoring` TaskGroup도 `cleanse`와 동일한 방식(BashOperator + docker-outside-of-docker)
-으로 `score-hourly-comfort --run-id={{ run_id }}`를 실행한다. `run_id`는 Airflow
-템플릿으로 전달되고, 나머지 설정은 `HourlyComfortJobConfig.from_env()`가
-`HOURLY_COMFORT_*` 환경변수에서 읽는다.
+```bash
+docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
+  airflow-webserver airflow tasks states-for-dag-run \
+  hourly_pipeline backfill__2026-08-18T10:00:00+00:00
 
-scoring 입력인 `hourly_segment_features`는 바로 앞의 `features` TaskGroup이
-생성한다. 따라서 별도의 샘플 Parquet를 심지 않고 전체 DAG를 순서대로 실행한다.
+docker stop de4-airflow-backfill-scheduler
+```
 
-1. (cleanse 단계에서 이미 `BATCH_JOBS_IMAGE_TAG`를 채웠다면 생략) batch-jobs
-   이미지를 빌드하고 `.env`의 `BATCH_JOBS_IMAGE_TAG`에 태그를 채운다.
+같은 logical date의 멱등성을 확인할 때는 테스트 전용 scheduler를 다시 시작하고
+`--reprocess-behavior completed`로 같은 backfill을 재처리한다.
 
-   ```bash
-   make build-batch-jobs-image
-   ```
+```bash
+docker start de4-airflow-backfill-scheduler
 
-2. `make up-airflow`로 Airflow를 띄운 뒤, `hourly_pipeline`을 트리거하고
-   `scoring` TaskGroup이 `success`로 끝나는지 확인한다.
+docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
+  airflow-webserver airflow backfill create \
+  --dag-id hourly_pipeline \
+  --from-date 2026-08-18T09:00:00+00:00 \
+  --to-date 2026-08-18T09:00:00+00:00 \
+  --max-active-runs 1 \
+  --reprocess-behavior completed
 
-   ```bash
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags trigger hourly_pipeline
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver airflow dags list-runs hourly_pipeline
-   ```
+docker stop de4-airflow-backfill-scheduler
+```
 
-## hourly_pipeline 실행하기 (publish 단계, 로컬 전용 배선)
+### 검증 결과
 
-`publish` TaskGroup도 `cleanse`/`scoring`과 동일한 방식(BashOperator +
-docker-outside-of-docker)으로 `load-segment-comfort-score
---as-of='{{ data_interval_end.isoformat() }}'`를 실행한다. `as_of`는 이
-run의 데이터 구간이 끝나는 시점이며(Gold job은 `[as_of - window_hours,
-as_of)` 윈도우를 집계), 나머지 설정은
-`SegmentComfortScoreJobConfig.from_env()`가 `SEGMENT_COMFORT_SCORE_*`/
-`POSTGRES_*` 환경변수에서 읽는다.
+2026-08-18 09시 fixture로 전체 DAG와 동일 logical date 재실행을 검증했다.
 
-> ⚠️ **이 이슈(#176) 범위 밖**: `scoring >> publish` 의존관계는 아직 연결하지
-> 않았다. 다른 작업(features 때와 동일한 조율)이 정리되는 시점에 후속
-> 이슈에서 연결한다. 지금은 `publish`를 단독으로 트리거해서 검증한다.
+| 검증 대상 | 결과 |
+| --- | --- |
+| cleanse processed | 100,000건, `event_date=2026-08-18/event_hour=09` |
+| cleanse quarantine | 100건, `target_date=2026-08-18/target_hour=09`, `OUT_OF_RANGE` |
+| 시간 범위 밖 이벤트 | 1,000건 모두 09시 결과에서 제외 |
+| features | 80건 = 20 segment × 4 profile, unmatched 0건 |
+| scoring | 80건, rejected 0건 |
+| 첫 publish | 100건 insert = 20 segment × (4 profile + 대표 profile 0) |
+| 동일 시간 재실행 | 0건 insert, 100건 update, 전체 행 수 증가 없음 |
 
-1. 서빙 Postgres에 마이그레이션이 적용돼 있어야 한다(사전 조건, 이 서비스
-   범위 밖). 아직이면 batch-jobs의 `migrate-database` 커맨드로 먼저 적용한다.
-2. `hourly_comfort_score`가 아직 없다면(features/scoring을 아직 안 돌렸다면)
-   검증용 샘플 Parquet를 `data/local-lake` 아래 임시로 심는다.
-3. (다른 단계에서 이미 채웠다면 생략) batch-jobs 이미지를 빌드하고 `.env`의
-   `BATCH_JOBS_IMAGE_TAG`를 채운다.
-
-   ```bash
-   make build-batch-jobs-image
-   ```
-
-4. `make up-airflow`로 Airflow를 띄운 뒤, `publish` TaskGroup만 골라 트리거하고
-   성공 여부를 확인한다.
-
-   ```bash
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
-     airflow tasks test hourly_pipeline publish.run_publish <run-date>
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
-     airflow dags trigger hourly_pipeline
-   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
-     airflow dags list-runs hourly_pipeline
-   ```
 
 ## 로컬에서 실행하기
 
@@ -227,8 +254,8 @@ docker compose -f infra/compose/postgres.yaml down
 
 ## 범위 밖
 
-- `hourly_pipeline`의 `scoring >> publish` 의존관계 연결, Great Expectations
-  검증 task, Slack 실패 알림, EMR Serverless 실제 연결 (#157 후속 이슈)
+- Great Expectations 검증 task, Slack 실패 알림, EMR Serverless 실제 연결
+  (#157 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
 - 운영 배포, 인증/RBAC 설정
