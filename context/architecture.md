@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-18
+last_reviewed: 2026-08-19
 ---
 
 # Target Architecture
@@ -11,10 +11,10 @@ last_reviewed: 2026-08-18
 The repository contains Python 3.12 `uv` workspace members for the shared
 library and seven services. Implementation is incremental rather than
 skeleton-only: `services/batch-jobs` currently provides reference-environment,
-sensor-cleansing, map-matching, hourly-feature, hourly-scoring, Gold-publication,
-and database-migration commands. Its importable modules, default YAML
-configuration, and SQL migrations are packaged under the single `batch_jobs`
-namespace.
+sensor-cleansing and hourly-feature processing in one Spark execution,
+hourly-scoring, Gold-publication, and database-migration commands. Its
+importable modules, default YAML configuration, and SQL migrations are packaged
+under the single `batch_jobs` namespace.
 
 The data flow below reflects the target architecture as decided in
 [ADR-0003](../docs/adr/0003-gold-publication-owned-by-batch-jobs.md): Gold
@@ -105,6 +105,27 @@ Kafka decouples replay from persistence. The stream processor validates shared
 contracts, handles duplicates according to the accepted idempotency key, and
 writes raw events to S3 without discarding variables that may be useful to later
 scoring experiments.
+
+### Hourly cleansing-to-feature execution
+
+The implemented local hourly batch path uses one Spark application boundary for
+cleansing and feature calculation:
+
+```mermaid
+flowchart LR
+    BR[(S3 Bronze: sensor_event)] --> T1[Hourly cleansing]
+    T1 --> Q[(Cleansing quarantine)]
+    T1 -. typed in-memory DataFrame .-> T2[Map matching and feature calculation]
+    RS[(Versioned road environment)] --> T2
+    T2 --> HF[(Silver: hourly_segment_features)]
+```
+
+T1 reads every Bronze hour touched by T2's lookback and lookahead window,
+validates and deduplicates each hour, and passes accepted rows directly to T2 in
+the same Spark session. There is no persisted `processed_sensor_event` boundary.
+Only the target-hour quarantine and `hourly_segment_features` are stored. The
+Airflow DAG still needs the follow-up orchestration change that invokes this
+combined command instead of the former two-command sequence.
 
 ### Silver map matching
 

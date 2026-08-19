@@ -21,6 +21,7 @@ ADR when the choice affects multiple components.
 | OQ-005 | Which routing engine or algorithm will operate on the canonical segment network? | Prototype uses deterministic Dijkstra routing over directed LION nodes and SegmentIDs | Prototype accepted 2026-08-10 |
 | OQ-006 | What is the comfort-score direction, formula, component weights, and minimum coverage? | The 0-100 range is confirmed; remaining semantics control Gold and API behavior | Proposed 2026-08-15 — see `context/comfort-score.md` (issue #102); still needs formal acceptance |
 | OQ-040 | Which service owns PostgreSQL migrations and Gold score publication? | Resolved: `services/batch-jobs` owns Gold score publication and serving-database migrations; `services/gold-loader` is removed | Accepted 2026-08-18 — see `docs/adr/0003-gold-publication-owned-by-batch-jobs.md` (issue #175) |
+| OQ-041 | Should cleansed sensor events be persisted between hourly cleansing and feature calculation? | Controls storage I/O, execution coupling, and whether T2 can restart from an intermediate dataset | Accepted 2026-08-19 — do not persist; pass the typed DataFrame in the same Spark session and store only quarantine and feature outputs. See [ADR-0006](../docs/adr/0006-pass-cleansed-events-in-memory.md) (issue #201) |
 
 ## Data decisions
 

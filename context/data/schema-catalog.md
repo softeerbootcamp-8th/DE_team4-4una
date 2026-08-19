@@ -24,7 +24,7 @@ design and must not be invented silently.
 | `sensor_event` | `sensor_event` | Bronze on S3 | One vehicle sensor measurement (at-least-once; duplicates possible) |
 | `road_segment` | `road_segment` | Normalized reference | One LION segment per snapshot date |
 | `enriched_segment_reference` | `enriched_segment_reference` | Silver reference (PostgreSQL) | One segment per integrated reference date |
-| `processed_sensor_event` | `processed_sensor_event` | Silver on S3 | One row per Bronze `sensor_event` row |
+| `PROCESSED_SENSOR_EVENT_SCHEMA` | — | Execution-local T1→T2 DataFrame | One accepted cleansed Bronze `sensor_event` row |
 | `hourly_segment_features` | `hourly_segment_features` | Silver | One hour x segment x vehicle profile feature row |
 | `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
 | `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period — **superseded**, see below |
@@ -194,9 +194,11 @@ runtime read from Postgres; see `OQ-028`).
 **Layer:** Bronze. **Storage:** S3. **Grain:** one sensor measurement. Delivery
 is at-least-once: no data is lost, but duplicates are possible.
 
-`segment_id` is intentionally absent. GPS-to-LION matching occurs downstream and
-is stored in `processed_sensor_event`. `vehicle_id` and the legacy `jerk` alias
-from the earlier draft have been dropped from this version.
+`segment_id` is intentionally absent. T1 validates the Bronze event and passes
+accepted rows directly to T2, where GPS-to-LION matching occurs in the same
+Spark execution. No intermediate cleansed-event table is persisted. `vehicle_id`
+and the legacy `jerk` alias from the earlier draft have been dropped from this
+version.
 
 | Attribute | Column | Source | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -299,41 +301,22 @@ A corrected rebuild for the same `reference_date` updates the existing primary-k
 row and advances `updated_at`; it does not create a new effective date merely
 because processing occurred later. Audit history requirements remain open.
 
-## `processed_sensor_event`
+## T1→T2 cleansed sensor-event contract
 
-**Layer:** Silver. **Storage:** S3 (Transform 1 output). **Grain:** exactly one
-row for every Bronze `sensor_event` row (1:1).
+**Role:** execution-local Spark DataFrame. **Storage:** not persisted. **Grain:**
+one accepted, deduplicated Bronze `sensor_event` row.
 
-Cleans and validates the Bronze sensor signal. The supplied column list below
-does **not** include GPS-to-LION map matching or threshold-based event
-classification (no `segment_id`, match, or brake/accel/discomfort-flag
-columns), even though those are mentioned as part of this table's purpose.
-Whether matching/classification lands here, in a separate contract, or later in
-this table is an **open question** — do not assume a location for it.
+T1 parses and validates `event_time`, applies cleansing and deduplication rules,
+and passes the typed DataFrame directly to T2 in the same Spark session. Neither
+`event_date` nor `event_hour` is part of the contract because the DataFrame is
+not written as an hourly partitioned dataset. Rejected rows are stored in the
+separate cleansing quarantine; accepted rows are consumed immediately by map
+matching and hourly feature calculation.
 
-| Attribute | Column | Source | Type | Nullable | Key | Description |
-| --- | --- | --- | --- | --- | --- | --- |
-| Sensor event ID | `event_id` | `sensor_event.event_id` | STRING/UUID | N | PK | Bronze event identifier |
-| Vehicle profile | `vehicle_profile_id` | `vehicle_profile_id` | INTEGER | N | FK | References `vehicle_profile` |
-| Trip ID | `trip_id` | `trip_id` | STRING | N |  | Simulated journey |
-| Trip sequence | `trip_seq` | `trip_seq` | BIGINT | N |  | Sample order within the trip |
-| Event time | `event_time` | `event_time` | TIMESTAMP | N |  | Sensor measurement time |
-| Event date | `event_date` | Derived from `event_time` | DATE | N |  | Sensor measurement date |
-| Latitude | `latitude` | `latitude` | DOUBLE | N |  | Validated latitude |
-| Longitude | `longitude` | `longitude` | DOUBLE | N |  | Validated longitude |
-| Speed | `speed_mps` | `speed_mps` | DOUBLE | N |  | Validated meters per second |
-| Heading | `heading` | `heading` | DOUBLE | Y |  | Direction in degrees |
-| Steering angle | `steering_angle` | `steering_angle` | DOUBLE | N |  | Validated signed front-wheel angle in degrees, -35 through 35 |
-| Longitudinal acceleration | `accel_x` | `accel_x` | DOUBLE | Y |  | Forward/backward acceleration |
-| Lateral acceleration | `accel_y` | `accel_y` | DOUBLE | Y |  | Side-to-side acceleration |
-| Vertical acceleration | `accel_z` | `accel_z` | DOUBLE | N |  | Vertical impact or vibration |
-| Longitudinal jerk | `jerk_x` | `jerk_x` | DOUBLE | Y |  | Change in `accel_x` per second; hard-accel/brake characteristic |
-| Lateral jerk | `jerk_y` | `jerk_y` | DOUBLE | Y |  | Change in `accel_y` per second; turning/lane-change characteristic |
-| Vertical jerk | `jerk_z` | `jerk_z` | DOUBLE | Y |  | Change in `accel_z` per second; speed-hump/pavement-impact characteristic |
-| Steering vibration | `steering_vibration` | `steering_vibration` | DOUBLE | Y |  | Steering-wheel vibration amplitude in m/s² |
-| Steering angle | `steering_angle` | `steering_angle` | DOUBLE | Y |  | Steering-wheel angle |
-| Processed time | `_processed_at` | Derived | TIMESTAMP | N |  | Silver completion time |
-| Run ID | `_run_id` | Derived | STRING | N |  | Spark/Airflow ETL run identifier |
+The executable field and type definition is
+`services/batch-jobs/src/batch_jobs/schemas.py::PROCESSED_SENSOR_EVENT_SCHEMA`.
+It is authoritative for this internal handoff and should not be duplicated in
+this catalog.
 
 ## `hourly_segment_features`
 
