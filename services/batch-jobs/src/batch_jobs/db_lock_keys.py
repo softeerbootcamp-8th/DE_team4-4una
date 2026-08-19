@@ -12,3 +12,7 @@ MIGRATION_LOCK_KEY = 1001
 
 # comfort_score.gold_writer가 staging 테이블 write~MERGE 구간을 보호하는 데 쓴다.
 GOLD_JOB_STAGING_LOCK_KEY = 1002
+
+# comfort_score.standard_writer가 standard staging 테이블 write~MERGE 구간을
+# 보호하는 데 쓴다. Gold와 키를 나눠야 두 실행이 서로를 막지 않는다 (#198).
+STANDARD_JOB_STAGING_LOCK_KEY = 1003
