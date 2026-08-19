@@ -12,9 +12,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "jobs"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from weather import (
+from jobs.weather import (
     FOG_WEATHER_CODES,
     HIGH_WIND_GUST_THRESHOLD_MPS,
     HTTP_RETRY_STATUS_FORCELIST,
@@ -26,7 +26,6 @@ from weather import (
     ZoneCoordinate,
     _build_default_session,
     _validate_target_time,
-    build_impact_signature,
     classify_weather_state,
     fetch_open_meteo,
     load_zone_coordinates,
@@ -176,14 +175,6 @@ class TestClassifyWeatherState:
 
     def test_missing_value_is_treated_as_absent_not_an_error(self):
         assert classify_weather_state({}) == "dry"
-
-
-class TestBuildImpactSignature:
-    def test_same_reading_produces_the_same_signature(self):
-        assert build_impact_signature(reading()) == build_impact_signature(reading())
-
-    def test_a_changed_field_produces_a_different_signature(self):
-        assert build_impact_signature(reading()) != build_impact_signature(reading(rain=0.2))
 
 
 class TestLoadZoneCoordinates:
