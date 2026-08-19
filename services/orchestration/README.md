@@ -6,6 +6,11 @@ batch-jobs의 sensor processing(#205)·scoring(#169)·publish(#176) 3단계를
 오케스트레이션한다. Sensor processing은 cleansing과 feature 계산을 같은 Spark
 세션에서 실행한다.
 
+`weather_pipeline` DAG(#207)는 다른 방식이다 — batch-jobs(EMR/Spark 전용)로
+docker를 띄우는 대신, `jobs/weather.py`(#209, Open-Meteo 수집 + `latest_zone_weather`
+UPSERT)를 `airflow-scheduler` 컨테이너 안에서 PythonOperator로 직접 실행하는
+lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
+
 ## 준비
 
 저장소 루트의 `.env`에 다음 키를 채운다 (`.env.example` 참고). 값은 로컬
@@ -88,6 +93,33 @@ publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 lo
 **문제 해결**: `docker run` 단계에서 `permission denied`가 나면, host의
 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
+
+## weather_pipeline (#207)
+
+UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection` task 하나가 실행되며,
+`jobs.weather.run_latest_zone_weather_job`을 `airflow-scheduler` 컨테이너 안에서
+직접 호출한다(PythonOperator) — 별도 컨테이너를 띄우지 않는다. `data_interval_end`가
+날씨 조회 기준 시각으로 전달된다.
+
+`jobs/`는 `dags/`와 나란히 있지만 별도로 `${AIRFLOW_HOME}/orchestration/jobs`에
+마운트되고, `PYTHONPATH=${AIRFLOW_HOME}/orchestration`로 `from jobs.weather import ...`가
+되게 한다. `jobs.weather`는 task 함수 안에서만 임포트되므로(지연 임포트)
+`airflow-dag-processor`/`airflow-webserver`는 이 배선이 없어도 DAG를 정상
+파싱한다 — `airflow-scheduler`에만 필요하다(`infra/compose/airflow.yaml` 참고).
+
+`requests`/`psycopg2-binary`/`pyarrow`는 공식 이미지에 없어 `_PIP_ADDITIONAL_REQUIREMENTS`로
+`airflow-scheduler` 기동 시에만 설치한다 — 로컬 개발 전용이며, 운영에서는 이미지를
+다시 빌드해 이 방식을 없애야 한다. `zone_master.parquet`은 `data/reference`를
+`airflow-scheduler`에 읽기 전용으로 마운트해서 읽는다.
+
+Open-Meteo 호출 실패나 일부 zone의 날씨 누락 시 `run_latest_zone_weather_job`이
+예외를 던져 task가 실패하고, `retries=2, retry_delay=2분`으로 Airflow가
+재시도한다(hourly_pipeline의 5분 간격은 15분 주기에 비해 너무 길어 줄였다).
+`latest_zone_weather`는 `location_id`만 갖고 UPSERT하므로, 순서가 뒤바뀐 실행이
+최신 값을 옛 값으로 덮어쓰지 않도록 SQL에 `weather_time` 역전 방지 조건을 걸고,
+DAG에도 `max_active_runs=1`을 둬 이전 실행이 끝나기 전에 다음 tick이 겹치지
+않게 한다(둘 다 걸어야 안전하다). `current_segment_comfort_score` 재계산은 이
+DAG의 범위 밖이다(후속 이슈).
 
 ## 통합 테스트 (#189, #205)
 

@@ -543,7 +543,7 @@ observation (migration 0007). There is no history table; anything that needs
 | Wind speed | `wind_speed_10m_mps` | DOUBLE | Y |  | 10m wind speed, m/s |
 | Wind gusts | `wind_gusts_10m_mps` | DOUBLE | Y |  | 10m wind gusts, m/s |
 | Weather code | `weather_code` | INTEGER | Y |  | Open-Meteo WMO weather code |
-| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `weather_snapshot_job.classify_weather_state`); exact thresholds are a follow-up issue |
+| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `jobs.weather.classify_weather_state`); exact thresholds are a follow-up issue |
 | Impact signature | `impact_signature` | STRING | N |  | Deterministic key summarizing which score-affecting buckets are active for this observation; a future current-score job compares it against the value this row held **before** the current UPSERT to detect whether weather changed (`context/comfort-score.md`); exact thresholds/encoding are a follow-up issue |
 | Fetched time | `fetched_at` | TIMESTAMP | N |  | Time this row was last retrieved from Open-Meteo |
 
