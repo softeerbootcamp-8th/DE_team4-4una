@@ -40,6 +40,9 @@ simulation offsets.
 At startup, the producer can follow the published `active.json` pointer or pin a
 specific immutable environment manifest. Runtime Parquet artifacts are accepted
 only after size and SHA-256 validation and are cached by `environment_id`.
+TLC Parquet input may be local or stored behind an `s3://` URI. S3 runs require
+an explicit source day; the reader applies that predicate and the minimal trip
+projection before deterministic request-time ordering.
 
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.
@@ -128,9 +131,12 @@ practical, the implementation may expose an injectable clock or faster test mode
 but production demonstration defaults must preserve the confirmed scale.
 
 The coordinator interleaves overlapping trips in one time-ordered priority queue
-and preserves idle gaps. It lazily keeps only the next sample from each active
-trip in memory. `time_scale = 0` is an explicit no-wait verification mode; no
-implicit idle-gap cap is applied.
+and preserves idle gaps. It consumes the ordered trip iterator one dispatch
+ahead and keeps only the next sample from each active trip in its action queue.
+The selected source day remains in Arrow memory for deterministic sorting, but
+the complete month is neither expanded into Python trip objects nor enqueued.
+`time_scale = 0` is an explicit no-wait verification mode; no implicit idle-gap
+cap is applied.
 
 ## Prototype signal model
 

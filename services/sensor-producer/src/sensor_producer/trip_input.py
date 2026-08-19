@@ -64,6 +64,7 @@ def iter_parquet_trips(
         replay_date,
     )
     selected_columns = list(dict.fromkeys(resolved.values()))
+    # 월 파일 전체가 아니라 선택한 날짜와 시뮬레이션 필드만 Arrow로 읽는다
     source_table = dataset.to_table(columns=selected_columns, filter=source_filter)
     table = normalize_trip_table(source_table, resolved)
     table = table.filter(valid_trip_mask(table))
@@ -95,6 +96,7 @@ def trip_records(table: pa.Table) -> Iterator[TripRecord]:
     """Convert bounded Arrow batches without expanding the full day into dicts."""
 
     row_index = 0
+    # Python 객체 변환은 배치 단위로 제한해 일 단위 테이블의 추가 복사를 피한다
     for batch in table.to_batches(max_chunksize=65_536):
         for row in batch.to_pylist():
             trip_id = row.get("trip_id") or stable_trip_id(row, row_index)

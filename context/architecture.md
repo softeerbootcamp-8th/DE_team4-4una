@@ -103,6 +103,9 @@ The implemented runtime can follow the batch job's active environment pointer
 or pin an immutable manifest through either `file://` or `s3://`. It verifies
 manifest and artifact checksums, then materializes the prepared road and taxi-zone
 Parquet files into a local cache before route construction.
+The TLC input boundary likewise accepts local or S3 Parquet, requires an
+explicit source-day predicate for S3, and feeds ordered dispatches incrementally
+to the active-trip replay queue.
 
 ### Stream collection
 

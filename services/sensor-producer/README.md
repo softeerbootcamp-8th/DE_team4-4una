@@ -103,7 +103,8 @@ artifacts before routing starts:
 ```bash
 uv run --package sensor-producer sensor-producer run \
   --environment-pointer-uri s3://de4-lake/prepared/simulation_environment/active.json \
-  --trips-path data/nyc-sensor/trips.json \
+  --trips-uri s3://de4-lake/prepared/tlc_dispatch/trips.parquet \
+  --replay-date 2024-02-01 \
   --publisher kafka
 ```
 
@@ -111,24 +112,34 @@ On EC2, attach a least-privilege instance profile with read access to the
 pointer, manifest, and referenced artifacts. Boto3 then uses the standard AWS
 credential chain; do not pass or bake access keys into the image.
 
-Build the production image from the repository root and mount the current
-bounded trip input until the S3 TLC reader is implemented separately:
+The trip reader accepts a local path or `s3://` URI containing either the raw
+TLC column names (`PULocationID`, `DOLocationID`) or their normalized aliases.
+An S3 input requires `--replay-date`, projects only the simulation fields, and
+filters invalid timestamp or distance rows before deterministic ordering. The
+selected source day is retained as an Arrow table for sorting; Python
+`TripRecord` objects are materialized in bounded batches, and the replay queue
+retains only the next dispatch plus active vehicle samples.
+
+Build the production image from the repository root and pass both S3 inputs:
 
 ```bash
 docker build -f services/sensor-producer/Dockerfile -t de4-sensor-producer .
 docker run --rm \
-  -v "$PWD/data/nyc-sensor:/data:ro" \
   -e AWS_REGION=us-east-1 \
   -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
   de4-sensor-producer run \
   --environment-pointer-uri s3://de4-lake/prepared/simulation_environment/active.json \
-  --trips-path /data/trips.json \
+  --trips-uri s3://de4-lake/prepared/tlc_dispatch/trips.parquet \
+  --replay-date 2024-02-01 \
   --publisher kafka
 ```
 
 `--environment-manifest-uri` pins one build instead of following `active.json`.
 `SENSOR_CACHE_DIR` controls the verified local artifact cache. The legacy
-`--input-dir` mode remains available for the checked-in local sample workflow.
+`--input-dir` and JSON `--trips-path` modes remain available for the checked-in
+local sample workflow. `SENSOR_TRIPS_URI`, `SENSOR_REPLAY_DATE`, and the two
+environment URI variables expose the same settings without command-line
+secrets.
 
 ## Timing and delivery contracts
 
