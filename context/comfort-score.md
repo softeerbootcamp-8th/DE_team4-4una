@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-19
 ---
 
 # Comfort Score Design
@@ -13,6 +13,24 @@ The Gold contract fixes the final comfort-score range at 0 through 100. Issue
 policy to answer OQ-006, but this remains **Proposed**, not **Accepted** —
 formal acceptance and the final `k` value are separate follow-up work (see
 "Open items" below and `context/open-questions.md`).
+
+Issue #193 splits the single Gold output into three contracts (schemas in
+`context/data/schema-catalog.md`), so that weather can be layered onto the
+sensor-based score without recomputing it from raw hours on every 15-minute
+weather refresh:
+
+- **`standard_segment_comfort_score`** — the weather-unadjusted score below,
+  computed hourly from `hourly_comfort_score` and kept as one row per scoring
+  hour (a time series).
+- **`zone_weather_snapshot`** — Open-Meteo observations collected every 15
+  minutes per zone, independent of any segment.
+- **`current_segment_comfort_score`** — the single current-state row per
+  segment x vehicle profile, combining the latest standard snapshot with the
+  latest applicable weather (see "Weather-adjusted current score" below).
+
+This document defines the schema-independent formulas and rules; issue #193
+covers the contract and processing rules only — no code changes. See
+"Migration order" below for how the existing single-table design is replaced.
 
 ## Measurement groups to preserve
 
@@ -29,11 +47,20 @@ The vertical/longitudinal/lateral groups above are the ones realized as
 `hourly_comfort_score.vertical_score` / `.longitudinal_score` / `.lateral_score`
 in Silver, which are the direct inputs to the Gold formula below.
 
-## Gold aggregation formula (Segment x vehicle profile)
+## Standard score calculation (Segment x vehicle profile)
 
-Grain: one `(segment_id, vehicle_profile_id)` pair, rolled up from every
-qualifying hour of `hourly_comfort_score` inside the scoring window (the
-worked examples in this document use a rolling 168-hour / 1-week window).
+Grain: one `(segment_id, vehicle_profile_id, score_as_of)` row, rolled up
+from every qualifying hour of `hourly_comfort_score` inside the scoring
+window (a rolling 168-hour / 1-week window), computed on each scheduled
+standard run and appended to `standard_segment_comfort_score` as that run's
+snapshot (issue #193; see "Column calculation mapping" under
+`standard_segment_comfort_score` in `context/data/schema-catalog.md`).
+`score_as_of` is the run's fixed schedule time; it is stored separately from
+the `data_period_start`/`data_period_end` window actually rolled up into the
+score, so a run with zero qualifying hours (`N = 0`) still gets a real
+`score_as_of`-keyed row with `data_period_start`/`data_period_end` left
+`NULL`. This weather-unadjusted score is the input to the weather-adjusted
+current score below — it is never itself weather-adjusted.
 
 ### Step 1 - Combine the three directional scores into one hourly score
 
@@ -129,7 +156,10 @@ Where this vehicle-agnostic score is physically stored is resolved
 `vehicle_profile_id = 0` represents the all-vehicle aggregate; real vehicle
 profiles are numbered from 1. `services/batch-jobs/src/batch_jobs/comfort_score/formula.py`
 (issue #127) produces both grains as rows of one Spark DataFrame using this
-convention, rather than two separate DataFrames or a dedicated column.
+convention, rather than two separate DataFrames or a dedicated column. The
+same sentinel-row convention carries forward unchanged into
+`standard_segment_comfort_score` and `current_segment_comfort_score` under
+issue #193.
 
 ## Handling a vehicle profile that never traversed a segment
 
@@ -142,12 +172,96 @@ Confidence_{s,p} = 0
 ```
 
 The formula already treats "no evidence" as "trust the population mean
-completely." The only remaining decision is operational, not mathematical:
-whether the Gold job materializes a row for every `(segment_id,
-vehicle_profile_id)` combination in the routing network (so this fallback is
-visible as a real, if low-confidence, row) or only for combinations already
-present in `hourly_comfort_score`. That choice belongs to the follow-up "데이터
-연산" sub-issue, not to this document.
+completely." The remaining decision is operational, not mathematical:
+whether the standard job materializes a row for every `(segment_id,
+vehicle_profile_id)` combination in the routing network on every scheduled
+run (so this fallback is visible as a real, if low-confidence, row) or only
+for combinations already present in `hourly_comfort_score`.
+
+**Resolved for issue #193:** the standard job materializes a row for every
+`(segment_id, vehicle_profile_id)` combination on every scheduled run,
+regardless of `N`. This is exactly why `standard_segment_comfort_score`'s
+primary key uses `score_as_of` (the run's fixed schedule time) rather than
+`data_period_end` (the rolled-up, `N = 0`-nullable data window) — every
+scheduled run gets a row keyed by when it ran, whether or not it found
+qualifying data (`context/data/schema-catalog.md`).
+
+## Weather-adjusted current score (Segment x vehicle profile)
+
+Grain: one `(segment_id, vehicle_profile_id)` row — the segment's current
+(latest) state, always derived from its latest
+`standard_segment_comfort_score` snapshot plus its zone's latest
+`zone_weather_snapshot` row (issue #193; schema in
+`context/data/schema-catalog.md`).
+
+### Step A - Detect whether the zone's weather changed
+
+Compare the zone's new `zone_weather_snapshot.impact_signature` against the
+value from its previous `weather_time` row for that zone.
+
+- Unchanged `impact_signature` -> no recompute; every segment in that zone
+  keeps its existing `current_segment_comfort_score` row untouched.
+- Changed `impact_signature` -> recompute every segment in that zone (Steps
+  B-D below) and UPSERT.
+
+This is the only role the previous weather observation plays: it is a change
+trigger, not a scoring input. Step B always reads the current weather
+observation directly, never a delta or trend from the prior one.
+
+### Step B - Apply a weather adjustment per direction
+
+Starting from the segment's latest `standard_segment_comfort_score`
+(`vertical_score`, `longitudinal_score`, `lateral_score`), apply a
+weather-derived adjustment per direction, using the zone's current
+`zone_weather_snapshot` fields:
+
+| Weather condition | Adjusted direction(s) |
+| --- | --- |
+| Rain / freezing conditions | Longitudinal score |
+| High wind / gusts | Lateral score |
+| Snowfall | Vertical score and longitudinal score |
+| Low visibility | Final `comfort_score` only (not the three directional scores) |
+
+The exact thresholds that classify a weather observation into these
+conditions, and the exact score deductions applied, are **out of scope for
+issue #193** and are finalized in a follow-up issue.
+
+### Step C - Combine into a final current score
+
+Combine the weather-adjusted `vertical_score` / `longitudinal_score` /
+`lateral_score` into `comfort_score` using the same directional weights as
+the standard score (Step 1 above), then apply the low-visibility adjustment
+from Step B to the combined result. The exact combination formula, once
+thresholds are finalized, is out of scope here.
+
+### Step D - UPSERT
+
+Write the result to `current_segment_comfort_score`, upserting the single row
+for `(segment_id, vehicle_profile_id)` with `standard_score_as_of`,
+`weather_time`, and `weather_rule_version` all pointing at the exact standard
+and weather snapshots used.
+
+## Principles
+
+- The x-axis is longitudinal, the y-axis is lateral, and the z-axis is
+  vertical (mirrors `sensor_event.accel_x`/`accel_y`/`accel_z`, OQ-026).
+- The previous weather observation is used only for change detection (Step A
+  above), never as a scoring input.
+- `current_segment_comfort_score` is always recomputed from the segment's
+  standard score — it is never adjusted incrementally from its own previous
+  value.
+- If a zone's weather has not changed, `current_segment_comfort_score` is not
+  updated for that zone's segments.
+- If Open-Meteo is unavailable, existing `current_segment_comfort_score` rows
+  are left unchanged (no partial or null-weather overwrite).
+- If a zone's latest weather observation is older than an allowed freshness
+  threshold, FastAPI falls back to serving the latest
+  `standard_segment_comfort_score` for that segment instead of the stale
+  `current_segment_comfort_score` value. The freshness threshold itself is
+  out of scope here.
+- The concrete weather thresholds and score-deduction coefficients (Step B
+  above) are decided in a follow-up issue; only the direction mapping is
+  fixed here.
 
 ## Parameter and formula management
 
@@ -187,6 +301,30 @@ present in `hourly_comfort_score`. That choice belongs to the follow-up "데이�
 - Component values should remain available for debugging and comparison.
 - Changes to score semantics require a new algorithm version and backfill
   plan.
+
+## Migration order (`segment_comfort_score` -> standard/current split)
+
+Issue #193 defines the schema and processing rules only; no code changes are
+part of it. The follow-up implementation work proceeds in this order, so that
+`segment_comfort_score` and its existing Gold writer keep serving reads until
+the new path is proven end to end:
+
+1. Create the new tables (`standard_segment_comfort_score`,
+   `zone_weather_snapshot`, `current_segment_comfort_score`) via migration,
+   alongside the existing `segment_comfort_score`.
+2. Implement standard score calculation and hourly append/update into
+   `standard_segment_comfort_score`.
+3. Implement Open-Meteo weather collection into `zone_weather_snapshot`,
+   reading each zone's query point from `zone_master.representative_latitude`/
+   `.representative_longitude` (schema-catalog.md).
+4. Implement current score calculation ("Weather-adjusted current score"
+   above) and UPSERT into `current_segment_comfort_score`.
+5. Wire both jobs into Airflow (hourly standard run, 15-minute weather run).
+6. Switch the FastAPI serving layer from `segment_comfort_score` to
+   `current_segment_comfort_score` (with the standard-fallback rule above).
+7. Remove `segment_comfort_score` and its Gold writer.
+
+Steps 2-7 are each their own follow-up issue and are out of scope for #193.
 
 ## Open items
 
