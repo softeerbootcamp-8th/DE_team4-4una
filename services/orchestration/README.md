@@ -2,8 +2,9 @@
 
 Apache Airflow(LocalExecutor)를 로컬 개발 환경에서 부트스트랩하는 서비스다.
 `hello_world`(부트스트랩 동작 확인용)에 이어, `hourly_pipeline` DAG가
-batch-jobs 4단계 배치 파이프라인 중 cleanse(#162)·features(#171)·scoring(#169)·
-publish(#176) 단계를 오케스트레이션한다.
+batch-jobs의 sensor processing(#205)·scoring(#169)·publish(#176) 3단계를
+오케스트레이션한다. Sensor processing은 cleansing과 feature 계산을 같은 Spark
+세션에서 실행한다.
 
 ## 준비
 
@@ -23,10 +24,17 @@ publish(#176) 단계를 오케스트레이션한다.
   `openssl rand -hex 32`로 생성.
 - `BATCH_JOBS_IMAGE_TAG` — `hourly_pipeline`의 batch-jobs task가 실행할
   batch-jobs 이미지 태그. 아래 "hourly_pipeline 실행하기"에서 만든다.
-- `CLEANSING_BRONZE_INPUT_PATH` 등 `CLEANSING_*` 5개 키 — batch-jobs의
-  `cleanse-sensor-events` 커맨드가 읽는 입출력 경로다. 기존 값을 그대로 쓰면 된다.
-- `HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE` — feature job이 읽을 road segment의
-  `snapshot_date`다. 실제 road segment Parquet의 값과 일치해야 한다.
+- `CLEANSING_BRONZE_INPUT_PATH`, `CLEANSING_QUARANTINE_OUTPUT_PATH`,
+  `HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH`,
+  `HOURLY_SEGMENT_FEATURE_OUTPUT_PATH` — 통합 `cleanse-sensor-events` 커맨드의
+  Bronze 입력, quarantine 출력, road segment 입력, feature 출력 경로다. 비우면
+  DAG에 선언된 로컬 기본 경로를 사용한다.
+- `CLEANSING_CONFIG_PATH`, `HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH`,
+  `HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH`,
+  `HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH` — cleansing과 feature 계산
+  설정 파일 경로다. 비우면 batch-jobs의 패키지 기본 설정을 사용한다.
+- `HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE` — sensor processing이 읽을 road
+  segment의 `snapshot_date`다. 실제 road segment Parquet의 값과 일치해야 한다.
 - `HOURLY_SEGMENT_FEATURE_VERSION` — 생성할 feature 데이터의 버전이다
   (예: `hourly-features-v1`).
 - `HOURLY_COMFORT_INPUT_PATH` 등 `HOURLY_COMFORT_*` 4개 키 — batch-jobs의
@@ -51,23 +59,24 @@ publish(#176) 단계를 오케스트레이션한다.
 구간을 처리하며, 아래 순서로 실행된다.
 
 ```text
-cleanse >> features >> scoring >> publish
+sensor_processing >> scoring >> publish
 ```
 
 각 TaskGroup의 BashOperator는 `docker run`으로 host에 별도의 `batch-jobs`
 컨테이너를 띄운다("docker-outside-of-docker"). Airflow 공식 이미지에 pyspark를
 섞지 않기 위한 로컬 임시 배선이며, `airflow-scheduler` 컨테이너에 host의
-docker socket을 마운트해 동작한다(`infra/compose/airflow.yaml`).
+docker socket을 마운트해 동작한다(`infra/compose/airflow.yaml`). Cleansing과
+feature 계산은 `sensor_processing`의 단일 컨테이너와 Spark 세션에서 실행되며,
+중간 cleansed-event 데이터셋을 저장하거나 다시 읽지 않는다.
 
 | 단계 | 실행 커맨드 | 주요 입출력 |
 | --- | --- | --- |
-| cleanse | `cleanse-sensor-events` | Bronze → `processed_sensor_event`, `sensor_event_quarantine` |
-| features | `build-hourly-segment-features` | processed events + road snapshot → `hourly_segment_features` |
+| sensor processing | `cleanse-sensor-events` | Bronze + road snapshot → `sensor_event_quarantine`, `hourly_segment_features` |
 | scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
 | publish | `load-segment-comfort-score` | scoring 결과 → 서빙 PostgreSQL |
 
 publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 logical date가
-`2026-08-18 09:00 UTC`이면 cleanse/features는 09시 구간을 처리하고, publish는
+`2026-08-18 09:00 UTC`이면 sensor processing은 09시 구간을 처리하고, publish는
 해당 구간의 끝인 `2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
 
 > ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
@@ -76,17 +85,11 @@ publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 lo
 > 후속 이슈) 이 소켓 마운트와 `docker run` 호출은 `EmrServerlessStartJobOperator`로
 > 대체되며 통째로 사라진다.
 
-**알려진 한계**: batch-jobs의 `CleansingJobConfig.from_env()`는 누락된
-환경변수를 에러 없이 기본값으로 대체한다. 그래서 `infra/compose/airflow.yaml`의
-`CLEANSING_*` 전달 목록과 batch-jobs가 실제로 기대하는 설정 키가 어긋나도
-조용히 잘못된 경로로 cleanse job이 실행될 수 있다. 이 검증 로직은 batch-jobs
-서비스 범위라 이번 이슈에서는 고치지 않았다.
-
 **문제 해결**: `docker run` 단계에서 `permission denied`가 나면, host의
 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
 
-## 통합 테스트 (#189)
+## 통합 테스트 (#189, #205)
 
 ### 테스트 데이터
 
@@ -101,8 +104,8 @@ publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 lo
 검증한 fixture는 500개 trip, 4개 vehicle profile을 포함한다. 비정상 100건은
 `2026-08-18 09:30 UTC` 구간에 있고, 범위 밖 1,000건은 09시 구간의 양쪽
 경계에 둔다. 실행 전에는 Bronze와 road snapshot만 남기고 이전
-`processed_sensor_event`, cleansing quarantine, features, scoring 산출물은
-제거하거나 별도 경로로 이동한다.
+cleansing quarantine, features, scoring 산출물은 제거하거나 별도 경로로
+이동한다. `processed_sensor_event`는 현재 DAG가 읽거나 생성하지 않는다.
 
 ### 사전 준비
 
@@ -185,16 +188,18 @@ docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
 docker stop de4-airflow-backfill-scheduler
 ```
 
-### 검증 결과
+### 검증 기준
 
-2026-08-18 09시 fixture로 전체 DAG와 동일 logical date 재실행을 검증했다.
+아래 건수는 #189에서 2026-08-18 09시 fixture로 검증한 결과를 기준으로 한다.
+#205의 통합 sensor processing DAG는 같은 fixture로 다시 실행해 중간
+`processed_sensor_event` 없이 동일한 최종 결과를 만드는지 확인한다.
 
 | 검증 대상 | 결과 |
 | --- | --- |
-| cleanse processed | 100,000건, `event_date=2026-08-18/event_hour=09` |
-| cleanse quarantine | 100건, `target_date=2026-08-18/target_hour=09`, `OUT_OF_RANGE` |
+| sensor processing quarantine | 100건, `target_date=2026-08-18/target_hour=09`, `OUT_OF_RANGE` |
+| 중간 cleansed-event 데이터셋 | 생성되지 않음 |
 | 시간 범위 밖 이벤트 | 1,000건 모두 09시 결과에서 제외 |
-| features | 80건 = 20 segment × 4 profile, unmatched 0건 |
+| sensor processing features | 80건 = 20 segment × 4 profile, unmatched 0건 |
 | scoring | 80건, rejected 0건 |
 | 첫 publish | 100건 insert = 20 segment × (4 profile + 대표 profile 0) |
 | 동일 시간 재실행 | 0건 insert, 100건 update, 전체 행 수 증가 없음 |
