@@ -11,6 +11,8 @@ dependencies = [
     # weather_pipeline(#207)의 lightweight 날씨 수집 job이 쓴다 — Spark는 필요 없다.
     "psycopg2-binary>=2.9,<3.0",
     "pyarrow>=25.0.1",
+    # weather_rules.yaml(날씨 보정 파라미터) 로드용. batch-jobs의 YAML 설정 규약과 같은 형식이다.
+    "pyyaml>=6.0,<7.0",
     "requests>=2.32,<3.0",
 ]
 
