@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-19
+last_reviewed: 2026-08-20
 ---
 
 # Table Schema Catalog
@@ -543,8 +543,8 @@ observation (migration 0007). There is no history table; anything that needs
 | Wind speed | `wind_speed_10m_mps` | DOUBLE | Y |  | 10m wind speed, m/s |
 | Wind gusts | `wind_gusts_10m_mps` | DOUBLE | Y |  | 10m wind gusts, m/s |
 | Weather code | `weather_code` | INTEGER | Y |  | Open-Meteo WMO weather code |
-| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `jobs.weather.classify_weather_state`); exact thresholds are a follow-up issue |
-| Impact signature | `impact_signature` | STRING | N |  | Deterministic key summarizing which score-affecting buckets are active for this observation; a future current-score job compares it against the value this row held **before** the current UPSERT to detect whether weather changed (`context/comfort-score.md`); exact thresholds/encoding are a follow-up issue |
+| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `jobs.weather.classify_weather_state`). Single-valued and for display/debug only; it is **not** the scoring input, and it is classified separately from `impact_signature`'s buckets |
+| Impact signature | `impact_signature` | STRING | N |  | The set of active weather conditions for this observation, not a hash of the raw values, so it changes only when a condition turns on or off (`jobs.weather_rules.build_impact_signature`). Rule-version-tagged and sorted: `1.0.0\|ice,snow`, or `1.0.0\|clear` when none apply. `parse_impact_signature` reads it back, so the current-score job applies deductions without reclassifying these columns. It is also the change trigger — the job compares it against the value it last acted on (`context/comfort-score.md`, Step A); `latest_zone_weather` keeps no history, so where that previous value is stored is an open item there |
 | Fetched time | `fetched_at` | TIMESTAMP | N |  | Time this row was last retrieved from Open-Meteo |
 
 `weather_state` and `impact_signature` are both derived from the same raw

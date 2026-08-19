@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-19
+last_reviewed: 2026-08-20
 ---
 
 # Comfort Score Design
@@ -223,6 +223,15 @@ This is the only role the previous weather observation plays: it is a change
 trigger, not a scoring input. Step B always reads the current weather
 observation directly, never a delta or trend from the prior one.
 
+`impact_signature` is the set of active Step B conditions, not a hash of the raw
+observation (`build_impact_signature` in
+`services/orchestration/jobs/weather_rules.py`). It is a version-tagged string
+listing them in sorted order — `1.0.0|ice,snow`, or `1.0.0|clear` when none
+apply. A raw-value key would differ on nearly every 15-minute tick and make the
+trigger meaningless; this one changes only when a condition turns on or off.
+Because `WEATHER_RULE_VERSION` is part of it, changing the rules forces exactly
+one full recompute.
+
 ### Step B - Apply a weather adjustment per direction
 
 Starting from the segment's latest `standard_segment_comfort_score`
@@ -237,17 +246,60 @@ weather-derived adjustment per direction, using the zone's current
 | Snowfall | Vertical score and longitudinal score |
 | Low visibility | Final `comfort_score` only (not the three directional scores) |
 
-The exact thresholds that classify a weather observation into these
-conditions, and the exact score deductions applied, are **out of scope for
-issue #193** and are finalized in a follow-up issue.
+Each condition is detected independently, so they combine — snow and high wind
+can both be active, and snow alone moves two directions. Detection is
+implemented in `services/orchestration/jobs/weather_rules.py`; every numeric
+parameter lives in its `resources/weather_rules.yaml` as
+`{value, provisional}`, all provisional until real observations accumulate.
+`WEATHER_RULE_VERSION` tags the rule set and is what
+`current_segment_comfort_score.weather_rule_version` records.
+
+Conditions are intentionally on/off rather than graded. Intensity levels would
+mean more thresholds than there is data to calibrate; they can be added later
+behind a version bump.
+
+| Condition | Detected when (provisional) | Deduction |
+| --- | --- | --- |
+| `rain` | >= 0.5 mm per hour, or a WMO rain code | longitudinal -6 |
+| `ice` | a freezing-precipitation code (56/57/66/67), or <= 0.5 °C with liquid precipitation | longitudinal -18 |
+| `snow` | >= 0.2 cm per hour, or a WMO snow code | vertical -5, longitudinal -10 |
+| `wind` | gusts >= 15 m/s | lateral -6 |
+| `low_visibility` | <= 1000 m, or a fog code (45/48) | final `comfort_score` -4 |
+
+Rain and snow arrive as 15-minute sums, so they are compared as hourly rates
+(x4). Deductions are point subtractions on the 0-100 scale, matching the
+additive `clamp(standard + adjustment, 0-100)` shape. Ice is the largest
+because it is the one condition where braking authority is gone.
+
+When several conditions hit the same direction the deduction is their
+**maximum, not their sum** — freezing rain activates `rain` and `ice`, sleet
+activates `rain` and `snow`, and neither should be charged twice.
+
+Temperature is the one field where a missing value is not read as absent:
+treating `None` as 0 °C would classify every gap as freezing.
 
 ### Step C - Combine into a final current score
 
 Combine the weather-adjusted `vertical_score` / `longitudinal_score` /
 `lateral_score` into `comfort_score` using the same directional weights as
 the standard score (Step 1 above), then apply the low-visibility adjustment
-from Step B to the combined result. The exact combination formula, once
-thresholds are finalized, is out of scope here.
+from Step B to the combined result. Each directional score is clamped to
+0-100 after its deduction, and the combined score is clamped again after the
+visibility deduction (`adjust_comfort_scores` in `weather_rules.py`).
+
+So on `current_segment_comfort_score`, `comfort_score` is **not** the weighted
+sum of the three stored directional scores while `low_visibility` is active,
+since that deduction applies only to the combined value. The identity does hold
+on `standard_segment_comfort_score`, so a data-quality check must not assume it
+on both tables.
+
+The three weights now exist in two places — `batch-jobs`'s
+`resources/comfort_score.yaml` and `orchestration`'s `weather_rules.yaml` —
+because Step C must reuse them and the service-boundary rule forbids importing
+`batch_jobs`. They are kept equal by convention plus a sum-to-1.0 check.
+Promoting them to `libs/de4-core` would remove the drift risk but also changes
+`batch-jobs`, so it needs approval (the same unguarded drift as OQ-028's
+`vehicle_profile`).
 
 ### Step D - UPSERT
 
@@ -274,9 +326,11 @@ and weather snapshots used.
   `standard_segment_comfort_score` for that segment instead of the stale
   `current_segment_comfort_score` value. The freshness threshold itself is
   out of scope here.
-- The concrete weather thresholds and score-deduction coefficients (Step B
-  above) are decided in a follow-up issue; only the direction mapping is
-  fixed here.
+- The direction mapping in Step B is fixed here. The concrete thresholds and
+  score-deduction coefficients are implemented in
+  `services/orchestration/jobs/weather_rules.py` and its
+  `resources/weather_rules.yaml`, versioned by `WEATHER_RULE_VERSION`, and are
+  all still provisional until real observations and labels exist.
 
 ## Parameter and formula management
 
@@ -335,7 +389,12 @@ the new path is proven end to end:
    reading each zone's query point from `zone_master.representative_latitude`/
    `.representative_longitude` (schema-catalog.md).
 4. Implement current score calculation ("Weather-adjusted current score"
-   above) and UPSERT into `current_segment_comfort_score`.
+   above) and UPSERT into `current_segment_comfort_score`. The rules
+   themselves (bucket classification, `impact_signature`, per-direction
+   deductions, Step C combination) are implemented in
+   `services/orchestration/jobs/weather_rules.py`; what remains is the job
+   that reads the two tables, applies them, and UPSERTs — plus the two
+   prerequisites under "Open items" below.
 5. Wire both jobs into Airflow (hourly standard run, 15-minute weather run).
 6. Switch the FastAPI serving layer from `segment_comfort_score` to
    `current_segment_comfort_score` (with the standard-fallback rule above).
@@ -354,6 +413,21 @@ the full record:
   filter.
 - The final numeric value of `k` (to be computed from real data once enough
   has accumulated - explicitly out of scope for issue #102).
+- **Where the recompute job reads the previous `impact_signature` from.**
+  `latest_zone_weather` holds one row per zone and the collector overwrites it,
+  so the pre-UPSERT value does not survive anywhere. Step A needs it. The
+  proposal is to store the signature the recompute job last acted on **on the
+  consumer side** — a `weather_impact_signature` column on
+  `current_segment_comfort_score` — which keeps the latest-only weather table
+  unchanged and makes the job idempotent and able to recover after a missed
+  tick. That is a migration, and migrations live in `services/batch-jobs`, so
+  it needs approval before implementation.
+- **Whether the three directional weights move to `libs/de4-core`** instead of
+  being duplicated between `batch-jobs` and `orchestration` (see Step C).
+- The stale-weather policy conflict: this document says FastAPI falls back to
+  the standard score at read time, while the v4 architecture diagram shows a
+  neutral adjustment written by the pipeline. Both are defensible; only one
+  should be built. The freshness threshold itself is also still undecided.
 
 ## Evaluation strategy
 
