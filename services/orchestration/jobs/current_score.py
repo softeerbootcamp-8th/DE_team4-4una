@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import psycopg2
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from psycopg2.extras import execute_values
@@ -319,3 +320,22 @@ def _build_row(
         "weather_impact_signature": impact_signature,
         "calculated_at": calculated_at,
     }
+
+
+# Airflow task가 그대로 부를 수 있는 진입점. 두 DAG가 커넥션 개폐를 각자 베끼지 않도록
+# 여기서 한 번만 처리한다.
+def run_from_env(*, changed_zones_only: bool) -> CurrentScoreJobSummary:
+    config = CurrentScoreJobConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        return run_current_score_job(
+            config, connection, changed_zones_only=changed_zones_only
+        )
+    finally:
+        connection.close()
