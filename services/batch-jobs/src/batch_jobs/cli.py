@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gold_parser = subparsers.add_parser("load-segment-comfort-score")
     gold_parser.add_argument("--as-of", required=True)
+    
+    standard_parser = subparsers.add_parser("load-standard-segment-comfort-score")
+    standard_parser.add_argument("--as-of", required=True)
     return parser
 
 
@@ -265,6 +268,49 @@ def run_segment_comfort_score_loading(arguments: argparse.Namespace) -> None:
         connection.close()
 
 
+
+def run_standard_comfort_score_loading(arguments: argparse.Namespace) -> None:
+    import psycopg2
+
+    from batch_jobs.comfort_score.standard_job import (
+        StandardComfortScoreJobConfig,
+        build_spark_session,
+        run_standard_comfort_score_job,
+    )
+
+    as_of = datetime.fromisoformat(arguments.as_of)
+    if as_of.utcoffset() is None:
+        raise ValueError(
+            "--as-of must include a UTC offset, e.g. 2026-08-19T00:00:00+00:00"
+        )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = StandardComfortScoreJobConfig.from_env()
+    spark = build_spark_session()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_standard_comfort_score_job(spark, config, as_of, connection)
+        print(
+            json.dumps(
+                {
+                    "scored_count": summary.scored_count,
+                    "merged_count": summary.merged_count,
+                    "inserted_count": summary.inserted_count,
+                    "updated_count": summary.updated_count,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -278,6 +324,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "load-segment-comfort-score":
         run_segment_comfort_score_loading(arguments)
+        return
+    if arguments.command == "load-standard-segment-comfort-score":
+        run_standard_comfort_score_loading(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(

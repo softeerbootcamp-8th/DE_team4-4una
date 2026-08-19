@@ -59,7 +59,6 @@ def standard_row(**overrides) -> dict:
         "lateral_score": 80.0,
         "comfort_score": 80.0,
         "sample_count": 100,
-        "qualifying_hour_count": 50,
         "confidence_score": 0.8,
         "score_version": "1.0.0",
         "calculated_at": datetime(2026, 8, 19, 10, 5, tzinfo=UTC),
@@ -204,34 +203,57 @@ class TestWeatherAwareComfortScoreMigration:
             connection.rollback()
             connection.close()
 
-    def test_standard_rejects_a_half_null_data_period(self):
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"data_period_start": None},
+            {"data_period_end": None},
+            {"data_period_start": None, "data_period_end": None},
+        ],
+    )
+    def test_standard_rejects_a_null_data_period(self, overrides):
+        """0008이 두 컬럼을 NOT NULL로 바꿨다 (#198).
+
+        N=0이어도 배치 윈도우로 채워 넣으므로 NULL이 올라올 일이 없고, 그래서 0006의
+        "둘 다 NULL이거나 둘 다 값" 짝 CHECK도 함께 사라졌다 — 반쪽이든 양쪽이든
+        NotNullViolation으로 막힌다.
+        """
         connection = _connect()
         try:
-            with pytest.raises(psycopg2.errors.CheckViolation):
+            with pytest.raises(psycopg2.errors.NotNullViolation):
                 _insert(
                     connection,
                     "standard_segment_comfort_score",
-                    standard_row(data_period_start=None),
+                    standard_row(**overrides),
                 )
         finally:
             connection.rollback()
             connection.close()
 
-    def test_standard_allows_both_data_period_bounds_null_when_n_is_zero(self):
+    def test_standard_accepts_a_zero_confidence_row_with_a_filled_window(self):
+        """N=0 행은 confidence_score=0으로 식별되고, 기간은 배치 윈도우로 채워진다."""
         connection = _connect()
         try:
             _insert(
                 connection,
                 "standard_segment_comfort_score",
-                standard_row(
-                    data_period_start=None,
-                    data_period_end=None,
-                    qualifying_hour_count=0,
-                    confidence_score=0.0,
-                ),
+                standard_row(confidence_score=0.0),
             )
         finally:
             connection.rollback()
+            connection.close()
+
+    def test_standard_no_longer_has_a_qualifying_hour_count_column(self):
+        connection = _connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'standard_segment_comfort_score'"
+                )
+                columns = {row[0] for row in cursor.fetchall()}
+            assert "qualifying_hour_count" not in columns
+        finally:
             connection.close()
 
     def test_weather_rejects_duplicate_primary_key(self):

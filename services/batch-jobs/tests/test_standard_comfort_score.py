@@ -7,6 +7,7 @@ writer, job, CLI)와 그 테스트는 후속 PR의 범위다.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -16,6 +17,7 @@ from batch_jobs.comfort_score.formula import (
     compute_segment_comfort_scores,
     compute_standard_comfort_scores,
 )
+from batch_jobs.comfort_score.universe import resolve_segment_artifact_uri
 from batch_jobs.sensor_features.config import ProvisionalThreshold
 from pyspark.sql import SparkSession
 
@@ -255,3 +257,35 @@ class TestUniverseMaterialization:
             compute_standard_comfort_scores(df, TEST_CONFIG, broken)
 
 
+class TestUniverseResolution:
+    """활성 environment pointer -> manifest -> artifact URI 해석 (#198)."""
+
+    @staticmethod
+    def write_environment(tmp_path, artifacts: list[dict]) -> str:
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps({"artifacts": artifacts}))
+        pointer_dir = tmp_path / "prepared" / "simulation_environment"
+        pointer_dir.mkdir(parents=True)
+        (pointer_dir / "active.json").write_text(
+            json.dumps({"manifest_uri": manifest_path.as_uri()})
+        )
+        return str(tmp_path)
+
+    def test_resolves_the_enriched_segment_reference_artifact(self, tmp_path):
+        data_lake_uri = self.write_environment(
+            tmp_path,
+            [
+                {"role": "road_segment", "uri": "file:///other.parquet"},
+                {"role": "enriched_segment_reference", "uri": "file:///wanted.parquet"},
+            ],
+        )
+
+        assert resolve_segment_artifact_uri(data_lake_uri) == "file:///wanted.parquet"
+
+    def test_raises_when_the_manifest_has_no_segment_artifact(self, tmp_path):
+        data_lake_uri = self.write_environment(
+            tmp_path, [{"role": "road_segment", "uri": "file:///other.parquet"}]
+        )
+
+        with pytest.raises(ValueError, match="enriched_segment_reference"):
+            resolve_segment_artifact_uri(data_lake_uri)
