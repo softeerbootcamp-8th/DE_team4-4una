@@ -1298,6 +1298,7 @@ dependencies = [
     { name = "de4-core" },
     { name = "psycopg2-binary" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "requests" },
 ]
 
@@ -1307,6 +1308,7 @@ requires-dist = [
     { name = "de4-core", editable = "libs/de4-core" },
     { name = "psycopg2-binary", specifier = ">=2.9,<3.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "requests", specifier = ">=2.32,<3.0" },
 ]
 

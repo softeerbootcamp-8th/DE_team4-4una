@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -17,6 +15,12 @@ import requests
 from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from .weather_rules import (
+    WeatherRuleConfig,
+    build_impact_signature,
+    load_weather_rule_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,15 +274,6 @@ def classify_weather_state(reading: Mapping[str, float | int | None]) -> str:
     return "dry"
 
 
-# 관측값을 정렬된 JSON으로 SHA-256 해시화 — 값이 바뀌면 해시도 바뀌어 변경 감지에 쓴다.
-def build_impact_signature(reading: Mapping[str, float | int | None]) -> str:
-    canonical = json.dumps(
-        {variable: reading.get(variable) for variable in MINUTELY_15_VARIABLES},
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 # latest_zone_weather에 UPSERT — location_id당 최신 관측 1행만 유지된다.
 def upsert_latest_zone_weather(connection, rows: Sequence[Mapping[str, object]]) -> int:
     if not rows:
@@ -299,8 +294,11 @@ def run_latest_zone_weather_job(
     connection,
     *,
     session: requests.Session | None = None,
+    rule_config: WeatherRuleConfig | None = None,
 ) -> LatestZoneWeatherJobSummary:
     target_time = _validate_target_time(target_time)
+    # zone마다 YAML을 다시 읽지 않도록 한 번만 로드해 돌려 쓴다.
+    rule_config = rule_config if rule_config is not None else load_weather_rule_config()
     zones = load_zone_coordinates(config.zone_master_path)
     zones_by_id = {zone.location_id: zone for zone in zones}
     readings = fetch_open_meteo(zones, target_time, session=session)
@@ -332,7 +330,7 @@ def run_latest_zone_weather_job(
                 int(reading["weather_code"]) if reading["weather_code"] is not None else None
             ),
             "weather_state": classify_weather_state(reading),
-            "impact_signature": build_impact_signature(reading),
+            "impact_signature": build_impact_signature(reading, rule_config),
             "fetched_at": fetched_at,
         }
         for location_id, reading in readings.items()
