@@ -455,12 +455,12 @@ calculation").
 `score_as_of` is the standard job's scheduled run time (for example, the top
 of the hour) — a fixed schedule identifier, not derived from the data. This is
 deliberately kept separate from `data_period_start`/`data_period_end`, which
-describe the actual qualifying-hour data rolled up into the score and can be
-`NULL` (see below). `segment_comfort_score` conflated these two concepts in a
-single `data_period_end` column, which forced a fallback to backfill it with
-the batch window bound whenever no qualifying hour existed (see the
-"Column calculation mapping" note on `segment_comfort_score` above);
-`score_as_of` removes the need for that fallback.
+describe the actual qualifying-hour data rolled up into the score.
+`segment_comfort_score` conflated these two concepts in a single
+`data_period_end` column, so a run that found no qualifying data had no
+distinct identity of its own (see the "Column calculation mapping" note on
+`segment_comfort_score` above); `score_as_of` gives every scheduled run a key
+regardless of how much data it found.
 
 **Storage policy:** append a new row per `(segment_id, vehicle_profile_id,
 score_as_of)` as new scheduled runs occur; a re-run for a `score_as_of` that
@@ -476,14 +476,13 @@ traversed a segment").
 | Road segment | `segment_id` | STRING | N | PK, FK | References `road_segment.segment_id` |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile.vehicle_profile_id`; sentinel `0` is the vehicle-agnostic row (OQ-038) |
 | Score as-of | `score_as_of` | TIMESTAMP | N | PK | The standard job's scheduled run time; identifies which run produced this row, independent of how much qualifying data existed for it |
-| Data-period start | `data_period_start` | TIMESTAMP | Y |  | Start of the trailing window actually used, `MIN(hourly_comfort_score.data_period_start)` over the qualifying hours in `H_{s,p}`; `NULL` when `N = 0` (no qualifying hour). Co-nullable with `data_period_end` — enforced by a `CHECK ((data_period_start IS NULL) = (data_period_end IS NULL))` |
-| Data-period end | `data_period_end` | TIMESTAMP | Y |  | End of the trailing window actually used, `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}`; `NULL` when `N = 0` |
+| Data-period start | `data_period_start` | TIMESTAMP | N |  | Start of the trailing window actually used, `MIN(hourly_comfort_score.data_period_start)` over the qualifying hours in `H_{s,p}`; when `N = 0` there is no qualifying hour to roll up, so the standard job fills the batch run's own window bound `as_of - window_hours` instead (issue #198) |
+| Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the trailing window actually used, `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}`; filled with `as_of` when `N = 0`, for the same reason as `data_period_start` |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-unadjusted vertical directional score for this window |
 | Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Weather-unadjusted longitudinal directional score for this window |
 | Lateral comfort score | `lateral_score` | DOUBLE | N |  | Weather-unadjusted lateral directional score for this window |
 | Comfort score | `comfort_score` | DOUBLE | N |  | Weather-unadjusted final score, 0-100 (`ComfortScore_{s,p}` in comfort-score.md) |
 | Sensor sample count | `sample_count` | BIGINT | N |  | Sum of `hourly_comfort_score.sample_count` over the qualifying hours in `H_{s,p}` |
-| Qualifying hour count | `qualifying_hour_count` | INTEGER | N |  | `N = \|H_{s,p}\|`, the count of hours passing the `T_min` traffic filter (comfort-score.md Step 2) |
 | Confidence score | `confidence_score` | DOUBLE | N |  | `Confidence_{s,p} = N / (N + k)` |
 | Score version | `score_version` | STRING | N |  | Standard comfort-formula version (`SCORE_VERSION`) |
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Standard job run completion time |
@@ -491,11 +490,15 @@ traversed a segment").
 ### Column calculation mapping
 
 Same calculation as `segment_comfort_score`'s existing mapping above (Steps
-1-5 in `context/comfort-score.md`), with three differences: `score_as_of`
-(the run schedule time), not `data_period_end`, joins the primary key;
-`data_period_start`/`data_period_end` are `NULL` rather than backfilled when
-`N = 0`; and `qualifying_hour_count` (`N`) is stored directly instead of only
-being recoverable from `confidence_score`. OQ-039 (traffic-count source for
+1-5 in `context/comfort-score.md`), with two differences: `score_as_of` (the
+run schedule time), not `data_period_end`, joins the primary key; and the
+three directional scores are stored alongside the combined `comfort_score`.
+Steps 2-5 are applied per direction and then recombined with the Step 1
+weights — every step is linear, so `comfort_score` is unchanged by this and
+stays equal to the weighted sum of the three stored directional scores
+(issue #198). `N` is not stored; it is recoverable from `confidence_score`
+and the fixed `k` as `N = k * C / (1 - C)`, and `N = 0` is identifiable as
+`confidence_score = 0`. OQ-039 (traffic-count source for
 the `T_min` filter) remains open and applies here exactly as it did to
 `segment_comfort_score`.
 
@@ -572,7 +575,7 @@ vehicle profile at all times; no period is part of the key.
 | Zone | `location_id` | INTEGER | N | FK | The segment's TLC zone, cached here to join `zone_weather_snapshot` without going through `road_segment`. Together with `weather_time`, this is a real composite FK to `zone_weather_snapshot.(location_id, weather_time)` — both tables are PostgreSQL, so this is DB-enforceable regardless of `zone_master`'s storage. This is also the same `location_id` as `zone_master.location_id`/`road_segment.location_id` (the canonical zone identity, OQ-029), but that identity link is documentation only, not a separate FK |
 | Standard score as-of | `standard_score_as_of` | TIMESTAMP | N | FK | The `standard_segment_comfort_score.score_as_of` this row was computed from; together with `segment_id`/`vehicle_profile_id` identifies the exact standard snapshot used |
 | Weather time | `weather_time` | TIMESTAMP | Y | FK | The `zone_weather_snapshot.weather_time` (paired with `location_id`) this row's weather adjustment was computed from; null only before the zone's first weather snapshot has been fetched, in which case the row reflects the standard score unadjusted |
-| Data-period start | `data_period_start` | TIMESTAMP | Y |  | Copied from the referenced `standard_segment_comfort_score.data_period_start`, for display without a join; null when the referenced standard row itself has `data_period_start = NULL` (`N = 0`, no qualifying hour) |
+| Data-period start | `data_period_start` | TIMESTAMP | Y |  | Copied from the referenced `standard_segment_comfort_score.data_period_start`, for display without a join. The referenced standard row is never itself null here (issue #198 made those columns NOT NULL), so in practice this column is always populated; the column stays nullable because tightening it is part of the current-score work, not #198 |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-adjusted vertical directional score |
 | Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Weather-adjusted longitudinal directional score |
 | Lateral comfort score | `lateral_score` | DOUBLE | N |  | Weather-adjusted lateral directional score |
