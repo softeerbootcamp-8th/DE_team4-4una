@@ -29,7 +29,7 @@ design and must not be invented silently.
 | `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
 | `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period — **superseded**, see below |
 | `standard_segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x standard scoring hour |
-| `zone_weather_snapshot` | TBD | Silver (PostgreSQL) | One TLC taxi zone x 15-minute weather observation |
+| `latest_zone_weather` | TBD | Silver/Serving (PostgreSQL) | One TLC taxi zone's latest weather observation |
 | `current_segment_comfort_score` | TBD | Gold/Serving (PostgreSQL) | One segment x vehicle profile's current state |
 | `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
 | `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
@@ -390,7 +390,7 @@ the Gold layer, as `segment_comfort_score.comfort_score`.
 ## `segment_comfort_score`
 
 **Status:** superseded by `standard_segment_comfort_score`,
-`zone_weather_snapshot`, and `current_segment_comfort_score` below (issue
+`latest_zone_weather`, and `current_segment_comfort_score` below (issue
 #193). This table and its existing Gold writer are unchanged and keep serving
 reads until the migration completes — see "Migration order" in
 `context/comfort-score.md`. Removing this table is the last migration step,
@@ -499,30 +499,37 @@ being recoverable from `confidence_score`. OQ-039 (traffic-count source for
 the `T_min` filter) remains open and applies here exactly as it did to
 `segment_comfort_score`.
 
-## `zone_weather_snapshot`
+## `latest_zone_weather`
 
-**Status:** proposed (issue #193). **Layer:** Silver. **Storage:**
-PostgreSQL.
+**Status:** proposed (issue #193); storage model changed from a
+`(location_id, weather_time)` history table to a latest-only table in #209.
+**Layer:** Silver/Serving. **Storage:** PostgreSQL.
 
-**Grain:** one TLC taxi zone x 15-minute weather observation time.
+**Grain:** one TLC taxi zone's latest weather observation — not a time
+series. The original design (`zone_weather_snapshot`, migration 0006) kept
+one row per zone per 15-minute tick forever; #209 renamed the table and
+collapsed it to one row per zone, since nothing downstream reads the
+history and it makes "did this zone's weather change" a single UPSERT
+instead of a query over the previous row.
 
-**Primary key:** `(location_id, weather_time)`. `location_id` is named to
-match `taxi_zone_lookup.location_id` / `zone_master.location_id` /
-`road_segment.location_id` (OQ-029: `zone_master` is the canonical
-geometry-bearing zone reference) rather than introducing a `zone_id` alias
-for the same identifier. It is a **logical** reference to
-`zone_master.location_id` only — `zone_master` is local Parquet, not
-PostgreSQL, so no DB-enforced FK is created (confirmed with the project
-owner; see the note under `zone_master` above).
+**Primary key:** `location_id`. Named to match `taxi_zone_lookup.location_id`
+/ `zone_master.location_id` / `road_segment.location_id` (OQ-029:
+`zone_master` is the canonical geometry-bearing zone reference) rather than
+introducing a `zone_id` alias for the same identifier. It is a **logical**
+reference to `zone_master.location_id` only — `zone_master` is local
+Parquet, not PostgreSQL, so no DB-enforced FK is created (confirmed with the
+project owner; see the note under `zone_master` above).
 
-**Storage policy:** append a new row per zone every 15 minutes; a re-run for
-a `weather_time` that already exists updates that same row in place
-(idempotent), it does not insert a duplicate.
+**Storage policy:** UPSERT only, keyed by `location_id` — every 15-minute
+collection run overwrites each zone's single row with the latest Open-Meteo
+observation (migration 0007). There is no history table; anything that needs
+"did the weather change" must read this row's existing `impact_signature`
+**before** the UPSERT overwrites it.
 
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Zone ID | `location_id` | INTEGER | N | PK | TLC zone code; logical reference to `zone_master.location_id` (not a DB FK — see above) |
-| Weather time | `weather_time` | TIMESTAMP | N | PK | 15-minute-aligned observation time |
+| Weather time | `weather_time` | TIMESTAMP | N |  | Observation time of the currently-stored reading (15-minute-aligned); overwritten on every UPSERT, so it always reflects only the latest run, never a history |
 | Latitude | `latitude` | DOUBLE | N |  | Zone query-point latitude actually sent to Open-Meteo; copied from `zone_master.representative_latitude` at fetch time, not queried ad hoc |
 | Longitude | `longitude` | DOUBLE | N |  | Zone query-point longitude actually sent to Open-Meteo; copied from `zone_master.representative_longitude` at fetch time |
 | Temperature | `temperature_2m_c` | DOUBLE | Y |  | 2m air temperature, degrees Celsius |
@@ -533,16 +540,17 @@ a `weather_time` that already exists updates that same row in place
 | Wind speed | `wind_speed_10m_mps` | DOUBLE | Y |  | 10m wind speed, m/s |
 | Wind gusts | `wind_gusts_10m_mps` | DOUBLE | Y |  | 10m wind gusts, m/s |
 | Weather code | `weather_code` | INTEGER | Y |  | Open-Meteo WMO weather code |
-| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (for example dry, rain, snow, high-wind, low-visibility, or a combination); exact thresholds are a follow-up issue |
-| Impact signature | `impact_signature` | STRING | N |  | Deterministic key summarizing which score-affecting buckets are active for this observation; used only to detect whether weather changed since the zone's previous `weather_time` row (`context/comfort-score.md`); exact thresholds/encoding are a follow-up issue |
-| Fetched time | `fetched_at` | TIMESTAMP | N |  | Time this row was retrieved from Open-Meteo |
+| Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `weather_snapshot_job.classify_weather_state`); exact thresholds are a follow-up issue |
+| Impact signature | `impact_signature` | STRING | N |  | Deterministic key summarizing which score-affecting buckets are active for this observation; a future current-score job compares it against the value this row held **before** the current UPSERT to detect whether weather changed (`context/comfort-score.md`); exact thresholds/encoding are a follow-up issue |
+| Fetched time | `fetched_at` | TIMESTAMP | N |  | Time this row was last retrieved from Open-Meteo |
 
 `weather_state` and `impact_signature` are both derived from the same raw
 fields: `weather_state` is for human/debug readability, `impact_signature` is
-the exact equality key the current-score job compares against the previous
-snapshot to decide whether to recompute. Nullable measurement columns reflect
-fields Open-Meteo may omit on a partial response; a wholly failed fetch does
-not write a row at all (see comfort-score.md's Open-Meteo failure policy).
+the exact equality key a future current-score job compares against this
+row's pre-UPSERT value to decide whether to recompute. Nullable measurement
+columns reflect fields Open-Meteo may omit on a partial response; a wholly
+failed fetch does not write a row at all (see comfort-score.md's Open-Meteo
+failure policy).
 
 ## `current_segment_comfort_score`
 
@@ -560,18 +568,19 @@ vehicle profile at all times; no period is part of the key.
 
 - On the hourly standard run (top of the hour): every row is recomputed and
   upserted from the new `standard_segment_comfort_score` snapshot and the
-  zone's latest `zone_weather_snapshot` row.
+  zone's current `latest_zone_weather` row.
 - On each 15-minute weather refresh: only the segments belonging to zones
-  whose `impact_signature` changed since their previous `weather_time` row
-  are recomputed and upserted; segments in unaffected zones are left as-is.
+  whose `impact_signature` differs from the value `latest_zone_weather` held
+  just before this refresh are recomputed and upserted; segments in
+  unaffected zones are left as-is.
 
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Road segment | `segment_id` | STRING | N | PK, FK | References `road_segment.segment_id` and `standard_segment_comfort_score.segment_id` |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile.vehicle_profile_id` and `standard_segment_comfort_score.vehicle_profile_id` |
-| Zone | `location_id` | INTEGER | N | FK | The segment's TLC zone, cached here to join `zone_weather_snapshot` without going through `road_segment`. Together with `weather_time`, this is a real composite FK to `zone_weather_snapshot.(location_id, weather_time)` — both tables are PostgreSQL, so this is DB-enforceable regardless of `zone_master`'s storage. This is also the same `location_id` as `zone_master.location_id`/`road_segment.location_id` (the canonical zone identity, OQ-029), but that identity link is documentation only, not a separate FK |
+| Zone | `location_id` | INTEGER | N |  | The segment's TLC zone, cached here to join `latest_zone_weather` without going through `road_segment`. **Logical reference only, no FK** (#209) — see "Relationships" below for why |
 | Standard score as-of | `standard_score_as_of` | TIMESTAMP | N | FK | The `standard_segment_comfort_score.score_as_of` this row was computed from; together with `segment_id`/`vehicle_profile_id` identifies the exact standard snapshot used |
-| Weather time | `weather_time` | TIMESTAMP | Y | FK | The `zone_weather_snapshot.weather_time` (paired with `location_id`) this row's weather adjustment was computed from; null only before the zone's first weather snapshot has been fetched, in which case the row reflects the standard score unadjusted |
+| Weather time | `weather_time` | TIMESTAMP | Y |  | The `latest_zone_weather.weather_time` this row's weather adjustment was actually computed from, frozen at calculation time. **Logical reference only, no FK** (#209) — `latest_zone_weather` keeps mutating after this row is written, and this column must not follow it; null only before the zone's first weather snapshot has been fetched, in which case the row reflects the standard score unadjusted |
 | Data-period start | `data_period_start` | TIMESTAMP | Y |  | Copied from the referenced `standard_segment_comfort_score.data_period_start`, for display without a join; null when the referenced standard row itself has `data_period_start = NULL` (`N = 0`, no qualifying hour) |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-adjusted vertical directional score |
 | Longitudinal comfort score | `longitudinal_score` | DOUBLE | N |  | Weather-adjusted longitudinal directional score |
@@ -589,12 +598,15 @@ vehicle profile at all times; no period is part of the key.
   `segment_id`, `vehicle_profile_id`) -> `standard_segment_comfort_score.score_as_of`
   (together with `segment_id`, `vehicle_profile_id`).
 - `current_segment_comfort_score.(location_id, weather_time)` ->
-  `zone_weather_snapshot.(location_id, weather_time)` — a real, DB-enforceable
-  composite foreign key: both tables are PostgreSQL, so this does not depend
-  on `zone_master`'s storage. (Contrast with
-  `zone_weather_snapshot.location_id`'s own reference to
-  `zone_master.location_id`, which stays logical-only
-  because `zone_master` is Parquet.)
+  `latest_zone_weather.(location_id, weather_time)` — **logical only, no FK**
+  (#209, reversing the earlier #196 design where this was a real composite
+  FK). `latest_zone_weather` has no history: it is overwritten in place on
+  every 15-minute collection run, so a FK would force
+  `current_segment_comfort_score.weather_time` to silently become stale-or-
+  invalid the moment a *different* zone-wide UPSERT changes the row it once
+  pointed at — even though this row's score was never recomputed. Keeping
+  the reference logical lets `weather_time` stay a frozen record of "what
+  weather this score was actually computed from."
 
 ## `zone_master`
 
@@ -632,7 +644,7 @@ component, cross-service from `zone_master`'s owning `sensor-producer`
 zone-profile pipeline — flagged and confirmed with the project owner) reads
 `zone_master.parquet` directly to get each zone's query point, then writes
 the coordinates it actually used into
-`zone_weather_snapshot.latitude`/`.longitude` (see below) rather than
+`latest_zone_weather.latitude`/`.longitude` (see below) rather than
 querying `zone_master` at read time.
 
 ## `zone_profile_features`

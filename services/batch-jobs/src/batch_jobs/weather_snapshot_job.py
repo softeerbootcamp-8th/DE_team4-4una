@@ -1,4 +1,4 @@
-# Open-Meteo 15분 날씨를 zone_weather_snapshot에 수집한다 (#199).
+# Open-Meteo 15분 날씨를 latest_zone_weather(존당 최신 1행)에 수집한다 (#199, #209).
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 # 한 번에 너무 많은 좌표를 보내지 않도록 zone을 나눠서 호출한다.
 ZONE_BATCH_SIZE = 50
 
-# minutely_15 요청 변수 — zone_weather_snapshot 컬럼과 1:1 대응, 단위는 ms/mm로 맞춤.
+# minutely_15 요청 변수 — latest_zone_weather 컬럼과 1:1 대응, 단위는 ms/mm로 맞춤.
 MINUTELY_15_VARIABLES = (
     "temperature_2m",
     "precipitation",
@@ -50,7 +50,7 @@ HTTP_RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
 DEFAULT_ZONE_MASTER_PATH = Path("data/reference/tlc_zone/zone_master.parquet")
 
-TABLE = "zone_weather_snapshot"
+TABLE = "latest_zone_weather"
 
 _ROW_COLUMNS = (
     "location_id",
@@ -73,7 +73,8 @@ _ROW_COLUMNS = (
 _UPSERT_SQL = f"""
 INSERT INTO {TABLE} ({", ".join(_ROW_COLUMNS)})
 VALUES %s
-ON CONFLICT (location_id, weather_time) DO UPDATE SET
+ON CONFLICT (location_id) DO UPDATE SET
+    weather_time = EXCLUDED.weather_time,
     latitude = EXCLUDED.latitude,
     longitude = EXCLUDED.longitude,
     temperature_2m_c = EXCLUDED.temperature_2m_c,
@@ -276,8 +277,8 @@ def build_impact_signature(reading: Mapping[str, float | int | None]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# zone_weather_snapshot에 UPSERT — 같은 (location_id, weather_time) 재실행해도 중복 안 생김.
-def upsert_weather_snapshots(connection, rows: Sequence[Mapping[str, object]]) -> int:
+# latest_zone_weather에 UPSERT — location_id당 최신 관측 1행만 유지된다.
+def upsert_latest_zone_weather(connection, rows: Sequence[Mapping[str, object]]) -> int:
     if not rows:
         return 0
     with connection.cursor() as cursor:
@@ -335,7 +336,7 @@ def run_weather_snapshot_job(
         for location_id, reading in readings.items()
     ]
 
-    collected_count = upsert_weather_snapshots(connection, rows)
+    collected_count = upsert_latest_zone_weather(connection, rows)
     return WeatherSnapshotJobSummary(
         requested_zone_count=len(zones),
         collected_count=collected_count,
