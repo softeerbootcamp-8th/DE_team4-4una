@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-18
+last_reviewed: 2026-08-19
 ---
 
 # Open Questions and Decision Register
@@ -63,7 +63,7 @@ ADR when the choice affects multiple components.
 | OQ-026 | What are the exact units and axis semantics for `accel_x`, `accel_y`, `accel_z`, and jerk? | Prototype uses longitudinal x, lateral y, and vertical z for acceleration in m/s² and jerk in m/s³; `jerk` aliases `jerk_x` | Accepted 2026-08-11 |
 | OQ-027 | What are the physical names of the unnamed source, reference, and Gold tables? | Required for storage layout, SQL, and catalog registration | Open |
 | OQ-028 | What is the `vehicle_profile` schema? | `vehicle_profile` (Postgres) now seeds 5 body-type/size-class profiles plus the `vehicle_profile_id=0` sentinel, with response/damping factor columns matching `sensor_producer.domain.VEHICLE_PROFILES`'s motion-response constants (migration `0005_define_vehicle_profiles.sql`, issue #170). The two are kept in sync by convention only — there is no runtime read from Postgres, so drift between the DB values and the Python constants is possible and unguarded | Partially accepted 2026-08-18 |
-| OQ-029 | What is the taxi-zone geometry schema and source? | `taxi_zone_lookup` alone cannot choose pickup/drop-off road points | Open |
+| OQ-029 | What is the taxi-zone geometry schema and source? | `taxi_zone_lookup` alone cannot choose pickup/drop-off road points | Accepted 2026-08-19 — `zone_master` (`location_id`, `geometry`, plus `representative_latitude`/`representative_longitude` added for issue #193) is the canonical geometry-bearing zone reference; `taxi_zone_lookup` remains the raw TLC name/borough lookup. See `docs/adr/0005-zone-master-canonical-geometry-reference.md` and `context/data/schema-catalog.md` (`zone_master`, issue #193) |
 | OQ-030 | What are the accepted enums for map-match status and the three reference quality flags? | Required for shared contracts and data-quality metrics | Open |
 | OQ-031 | Must corrections to an existing `enriched_segment_reference` row retain prior versions, or is an in-place upsert sufficient? | `updated_at` exposes the latest rebuild but does not itself preserve audit history | Open |
 | OQ-032 | Is jerk's mentioned PDI weight of `0.25` accepted, and what is the complete PDI formula? | One isolated weight is insufficient to reproduce the Gold score | Open |
