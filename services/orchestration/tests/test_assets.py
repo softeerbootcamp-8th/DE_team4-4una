@@ -20,4 +20,4 @@ def test_zone_weather_asset_is_an_asset():
 
 def test_zone_weather_asset_identifies_the_latest_zone_weather_table():
     assert ZONE_WEATHER_ASSET.name == "zone_weather_changed"
-    assert ZONE_WEATHER_ASSET.uri == "postgres://latest_zone_weather/"
+    assert ZONE_WEATHER_ASSET.uri == "asset://zone-weather/changed-zones"

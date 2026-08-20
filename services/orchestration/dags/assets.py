@@ -11,6 +11,15 @@ jobs/ 패키지처럼 별도 PYTHONPATH 배선 없이 각 DAG 파일에서 `from
 dag-processor/webserver의 파싱 시점에는 보이지 않는다(infra/compose/airflow.yaml
 참고). 이 모듈은 각 DAG 파일이 파싱 시점(모듈 최상단)에 그대로 가져다 쓸 수
 있어야 하므로, Airflow SDK 이외의 무거운 의존성을 두지 않는다.
+
+URI 스킴은 일부러 `postgres://`를 쓰지 않는다 — apache/airflow:3.3.1 공식 이미지에는
+apache-airflow-providers-postgres가 기본 포함돼 있고, 이 provider가 `postgres`/
+`postgresql` 스킴에 대해 `postgres://host:port/database/schema/table` 형태를
+강제하는 URI sanitizer를 등록해 둔다(airflow.providers.postgres.assets.postgres).
+이 Asset은 실제 DB 연결 정보가 아니라 스케줄링용 식별자일 뿐이라 그 형식을 맞출
+이유가 없고, 로컬 uv 가상환경에는 이 provider가 없어 유닛 테스트로는 이 충돌이
+잡히지 않는다(실제로 로컬 Airflow 컨테이너에 올려 dag-processor 파싱 오류로
+발견했다) — 그래서 provider가 손대지 않는 스킴을 쓴다.
 """
 
 from __future__ import annotations
@@ -19,4 +28,4 @@ from airflow.sdk import Asset
 
 # zone_weather_pipeline(#230)이 detect_changed_zones를 통과했을 때(변경된 zone이
 # 있을 때)만 발행한다.
-ZONE_WEATHER_ASSET = Asset(name="zone_weather_changed", uri="postgres://latest_zone_weather/")
+ZONE_WEATHER_ASSET = Asset(name="zone_weather_changed", uri="asset://zone-weather/changed-zones")
