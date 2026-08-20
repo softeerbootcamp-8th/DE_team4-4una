@@ -69,3 +69,6 @@ data/
 
 # --- Logs ---
 *.log
+
+# --- Superpowers subagent-driven-development scratch workspace ---
+.superpowers/
