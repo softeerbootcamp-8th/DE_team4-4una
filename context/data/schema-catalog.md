@@ -35,6 +35,7 @@ design and must not be invented silently.
 | `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
 | `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
 | `zone_scores` | `zone_scores` | Gold (zone-profile pipeline) | One TLC taxi zone |
+| `od_priority` | `od_priority` | Gold (zone-profile pipeline) | One selected pickup/dropoff zone pair (top 1000 by `priority_score`) |
 
 ## `hvfhv_trip_input`
 
@@ -838,6 +839,49 @@ values:
 | `public_service` | 행정·의료·교육 | `public_service_score` fallback label |
 | `park_leisure` | 공원·레저 | `park_score` fallback label |
 | `excluded` | 분석 제외 | Zone excluded from scoring |
+
+## `od_priority`
+
+**Layer:** Gold (OD demand/priority dataset). **Storage:** local Parquet at
+`data/processed/od_priority.parquet`. **Built by:**
+`services/sensor-producer/src/zone_profile/generate_od_priority.py`.
+**Grain:** one row per selected `(pu_location_id, do_location_id)` pair — the
+top 1000 by `priority_score` among the valid OD universe.
+
+**Primary key:** (`pu_location_id`, `do_location_id`). **Foreign keys:**
+`pu_location_id` and `do_location_id` each reference `zone_scores.location_id`.
+
+Built from 2021-01–2025-12 NYC TLC HVFHV trip records (`hvfhv_trip_input`,
+remote Parquet; only `PULocationID`/`DOLocationID` are read), aggregated one
+month at a time with DuckDB `read_parquet()` and summed into a single 5-year
+`trip_count` per OD pair — raw trip rows are never materialized in bulk.
+Before scoring, the OD universe is filtered: pairs with a null
+`pu_location_id`/`do_location_id`, or with either endpoint in `{1, 264, 265}`
+(EWR and the TLC-lookup-only placeholders — the same exclusion `zone_scores`
+applies to scoring), are dropped; pairs where either endpoint's
+`zone_scores.comfort_relevance_score` is `NULL` (excluded zone, or scored but
+below `MIN_FEATURE_COVERAGE`) are also dropped. Same-zone pairs
+(`pu_location_id == do_location_id`) are kept — the router can select distinct
+LION nodes within one zone, so they remain valid routing candidates.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Pickup zone | `pu_location_id` | INTEGER | N | PK, FK | References `zone_scores.location_id` |
+| Dropoff zone | `do_location_id` | INTEGER | N | PK, FK | References `zone_scores.location_id` |
+| Trip count | `trip_count` | BIGINT | N | | 2021-01–2025-12 cumulative HVFHV trip count for this OD pair |
+| Demand score | `demand_score` | DOUBLE | N | | Percentile rank of `trip_count` (`rank(method="average", pct=True)`) computed over the full valid OD universe, not just the selected top 1000 |
+| PU comfort relevance | `pu_comfort_relevance_score` | DOUBLE | N | | `zone_scores.comfort_relevance_score` joined on `pu_location_id` |
+| DO comfort relevance | `do_comfort_relevance_score` | DOUBLE | N | | `zone_scores.comfort_relevance_score` joined on `do_location_id` |
+| OD relevance score | `od_relevance_score` | DOUBLE | N | | `(pu_comfort_relevance_score + do_comfort_relevance_score) / 2` |
+| Priority score | `priority_score` | DOUBLE | N | | `demand_score * od_relevance_score` |
+| Priority rank | `priority_rank` | INTEGER | N | | 1–1000, assigned after sorting by `priority_score` DESC, `trip_count` DESC, `pu_location_id` ASC, `do_location_id` ASC (deterministic tie-break) |
+
+All score columns (`demand_score`, `pu_comfort_relevance_score`,
+`do_comfort_relevance_score`, `od_relevance_score`, `priority_score`) are
+validated to fall within `[0, 1]`. The table always has exactly 1000 rows with
+no duplicate `(pu_location_id, do_location_id)` pairs. `zone_scores` category
+scores (e.g. `business_score`) and tags are intentionally not carried into
+this table.
 
 ## Required but missing contracts
 
