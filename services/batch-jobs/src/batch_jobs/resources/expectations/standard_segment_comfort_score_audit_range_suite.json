@@ -1,0 +1,50 @@
+{
+  "expectations": [
+    {
+      "kwargs": {
+        "column": "comfort_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "vertical_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "longitudinal_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "lateral_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    }
+  ],
+  "id": null,
+  "meta": {
+    "great_expectations_version": "1.21.0"
+  },
+  "name": "standard_segment_comfort_score_audit_range_suite",
+  "notes": null
+}
