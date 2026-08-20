@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pendulum
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
@@ -164,6 +165,8 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "sensor_processing.validate_sensor_processing",
         "scoring.run_scoring",
         "publish.run_publish",
+        "standard_score.run_standard_score",
+        "current_score.run_current_score",
     }
 
 
@@ -191,3 +194,33 @@ def test_task_groups_follow_hourly_pipeline_order():
     }
     assert run_scoring.downstream_task_ids == {"publish.run_publish"}
     assert run_publish.upstream_task_ids == {"scoring.run_scoring"}
+
+    run_standard_score = module.dag.get_task("standard_score.run_standard_score")
+    run_current_score = module.dag.get_task("current_score.run_current_score")
+
+    assert run_publish.downstream_task_ids == {"standard_score.run_standard_score"}
+    assert run_standard_score.downstream_task_ids == {"current_score.run_current_score"}
+    assert run_current_score.downstream_task_ids == set()
+
+
+def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
+    module = _load_dag_module()
+
+    command = module.dag.get_task("standard_score.run_standard_score").bash_command
+
+    assert "load-standard-segment-comfort-score" in command
+    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
+    # STANDARD_COMFORT_SCORE_* 가 비어 있으면 job이 SEGMENT_COMFORT_SCORE_* 로 폴백하므로
+    # 두 묶음을 모두 넘긴다.
+    assert "STANDARD_COMFORT_SCORE_DATA_LAKE_URI" in command
+    assert "SEGMENT_COMFORT_SCORE_DATA_LAKE_URI" in command
+    assert "POSTGRES_PASSWORD" in command
+
+
+def test_run_current_score_refreshes_every_row():
+    module = _load_dag_module()
+
+    task = module.dag.get_task("current_score.run_current_score")
+
+    assert isinstance(task, PythonOperator)
+    assert task.python_callable is module._refresh_current_scores

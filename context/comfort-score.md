@@ -209,10 +209,13 @@ row (issue #193; schema in `context/data/schema-catalog.md`).
 
 ### Step A - Detect whether the zone's weather changed
 
-`latest_zone_weather` holds only one row per zone (#209) — there is no
-separate history row to query. Whatever job collects the new Open-Meteo
-observation must read that zone's existing `impact_signature` **before**
-UPSERTing the new one, then compare old vs. new:
+`latest_zone_weather` holds only one row per zone (#209), so the previous
+observation is gone the moment the collector UPSERTs. The comparison therefore
+happens on the consumer side: the recompute job stores the signature it last
+acted on in `current_segment_comfort_score.weather_impact_signature` (issue
+#216) and compares that against the zone's current `impact_signature`. This
+survives a missed tick or a retry, because the decision depends only on
+current state:
 
 - Unchanged `impact_signature` -> no recompute; every segment in that zone
   keeps its existing `current_segment_comfort_score` row untouched.
@@ -305,8 +308,21 @@ Promoting them to `libs/de4-core` would remove the drift risk but also changes
 
 Write the result to `current_segment_comfort_score`, upserting the single row
 for `(segment_id, vehicle_profile_id)` with `standard_score_as_of`,
-`weather_time`, and `weather_rule_version` all pointing at the exact standard
-and weather snapshots used.
+`weather_time`, `weather_rule_version`, and `weather_impact_signature` all
+pointing at the exact standard and weather snapshots used
+(`services/orchestration/jobs/current_score.py`, issue #216).
+
+Two operational rules the implementation fixes:
+
+- A segment whose `road_segment.location_id` is null gets **no row at all** —
+  `current_segment_comfort_score.location_id` is `NOT NULL`, so there is no zone
+  to attach. Those segments still have `standard_segment_comfort_score` rows, so
+  the serving layer must treat "standard exists, current missing" as a real case
+  rather than an error. 9 of 7,013 segments in the current smoke slice are in
+  this state.
+- A zone with no `latest_zone_weather` row yet is written **unadjusted**, with
+  `weather_time` / `weather_rule_version` / `weather_impact_signature` all null,
+  as the table's CHECK constraints require.
 
 ## Principles
 
@@ -393,8 +409,10 @@ the new path is proven end to end:
    themselves (bucket classification, `impact_signature`, per-direction
    deductions, Step C combination) are implemented in
    `services/orchestration/jobs/weather_rules.py`; what remains is the job
-   that reads the two tables, applies them, and UPSERTs — plus the two
-   prerequisites under "Open items" below.
+   that reads the two tables, applies them, and UPSERTs. **Done** (issue #216):
+   `jobs/current_score.py`, with migration `0009` adding the
+   `weather_impact_signature` column Step A compares against. Scheduling is
+   issue #217 (step 5).
 5. Wire both jobs into Airflow (hourly standard run, 15-minute weather run).
 6. Switch the FastAPI serving layer from `segment_comfort_score` to
    `current_segment_comfort_score` (with the standard-fallback rule above).
@@ -413,15 +431,6 @@ the full record:
   filter.
 - The final numeric value of `k` (to be computed from real data once enough
   has accumulated - explicitly out of scope for issue #102).
-- **Where the recompute job reads the previous `impact_signature` from.**
-  `latest_zone_weather` holds one row per zone and the collector overwrites it,
-  so the pre-UPSERT value does not survive anywhere. Step A needs it. The
-  proposal is to store the signature the recompute job last acted on **on the
-  consumer side** — a `weather_impact_signature` column on
-  `current_segment_comfort_score` — which keeps the latest-only weather table
-  unchanged and makes the job idempotent and able to recover after a missed
-  tick. That is a migration, and migrations live in `services/batch-jobs`, so
-  it needs approval before implementation.
 - **Whether the three directional weights move to `libs/de4-core`** instead of
   being duplicated between `batch-jobs` and `orchestration` (see Step C).
 - The stale-weather policy conflict: this document says FastAPI falls back to

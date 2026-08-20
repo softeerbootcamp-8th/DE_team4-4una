@@ -78,6 +78,9 @@ services:
       # 이 값이 없어도 DAG를 정상 파싱한다.
       PYTHONPATH: ${AIRFLOW_HOME}/orchestration
       ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
+      # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다.
+      CURRENT_SCORE_ROAD_SEGMENT_PATH: ${AIRFLOW_HOME}/data/processed/road_segment
+      CURRENT_SCORE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
       # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
       # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
       _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1"
@@ -86,6 +89,8 @@ services:
       - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
       # weather_pipeline의 task가 실제로 실행되는 컨테이너에만 필요 — zone_master.parquet 읽기용(:ro).
       - ../../data/reference:${AIRFLOW_HOME}/data/reference:ro
+      # current_score의 road_segment 읽기용(:ro). batch-jobs task가 docker로 마운트하는 것과 같은 경로다.
+      - ../../data/processed:${AIRFLOW_HOME}/data/processed:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-init:

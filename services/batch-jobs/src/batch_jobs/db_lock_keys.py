@@ -16,3 +16,8 @@ GOLD_JOB_STAGING_LOCK_KEY = 1002
 # comfort_score.standard_writer가 standard staging 테이블 write~MERGE 구간을
 # 보호하는 데 쓴다. Gold와 키를 나눠야 두 실행이 서로를 막지 않는다 (#198).
 STANDARD_JOB_STAGING_LOCK_KEY = 1003
+
+# orchestration의 jobs/current_score.py가 current_segment_comfort_score UPSERT 구간에
+# 쓰는 키. 서비스 경계 때문에 그쪽에서 이 모듈을 import할 수는 없지만, 키를 여기서
+# 예약해 두지 않으면 다른 사용처가 같은 정수를 골라 서로를 막을 수 있다 (#216).
+CURRENT_SCORE_JOB_LOCK_KEY = 1004

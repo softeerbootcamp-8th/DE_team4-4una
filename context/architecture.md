@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-19
+last_reviewed: 2026-08-20
 ---
 
 # Target Architecture
@@ -126,6 +126,25 @@ the same Spark session. There is no persisted `processed_sensor_event` boundary.
 Only the target-hour quarantine and `hourly_segment_features` are stored. The
 Airflow DAG invokes the combined command once in its `sensor_processing`
 TaskGroup, then continues to scoring and publication.
+
+The same DAG then loads `standard_segment_comfort_score` and refreshes every
+`current_segment_comfort_score` row, while a separate 15-minute DAG collects
+Open-Meteo weather into `latest_zone_weather` and refreshes only the segments in
+zones whose weather actually changed (issues #207, #216, #217):
+
+```mermaid
+flowchart LR
+    HC[(Silver: hourly_comfort_score)] --> ST[Standard score load]
+    ST --> SS[(Gold: standard_segment_comfort_score)]
+    SS --> CS[Weather adjustment]
+    W[Open-Meteo] --> WC[Weather collection]
+    WC --> LZ[(latest_zone_weather)]
+    LZ --> CS
+    CS --> CU[(Gold: current_segment_comfort_score)]
+```
+
+Weather collection and the weather adjustment need no Spark, so both run as
+Python tasks inside the Airflow scheduler rather than as separate containers.
 
 ### Silver map matching
 

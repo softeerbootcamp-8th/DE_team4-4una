@@ -76,7 +76,20 @@ is written to and read back from S3.
 
 The Airflow `sensor_processing` task invokes the combined command with the data
 interval start as the target hour. The DAG then runs scoring and publication in
-order, preserving the exclusive interval end as publication `as_of`.
+order, preserving the exclusive interval end as publication `as_of`. It then
+loads the standard score with the same `as_of` and refreshes every current-score
+row. A separate 15-minute DAG collects zone weather and refreshes only the
+segments whose zone changed:
+
+```text
+Silver `hourly_comfort_score`
+  -> 168-hour rollup -> Gold `standard_segment_comfort_score`
+     + `latest_zone_weather` (Open-Meteo, every 15 minutes)
+     -> weather adjustment -> Gold `current_segment_comfort_score`
+```
+
+Segments with no taxi zone stop at `standard_segment_comfort_score`; the current
+table requires a zone.
 
 ## Required traceability
 
