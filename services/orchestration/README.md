@@ -11,22 +11,25 @@ docker를 띄우는 대신, `jobs/weather.py`(#209, Open-Meteo 수집 + `latest_
 UPSERT)를 `airflow-scheduler` 컨테이너 안에서 PythonOperator로 직접 실행하는
 lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
 
-## comfort score 적재 (#217)
+## comfort score 적재 (#217, ADR-0007로 3-DAG 분리)
 
-`current_segment_comfort_score`는 지금 `weather_pipeline`이 직접 쓴다 — 15분
-수집 뒤 `run_changed_zone_recompute`가 `impact_signature`가 달라진 zone의 segment만
-다시 만든다. `standard_score_pipeline`(구 `hourly_pipeline`)은 예전엔 `standard_score`
-(batch-jobs Spark, `standard_segment_comfort_score` 적재) 다음에 `current_score`가
-전량을 다시 만들었지만, 이슈 #229(ADR-0007)에서 그 태스크를 제거했다 — 지금은 이
-전량 갱신을 아무 DAG도 하지 않는다. ADR-0007의 최종 그림에서는
-`standard_score_pipeline`/`zone_weather_pipeline` 둘 다 직접 쓰지 않고 Asset만
-발행해 신규 `current_score_pipeline`(#231, 아직 미구현)을 트리거하고, 그 DAG가
-유일한 writer가 된다 — 이건 #230(`weather_pipeline` → `zone_weather_pipeline` 전환)과
-#231이 끝나야 완성된다.
+`current_segment_comfort_score`는 ADR-0007에 따라 `current_score_pipeline`(#231)이
+유일하게 쓴다. `standard_score_pipeline`/`zone_weather_pipeline`은 각자
+`standard_segment_comfort_score`/`latest_zone_weather`만 쓰고, `current`는 직접
+건드리지 않는다 — 대신 자기 Asset(`STANDARD_SCORE_ASSET`/`ZONE_WEATHER_ASSET`)만
+발행한다. `current_score_pipeline`은 `schedule=AssetAny(STANDARD_SCORE_ASSET,
+ZONE_WEATHER_ASSET)`으로 두 producer 중 하나만 발행해도 깨어나고,
+`context["triggering_asset_events"]`로 어떤 Asset이 트리거했는지 봐서
+`STANDARD_SCORE_ASSET`이 있으면 전량, 없이 `ZONE_WEATHER_ASSET`만 있으면 변경된
+zone만 재계산한다(`jobs/current_score.py`는 이 이슈에서 변경하지 않고 그대로
+재사용). 이렇게 writer를 하나로 모으고 `max_active_runs=1`을 둬서, 두 producer가
+겹쳐 트리거해도 stale-overwrite 없이 순차 실행되게 한다 — 자세한 배경/대안은
+`docs/adr/0007-split-comfort-score-pipeline-into-three-dags.md` 참고.
 
-지금은 writer가 `weather_pipeline` 하나뿐이라 두 DAG 간 경합은 없지만,
-`jobs/current_score.py`의 PostgreSQL advisory lock은 수동 트리거·백필 등으로
-겹쳐 실행될 수 있는 경우를 대비해 그대로 남아 있다.
+`max_active_runs=1`은 실행 중인 DagRun을 막지 않고 이후 트리거를 큐잉만 하므로,
+`jobs/current_score.py`의 PostgreSQL advisory lock(`LOCK_KEY=1004`)은 정상 경로에서는
+불필요해지지만 수동 트리거·백필 등 그 보장이 깨지는 경우를 대비해 defense-in-depth로
+그대로 남아 있다.
 
 `current_score`는 segment -> zone 매핑을 `road_segment` Parquet에서 읽는다. 이 매핑은
 PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
@@ -161,6 +164,57 @@ config/호출부는 그대로 둘 수 있게만 이름을 지어뒀다(de4-core�
 `fetch_status="failed"`(`error_reason`에 사유)로 기록된다. 성공/실패 여부를
 나중에 구분할 수 있는 곳은 이 테이블뿐이다 — `latest_zone_weather`는 실패한
 zone을 아예 건드리지 않으므로 흔적이 남지 않는다.
+
+## current_score_pipeline (#231)
+
+`standard_score_pipeline`/`zone_weather_pipeline` 둘 다 직접 쓰지 않는
+`current_segment_comfort_score`의 유일한 writer다. 정기 cron이 아니라
+`schedule=AssetAny(STANDARD_SCORE_ASSET, ZONE_WEATHER_ASSET)`으로, 두 producer 중
+하나라도 Asset을 발행하면 깨어난다. `run_current_score` task 하나뿐이며,
+`context["triggering_asset_events"]`에 `STANDARD_SCORE_ASSET`이 있으면 전량
+(`changed_zones_only=False`), 없이 `ZONE_WEATHER_ASSET`만 있으면 변경된 zone만
+(`changed_zones_only=True`)으로 판단해 `jobs.current_score.run_from_env(...)`를
+그대로 호출한다. `max_active_runs=1`로 두 producer가 겹쳐 트리거해도 동시에
+두 번 쓰지 않는다.
+
+### 수동 확인 절차 (두 producer 중 하나만 트리거됐을 때 올바른 모드로 도는지)
+
+> ⚠️ 아래 절차는 로컬에서 실행해보지 않고 기록만 해 둔 것이다 — "통합 테스트"
+> 절의 fixture(`data/processed/road_segment`, 실 데이터가 채워진
+> `standard_segment_comfort_score`/`latest_zone_weather`)가 준비된 뒤에 실제로
+> 따라 해보고 이 문구를 지운다.
+
+전제: 위 "통합 테스트" 절의 fixture가 준비되어 있고, `standard_score_pipeline`용
+`BATCH_JOBS_IMAGE_TAG`가 빌드되어 있어야 한다.
+
+1. `current_score_pipeline`은 새 DAG라 기본적으로 paused다. unpause한다.
+
+   ```bash
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
+     airflow dags unpause current_score_pipeline
+   ```
+
+2. **STANDARD_SCORE_ASSET 단독 트리거 → 전량 모드** 확인: `zone_weather_pipeline`은
+   pause한 채로 `standard_score_pipeline`만 "09시 구간 backfill" 절차로 실행한다.
+   `standard_score.run_standard_score`가 SUCCESS로 끝나면 `STANDARD_SCORE_ASSET`
+   이벤트가 발행되고 `current_score_pipeline`이 자동으로 새 DagRun을 만든다.
+
+   ```bash
+   docker compose -f infra/compose/airflow.yaml exec airflow-webserver \
+     airflow dags list-runs current_score_pipeline
+   ```
+
+   가장 최근 run의 `run_current_score` task 로그에서
+   `"changed_zones_only": false`가 찍히는지 확인한다.
+
+3. **ZONE_WEATHER_ASSET 단독 트리거 → 변경 zone만 모드** 확인:
+   `standard_score_pipeline`을 다시 pause하고 `zone_weather_pipeline`을 unpause한
+   뒤, 변경된 zone이 있는 15분 tick(또는 수동 trigger)에서
+   `publish_zone_weather_asset`이 SUCCESS로 끝나는지 본다. 마찬가지로
+   `current_score_pipeline`의 새 run에서 `"changed_zones_only": true`가 찍히는지
+   확인한다.
+
+4. 확인이 끝나면 세 DAG을 원래 pause 상태로 되돌린다.
 
 ## 통합 테스트 (#189, #205)
 
