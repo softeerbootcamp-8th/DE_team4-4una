@@ -11,6 +11,25 @@ docker를 띄우는 대신, `jobs/weather.py`(#209, Open-Meteo 수집 + `latest_
 UPSERT)를 `airflow-scheduler` 컨테이너 안에서 PythonOperator로 직접 실행하는
 lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
 
+## comfort score 적재 (#217)
+
+두 DAG가 `current_segment_comfort_score`를 갱신한다.
+
+- `hourly_pipeline`: `standard_score`(batch-jobs Spark, `standard_segment_comfort_score`
+  적재) 다음에 `current_score`가 **전량**을 다시 만든다. 날씨가 그대로여도 standard
+  스냅샷이 새로 생겼으므로 갱신 대상이다.
+- `weather_pipeline`: 15분 수집 뒤 `run_changed_zone_recompute`가 `impact_signature`가
+  달라진 zone의 segment만 다시 만든다.
+
+두 경로는 같은 테이블을 쓰므로 job이 PostgreSQL advisory lock으로 직렬화한다. 한쪽이
+돌고 있으면 다른 쪽 task는 락을 기다린다. Airflow pool을 따로 두지 않은 이유이기도 하다.
+
+`current_score`는 segment -> zone 매핑을 `road_segment` Parquet에서 읽는다. 이 매핑은
+PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
+`CURRENT_SCORE_ROAD_SEGMENT_PATH`/`CURRENT_SCORE_ROAD_SNAPSHOT_DATE`를 채워 준다.
+`zone`이 없는 segment는 `current_segment_comfort_score.location_id`가 NOT NULL이라
+행이 만들어지지 않는다 — `standard_segment_comfort_score`에만 남는다.
+
 ## 준비
 
 저장소 루트의 `.env`에 다음 키를 채운다 (`.env.example` 참고). 값은 로컬

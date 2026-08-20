@@ -4,7 +4,8 @@
 scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고, 이슈 #176에서
 publish 단계를 추가했다. 이슈 #189: 4단계 의존관계를 완성했다. 이슈 #205:
 cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 단계로
-통합한다.
+통합한다. 이슈 #217: standard 점수 적재와 current 점수 전량 갱신 단계를 붙여
+서빙 테이블까지 한 DAG에서 채운다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -30,6 +31,7 @@ import datetime
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG, TaskGroup
 from airflow.timetables.interval import CronDataIntervalTimetable
 
@@ -99,6 +101,40 @@ _RUN_PUBLISH_BASH_COMMAND = (
     "load-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
 )
 
+# standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 PostgreSQL에 UPSERT한다.
+# publish와 마찬가지로 local-lake를 읽기만 하고, as_of는 방금 끝난 구간의 끝을 쓴다.
+# 설정은 STANDARD_COMFORT_SCORE_*(없으면 SEGMENT_COMFORT_SCORE_*로 폴백)에서 읽는다.
+_RUN_STANDARD_SCORE_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake:ro "
+    "-e STANDARD_COMFORT_SCORE_DATA_LAKE_URI -e STANDARD_COMFORT_SCORE_WINDOW_HOURS "
+    "-e STANDARD_COMFORT_SCORE_CONFIG_PATH "
+    "-e SEGMENT_COMFORT_SCORE_DATA_LAKE_URI -e SEGMENT_COMFORT_SCORE_WINDOW_HOURS "
+    "-e SEGMENT_COMFORT_SCORE_CONFIG_PATH "
+    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "load-standard-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
+)
+
+
+# current 점수 전량 갱신. Spark가 필요 없어 weather_pipeline과 같이 scheduler 컨테이너
+# 안에서 PythonOperator로 직접 돈다.
+def _refresh_current_scores() -> None:
+    # 날씨가 그대로여도 standard 스냅샷이 새로 생겼으므로 전량을 다시 만든다.
+    from jobs.current_score import run_from_env
+
+    summary = run_from_env(changed_zones_only=False)
+    print(
+        {
+            "zone_count": summary.zone_count,
+            "upserted_count": summary.upserted_count,
+            "skipped_unzoned_count": summary.skipped_unzoned_count,
+        }
+    )
+
+
 with DAG(
     dag_id="hourly_pipeline",
     description="sensor processing -> scoring -> publish 3단계 시간배치 파이프라인",
@@ -136,4 +172,19 @@ with DAG(
             bash_command=_RUN_PUBLISH_BASH_COMMAND,
         )
 
-    sensor_processing >> scoring >> publish
+    with TaskGroup(group_id="standard_score") as standard_score:
+        run_standard_score = BashOperator(
+            task_id="run_standard_score",
+            bash_command=_RUN_STANDARD_SCORE_BASH_COMMAND,
+        )
+
+    with TaskGroup(group_id="current_score") as current_score:
+        run_current_score = PythonOperator(
+            task_id="run_current_score",
+            python_callable=_refresh_current_scores,
+        )
+
+    # publish(구 segment_comfort_score 경로)와 standard를 병렬로 두면 Spark 컨테이너 두 개가
+    # 로컬 자원을 두고 경합한다. migration order 7단계에서 publish가 삭제될 때까지만
+    # 직렬로 둔다 — 둘 사이에 데이터 의존관계는 없다.
+    sensor_processing >> scoring >> publish >> standard_score >> current_score
