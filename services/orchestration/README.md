@@ -1,10 +1,10 @@
 # orchestration
 
 Apache Airflow(LocalExecutor)를 로컬 개발 환경에서 부트스트랩하는 서비스다.
-`hello_world`(부트스트랩 동작 확인용)에 이어, `hourly_pipeline` DAG가
-batch-jobs의 sensor processing(#205)·scoring(#169)·publish(#176) 3단계를
-오케스트레이션한다. Sensor processing은 cleansing과 feature 계산을 같은 Spark
-세션에서 실행한다.
+`hello_world`(부트스트랩 동작 확인용)에 이어, `standard_score_pipeline` DAG가
+batch-jobs의 sensor processing(#205)·hourly scoring(#169)·publish(#176)·
+standard score(#217) 4단계를 오케스트레이션한다. Sensor processing은
+cleansing과 feature 계산을 같은 Spark 세션에서 실행한다.
 
 `weather_pipeline` DAG(#207)는 다른 방식이다 — batch-jobs(EMR/Spark 전용)로
 docker를 띄우는 대신, `jobs/weather.py`(#209, Open-Meteo 수집 + `latest_zone_weather`
@@ -13,16 +13,16 @@ lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
 
 ## comfort score 적재 (#217)
 
-두 DAG가 `current_segment_comfort_score`를 갱신한다.
+`current_segment_comfort_score`는 지금 `weather_pipeline` 하나만 갱신한다 — 15분
+수집 뒤 `run_changed_zone_recompute`가 `impact_signature`가 달라진 zone의 segment만
+다시 만든다. `standard_score_pipeline`(구 `hourly_pipeline`)은 예전엔 `standard_score`
+(batch-jobs Spark, `standard_segment_comfort_score` 적재) 다음에 `current_score`가
+전량을 다시 만들었지만, 이슈 #229(ADR-0007)에서 그 태스크를 제거했다 — current 전량
+갱신 책임은 신규 `current_score_pipeline`(#231, 아직 미구현)으로 넘어간다.
 
-- `hourly_pipeline`: `standard_score`(batch-jobs Spark, `standard_segment_comfort_score`
-  적재) 다음에 `current_score`가 **전량**을 다시 만든다. 날씨가 그대로여도 standard
-  스냅샷이 새로 생겼으므로 갱신 대상이다.
-- `weather_pipeline`: 15분 수집 뒤 `run_changed_zone_recompute`가 `impact_signature`가
-  달라진 zone의 segment만 다시 만든다.
-
-두 경로는 같은 테이블을 쓰므로 job이 PostgreSQL advisory lock으로 직렬화한다. 한쪽이
-돌고 있으면 다른 쪽 task는 락을 기다린다. Airflow pool을 따로 두지 않은 이유이기도 하다.
+지금은 writer가 `weather_pipeline` 하나뿐이라 두 DAG 간 경합은 없지만,
+`jobs/current_score.py`의 PostgreSQL advisory lock은 수동 트리거·백필 등으로
+겹쳐 실행될 수 있는 경우를 대비해 그대로 남아 있다.
 
 `current_score`는 segment -> zone 매핑을 `road_segment` Parquet에서 읽는다. 이 매핑은
 PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
@@ -46,7 +46,7 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   각자 랜덤 생성) 웹 UI가 task 로그를 못 가져오고 "secret_key... time
   synchronized..." 경고만 뜬다. `AIRFLOW_JWT_SECRET`과 마찬가지로
   `openssl rand -hex 32`로 생성.
-- `BATCH_JOBS_IMAGE_TAG` — `hourly_pipeline`의 batch-jobs task가 실행할
+- `BATCH_JOBS_IMAGE_TAG` — `standard_score_pipeline`의 batch-jobs task가 실행할
   batch-jobs 이미지 태그. 아래 "hourly_pipeline 실행하기"에서 만든다.
 - `CLEANSING_BRONZE_INPUT_PATH`, `CLEANSING_QUARANTINE_OUTPUT_PATH`,
   `HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH`,
@@ -77,13 +77,13 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
   가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
 
-## hourly_pipeline 로컬 전용 배선
+## standard_score_pipeline 로컬 전용 배선
 
-`hourly_pipeline`은 UTC 기준 매시 정각에 `[logical_date, logical_date + 1시간)`
+`standard_score_pipeline`은 UTC 기준 매시 정각에 `[logical_date, logical_date + 1시간)`
 구간을 처리하며, 아래 순서로 실행된다.
 
 ```text
-sensor_processing >> scoring >> publish
+sensor_processing >> hourly_scoring >> publish >> standard_score
 ```
 
 각 TaskGroup의 BashOperator는 `docker run`으로 host에 별도의 `batch-jobs`
@@ -96,12 +96,14 @@ feature 계산은 `sensor_processing`의 단일 컨테이너와 Spark 세션에�
 | 단계 | 실행 커맨드 | 주요 입출력 |
 | --- | --- | --- |
 | sensor processing | `cleanse-sensor-events` | Bronze + road snapshot → `sensor_event_quarantine`, `hourly_segment_features` |
-| scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
+| hourly scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
 | publish | `load-segment-comfort-score` | scoring 결과 → 서빙 PostgreSQL |
+| standard score | `load-standard-segment-comfort-score` | `hourly_comfort_score` 168시간 롤업 → 서빙 PostgreSQL(`standard_segment_comfort_score`) |
 
-publish의 `--as-of`에는 `data_interval_end`가 전달된다. 예를 들어 logical date가
-`2026-08-18 09:00 UTC`이면 sensor processing은 09시 구간을 처리하고, publish는
-해당 구간의 끝인 `2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
+publish와 standard score의 `--as-of`에는 둘 다 `data_interval_end`가 전달된다.
+예를 들어 logical date가 `2026-08-18 09:00 UTC`이면 sensor processing은 09시
+구간을 처리하고, publish/standard score는 해당 구간의 끝인
+`2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
 
 > ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
 > 사실상의 제어권을 준다. 로컬 개발 환경 밖(공유 서버, 운영 환경 등)으로 이
@@ -139,7 +141,7 @@ UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection` task 하나가 �
 (아래 참고). 반대로 **요청한 zone 전체**가 실패하면(Open-Meteo가 통째로
 다운된 경우 등) `run_latest_zone_weather_job`이 snapshot을 남긴 뒤 예외를
 던져 task를 실패시키고, `retries=2, retry_delay=2분`으로 Airflow가 재시도한다
-(hourly_pipeline의 5분 간격은 15분 주기에 비해 너무 길어 줄였다).
+(standard_score_pipeline의 5분 간격은 15분 주기에 비해 너무 길어 줄였다).
 `latest_zone_weather`는 `location_id`만 갖고 UPSERT하므로, 순서가 뒤바뀐 실행이
 최신 값을 옛 값으로 덮어쓰지 않도록 SQL에 `weather_time` 역전 방지 조건을 걸고,
 DAG에도 `max_active_runs=1`을 둬 이전 실행이 끝나기 전에 다음 tick이 겹치지
@@ -222,7 +224,7 @@ docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml \
 
 docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
   airflow-webserver airflow backfill create \
-  --dag-id hourly_pipeline \
+  --dag-id standard_score_pipeline \
   --from-date 2026-08-18T09:00:00+00:00 \
   --to-date 2026-08-18T09:00:00+00:00 \
   --max-active-runs 1
@@ -239,7 +241,7 @@ Airflow 3에서 이 구간의 run ID는
 ```bash
 docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
   airflow-webserver airflow tasks states-for-dag-run \
-  hourly_pipeline backfill__2026-08-18T10:00:00+00:00
+  standard_score_pipeline backfill__2026-08-18T10:00:00+00:00
 
 docker stop de4-airflow-backfill-scheduler
 ```
@@ -252,7 +254,7 @@ docker start de4-airflow-backfill-scheduler
 
 docker compose --env-file "$PWD/.env" -f infra/compose/airflow.yaml exec \
   airflow-webserver airflow backfill create \
-  --dag-id hourly_pipeline \
+  --dag-id standard_score_pipeline \
   --from-date 2026-08-18T09:00:00+00:00 \
   --to-date 2026-08-18T09:00:00+00:00 \
   --max-active-runs 1 \
