@@ -4,6 +4,21 @@
 enrichment, quality validation, and publication of the road environment consumed
 by `sensor-producer`. The Producer never maps raw pavement or hump records.
 
+## Local Spark execution requires JDK 21
+
+pyspark 실행/테스트를 컨테이너 밖(호스트)에서 직접 돌리려면 `JAVA_HOME`이 **JDK 21**
+(배포 이미지가 쓰는 버전, `Dockerfile` 참고)을 가리켜야 한다. JDK 24부터 Security
+Manager가 완전히 제거되면서(JEP 486), pyspark가 번들한 Hadoop 클라이언트의
+`UserGroupInformation`/`Subject.getSubject()` 호출이 `UnsupportedOperationException`으로
+깨진다 — `great-expectations[spark]`가 강제하는 `pyspark<4.2`(ADR-0004)에서 특히
+쉽게 재현된다(`pyspark==4.2.0`은 이 경로를 안 타서 JDK 25에서도 동작했지만, GX
+때문에 다운그레이드된 `4.1.3`은 깨진다).
+
+```bash
+brew install openjdk@21
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21   # pytest/batch-jobs 실행 셸에서
+```
+
 ## Local data-lake rehearsal
 
 Fetch a bounded real-NYC snapshot for development:
