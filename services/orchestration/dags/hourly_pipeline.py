@@ -4,7 +4,8 @@
 scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고, 이슈 #176에서
 publish 단계를 추가했다. 이슈 #189: 4단계 의존관계를 완성했다. 이슈 #205:
 cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 단계로
-통합한다.
+통합한다. 이슈 #220: sensor_processing에 Great Expectations 기반 in-flight
+데이터 품질 검증(validate_sensor_processing) task를 추가한다(ADR-0004).
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -81,6 +82,27 @@ _RUN_SCORING_BASH_COMMAND = (
     "score-hourly-comfort --run-id={{ run_id }}"
 )
 
+# validate_sensor_processing은 run_sensor_processing이 방금 쓴 hourly_segment_features/
+# quarantine 파티션만 읽으므로(:ro), 같은 env var(HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+# CLEANSING_QUARANTINE_OUTPUT_PATH)를 재사용해 항상 같은 경로를 가리키게 한다(#220,
+# ADR-0004). GX가 통계적/선언적 규칙(물리량 범위, quarantine 비율)을 검증하고
+# 실패하면 이 task가 실패해 scoring으로 넘어가지 않는다(hard fail). 스키마/필수값/
+# PK 중복 같은 하드 인바리언트는 run_sensor_processing이 쓰기 시점에 이미 강제하므로
+# 여기서 다시 다루지 않는다.
+_VALIDATE_SENSOR_PROCESSING_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake:ro "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "validate-sensor-processing "
+    "--target-hour='{{ data_interval_start.isoformat() }}' "
+    '--output-path="${HOURLY_SEGMENT_FEATURE_OUTPUT_PATH:-data/local-lake/silver/'
+    'hourly_segment_features}" '
+    '--quarantine-output-path="${CLEANSING_QUARANTINE_OUTPUT_PATH:-data/local-lake/silver/'
+    'sensor_event_quarantine}"'
+)
+
 # publish는 local-lake를 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 다른
 # 단계와 달리 쓰기 마운트가 필요 없다. 나머지 설정(SegmentComfortScoreJobConfig)은
 # SEGMENT_COMFORT_SCORE_*(옵션, 기본값 있음)와 POSTGRES_*(필수, 없으면 즉시
@@ -123,6 +145,11 @@ with DAG(
             task_id="run_sensor_processing",
             bash_command=_RUN_SENSOR_PROCESSING_BASH_COMMAND,
         )
+        validate_sensor_processing = BashOperator(
+            task_id="validate_sensor_processing",
+            bash_command=_VALIDATE_SENSOR_PROCESSING_BASH_COMMAND,
+        )
+        run_sensor_processing >> validate_sensor_processing
 
     with TaskGroup(group_id="scoring") as scoring:
         run_scoring = BashOperator(
