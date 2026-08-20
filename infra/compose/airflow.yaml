@@ -37,6 +37,12 @@ x-airflow-env: &airflow-env
     POSTGRES_DB: ${POSTGRES_DB}
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # data_quality_audit DAG(#253)가 audit-gold task에 전달하는 값. GX Data
+    # Docs를 S3에 업로드하는 데 쓴다(ADR-0004, spec §1).
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    GOLD_AUDIT_S3_BUCKET: ${GOLD_AUDIT_S3_BUCKET}
+    AWS_REGION: ${AWS_REGION}
     # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
     # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
     AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
