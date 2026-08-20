@@ -7,18 +7,39 @@ import json
 import re
 import zipfile
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import shapefile
+import shapely
 from pyproj import CRS, Transformer
 from shapely.geometry import LineString, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 
 from sensor_producer.domain import RoadSegment
-from sensor_producer.geo import as_line, line_length_m
+from sensor_producer.geo import as_line
 
 MAX_REFERENCE_DISTANCE_DEGREES = 0.00035
+
+# canonical road_segment.geometry_wkb는 EPSG:32118(meter)라 Producer가 쓸 위경도로 되돌린다.
+_ROAD_SEGMENT_TRANSFORMER = Transformer.from_crs("EPSG:32118", "EPSG:4326", always_xy=True)
+
+VALID_TRAFFIC_DIRECTIONS = frozenset({"W", "A", "T"})
+
+_ROAD_SEGMENT_COLUMNS = (
+    "segment_id",
+    "snapshot_date",
+    "street_name",
+    "from_node_id",
+    "to_node_id",
+    "traffic_direction",
+    "posted_speed_mph",
+    "curve_radius_m",
+    "length_m",
+    "geometry_wkb",
+)
 
 
 def normalize_street(value: str | None) -> str:
@@ -28,59 +49,78 @@ def normalize_street(value: str | None) -> str:
 
 
 class RoadEnvironment:
-    def __init__(self, segments: list[RoadSegment], taxi_zones: dict[int, BaseGeometry]):
+    def __init__(
+        self,
+        segments: list[RoadSegment],
+        taxi_zones: dict[int, BaseGeometry],
+        road_segment_snapshot_date: date,
+    ):
         if not segments:
-            raise ValueError("road environment requires at least one LION segment")
+            raise ValueError("road environment requires at least one road segment")
         self.segments = segments
         self.taxi_zones = taxi_zones
+        self.road_segment_snapshot_date = road_segment_snapshot_date
 
     @classmethod
     def from_files(
         cls,
-        lion_path: Path,
+        road_segment_path: Path,
         pavement_path: Path,
         hump_path: Path,
         taxi_zone_zip: Path,
     ) -> RoadEnvironment:
-        segments = load_lion_segments(lion_path)
+        segments, snapshot_date = load_road_segments(road_segment_path)
         attach_pavement(segments, pavement_path)
         attach_speed_humps(segments, hump_path)
-        return cls(segments, load_taxi_zones(taxi_zone_zip))
+        return cls(segments, load_taxi_zones(taxi_zone_zip), snapshot_date)
 
 
-def load_lion_segments(path: Path) -> list[RoadSegment]:
-    document = json.loads(path.read_text())
+# batch-jobs build-road-environment가 만든 canonical road_segment(단일 snapshot_date 파일)를 읽는다.
+def load_road_segments(road_segment_path: Path) -> tuple[list[RoadSegment], date]:
+    table = pq.ParquetFile(road_segment_path).read(columns=list(_ROAD_SEGMENT_COLUMNS))
+    snapshot_date = _validate_road_segment_snapshot(table)
+
     segments: list[RoadSegment] = []
-    for feature in document.get("features", []):
-        properties = feature.get("properties") or {}
-        traffic_direction = str(properties.get("TrafDir") or "").strip()
-        from_node = str(properties.get("NodeIDFrom") or "").strip()
-        to_node = str(properties.get("NodeIDTo") or "").strip()
-        segment_id = str(properties.get("SegmentID") or "").strip()
-        if traffic_direction not in {"W", "A", "T"} or not all(
-            (from_node, to_node, segment_id, feature.get("geometry"))
-        ):
+    for row in table.to_pylist():
+        # W/A/T가 아니거나 길이가 0 이하인 segment는 주행 불가라 이전과 동일하게 제외한다.
+        if row["traffic_direction"] not in VALID_TRAFFIC_DIRECTIONS:
             continue
-        geometry = as_line(shape(feature["geometry"]))
-        length_m = line_length_m(geometry)
-        if length_m <= 0:
+        if row["length_m"] is None or row["length_m"] <= 0:
             continue
-        posted_speed = parse_float(properties.get("POSTED_SPEED"))
-        radius_feet = parse_float(properties.get("Radius"))
+        geometry = as_line(
+            transform(_ROAD_SEGMENT_TRANSFORMER.transform, shapely.from_wkb(row["geometry_wkb"]))
+        )
         segments.append(
             RoadSegment(
-                segment_id=segment_id,
-                from_node_id=from_node,
-                to_node_id=to_node,
-                traffic_direction=traffic_direction,
-                street_name=str(properties.get("Street") or "").strip(),
+                segment_id=row["segment_id"],
+                from_node_id=row["from_node_id"],
+                to_node_id=row["to_node_id"],
+                traffic_direction=row["traffic_direction"],
+                street_name=row["street_name"] or "",
                 geometry=geometry,
-                length_m=length_m,
-                posted_speed_mph=posted_speed,
-                curve_radius_m=radius_feet * 0.3048 if radius_feet else None,
+                length_m=row["length_m"],
+                posted_speed_mph=(
+                    float(row["posted_speed_mph"])
+                    if row["posted_speed_mph"] is not None
+                    else None
+                ),
+                curve_radius_m=row["curve_radius_m"],
             )
         )
-    return segments
+    return segments, snapshot_date
+
+
+# Producer와 Transform 2가 같은 snapshot을 쓰는지, 필수 컬럼에 결측이 없는지 확인한다.
+def _validate_road_segment_snapshot(table) -> date:
+    snapshot_dates = set(table.column("snapshot_date").to_pylist())
+    if len(snapshot_dates) != 1:
+        raise ValueError(
+            f"road_segment must be a single snapshot_date, got {sorted(snapshot_dates)}"
+        )
+    for column in ("segment_id", "from_node_id", "to_node_id", "geometry_wkb"):
+        if table.column(column).null_count > 0:
+            raise ValueError(f"road_segment.{column} must not contain nulls")
+    return next(iter(snapshot_dates))
 
 
 def attach_pavement(segments: list[RoadSegment], path: Path) -> None:
