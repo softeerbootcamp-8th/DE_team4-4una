@@ -169,6 +169,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "hourly_scoring.run_hourly_scoring",
         "hourly_scoring.validate_hourly_scoring",
         "standard_score.run_standard_score",
+        "standard_score.validate_standard_score",
     }
 
 
@@ -213,10 +214,17 @@ def test_task_groups_follow_standard_score_pipeline_order():
     assert validate_hourly_scoring.downstream_task_ids == {
         "standard_score.run_standard_score"
     }
+    validate_standard_score = module.dag.get_task("standard_score.validate_standard_score")
     assert run_standard_score.upstream_task_ids == {
         "hourly_scoring.validate_hourly_scoring"
     }
-    assert run_standard_score.downstream_task_ids == set()
+    assert run_standard_score.downstream_task_ids == {
+        "standard_score.validate_standard_score"
+    }
+    assert validate_standard_score.upstream_task_ids == {
+        "standard_score.run_standard_score"
+    }
+    assert validate_standard_score.downstream_task_ids == set()
 
 
 def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
@@ -230,8 +238,26 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     assert "POSTGRES_PASSWORD" in command
 
 
-def test_run_standard_score_emits_standard_score_asset():
+def test_validate_standard_score_invokes_gx_validation_with_templated_as_of():
+    module = _load_dag_module()
+
+    command = module.dag.get_task("standard_score.validate_standard_score").bash_command
+
+    assert "validate-standard-score" in command
+    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
+    assert "POSTGRES_PASSWORD" in command
+
+
+def test_run_standard_score_does_not_emit_standard_score_asset():
     module = _load_dag_module()
 
     task = module.dag.get_task("standard_score.run_standard_score")
+    assert task.outlets == []
+
+
+def test_validate_standard_score_emits_standard_score_asset():
+    """검증을 통과한 데이터만 current_score_pipeline을 깨우도록 outlet을 옮긴다(#249)."""
+    module = _load_dag_module()
+
+    task = module.dag.get_task("standard_score.validate_standard_score")
     assert task.outlets == [STANDARD_SCORE_ASSET]

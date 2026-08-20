@@ -140,6 +140,18 @@ _RUN_STANDARD_SCORE_BASH_COMMAND = (
 )
 
 
+# validate_standard_score는 run_standard_score가 이번 실행에 UPSERT한 행만
+# (score_as_of=as_of) Postgres에서 직접 조회해 검증한다(#249, ADR-0004:
+# Gold/Postgres는 Spark가 아니라 SqlAlchemy 경로). local-lake 마운트가 필요
+# 없다 — Postgres에만 붙는다.
+_VALIDATE_STANDARD_SCORE_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "validate-standard-score --as-of='{{ data_interval_end.isoformat() }}'"
+)
+
 
 with DAG(
     dag_id="standard_score_pipeline",
@@ -186,7 +198,14 @@ with DAG(
         run_standard_score = BashOperator(
             task_id="run_standard_score",
             bash_command=_RUN_STANDARD_SCORE_BASH_COMMAND,
+        )
+        # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
+        # run_standard_score가 아니라 validate_standard_score에 둔다(#249).
+        validate_standard_score = BashOperator(
+            task_id="validate_standard_score",
+            bash_command=_VALIDATE_STANDARD_SCORE_BASH_COMMAND,
             outlets=[STANDARD_SCORE_ASSET],
         )
+        run_standard_score >> validate_standard_score
 
     sensor_processing >> hourly_scoring >> standard_score

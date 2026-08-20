@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_hourly_scoring_parser = subparsers.add_parser("validate-hourly-scoring")
     validate_hourly_scoring_parser.add_argument("--output-path")
+
+    validate_standard_score_parser = subparsers.add_parser("validate-standard-score")
+    validate_standard_score_parser.add_argument("--as-of", required=True)
     return parser
 
 
@@ -345,6 +348,41 @@ def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
         spark.stop()
 
 
+def run_standard_score_validation_cli(arguments: argparse.Namespace) -> None:
+    import psycopg2
+
+    from batch_jobs.standard_score_validation import (
+        StandardScoreValidationConfig,
+        run_standard_score_validation,
+    )
+
+    as_of = datetime.fromisoformat(arguments.as_of)
+    if as_of.utcoffset() is None:
+        raise ValueError(
+            "--as-of must include a UTC offset, e.g. 2026-08-19T00:00:00+00:00"
+        )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = StandardScoreValidationConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_standard_score_validation(config, as_of, connection)
+        print(
+            json.dumps(
+                {"row_count": summary.row_count, "success": summary.success},
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -364,6 +402,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "validate-hourly-scoring":
         run_hourly_scoring_validation_cli(arguments)
+        return
+    if arguments.command == "validate-standard-score":
+        run_standard_score_validation_cli(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(

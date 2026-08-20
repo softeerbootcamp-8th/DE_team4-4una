@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "de4-core",
     "duckdb>=1.4.3",
-    "great-expectations[spark]>=1.21.0",
+    "great-expectations[spark,postgresql]>=1.21.0",
     "numpy>=2.0.0",
     "pandas>=2.0.0",
     "psycopg2-binary>=2.9,<3.0",
