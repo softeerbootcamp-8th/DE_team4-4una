@@ -62,3 +62,80 @@ class TestAuditSuiteFiles:
 
         assert payload["name"] == "current_segment_comfort_score_audit_summary_suite"
         assert len(payload["expectations"]) == 2
+
+
+from batch_jobs.gold_audit_validation import (
+    DEFAULT_RANGE_SUITE_PATHS,
+    DEFAULT_SUMMARY_SUITE_PATHS,
+    TABLES,
+    GoldAuditValidationConfig,
+    _validate_table,
+)
+
+
+class TestValidateTable:
+    def test_accepts_known_tables(self) -> None:
+        for table in TABLES:
+            _validate_table(table)  # must not raise
+
+    def test_rejects_unknown_table(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="standard_segment_comfort_score"):
+            _validate_table("segment_comfort_score; DROP TABLE vehicle_profile")
+
+
+class TestGoldAuditValidationConfig:
+    def test_from_env_reads_postgres_and_s3_vars(self) -> None:
+        config = GoldAuditValidationConfig.from_env(
+            {
+                "POSTGRES_HOST": "db.local",
+                "POSTGRES_PORT": "5433",
+                "POSTGRES_DB": "de4",
+                "POSTGRES_USER": "app",
+                "POSTGRES_PASSWORD": "secret",
+                "GOLD_AUDIT_S3_BUCKET": "custom-bucket",
+            }
+        )
+
+        assert config.postgres_host == "db.local"
+        assert config.postgres_port == 5433
+        assert config.postgres_db == "de4"
+        assert config.postgres_user == "app"
+        assert config.postgres_password == "secret"
+        assert config.s3_bucket == "custom-bucket"
+        assert config.range_suite_paths == DEFAULT_RANGE_SUITE_PATHS
+        assert config.summary_suite_paths == DEFAULT_SUMMARY_SUITE_PATHS
+
+    def test_from_env_defaults_s3_bucket(self) -> None:
+        config = GoldAuditValidationConfig.from_env(
+            {
+                "POSTGRES_HOST": "db.local",
+                "POSTGRES_PORT": "5433",
+                "POSTGRES_DB": "de4",
+                "POSTGRES_USER": "app",
+                "POSTGRES_PASSWORD": "secret",
+            }
+        )
+
+        assert config.s3_bucket == "de4-data-quality-docs"
+
+    def test_from_env_requires_postgres_vars(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="POSTGRES_HOST"):
+            GoldAuditValidationConfig.from_env({})
+
+    def test_connection_string_uses_sqlalchemy_postgres_dialect(self) -> None:
+        config = GoldAuditValidationConfig(
+            postgres_host="db.local",
+            postgres_port=5433,
+            postgres_db="de4",
+            postgres_user="app",
+            postgres_password="secret",
+            s3_bucket="de4-data-quality-docs",
+            range_suite_paths=DEFAULT_RANGE_SUITE_PATHS,
+            summary_suite_paths=DEFAULT_SUMMARY_SUITE_PATHS,
+        )
+
+        assert config.connection_string == "postgresql+psycopg2://app:secret@db.local:5433/de4"
