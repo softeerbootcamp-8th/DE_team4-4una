@@ -20,11 +20,52 @@ v1은 Gold 두 테이블(`standard_segment_comfort_score`,
 
 ## 확정된 결정
 
-### 1. Data Docs 저장소 — 실 AWS S3 (`TupleS3StoreBackend`)
+### 1. Data Docs 저장소 — 실 AWS S3 (로컬 렌더 + `boto3` 업로드)
 
 **결론**: 실제 AWS S3 버킷(`de4-data-quality-docs`, `ap-northeast-2`, 콘솔에서
 사용자가 직접 생성)에 Data Docs를 쓴다. 경로 접두사는
-`data-quality-audit/gold/`.
+`data-quality-audit/gold/<table>/`(테이블당 별도 Checkpoint/Data Docs
+컨텍스트라 테이블별로 접두사를 나눈다 — §4).
+
+**구현 메커니즘 정정(2026-08-20, 구현 착수 직전 검증)**: 브레인스토밍 중엔
+ADR-0004를 따라 GX의 `TupleS3StoreBackend`로 직접 S3에 쓰는 걸 전제했다.
+그런데 이 repo에 고정된 `great-expectations==1.21.0`을 실제로 열어 확인한
+결과 **`TupleS3StoreBackend` 클래스 자체가 더 이상 존재하지 않는다**
+(`data_context/store/tuple_store_backend.py`엔 `TupleStoreBackend`(추상)와
+`TupleFilesystemStoreBackend`만 있음; `S3StoreBackendDefaults`도 죽은 문서
+언급 두 줄만 남고 실제 클래스는 없음). GX 1.x가 self-hosted 클라우드
+스토어(S3/GCS/Azure)를 걷어내고 `ephemeral`/`file`/`cloud`(유료 GX Cloud
+SaaS) 세 컨텍스트 모드로 단순화하면서 사라진 것으로 보인다. ADR-0004의
+"레거시 GX부터 있던 기능"이라는 설명은 더 이상 이 버전에 맞지 않는다.
+
+**정정된 메커니즘**(로컬에서 실제로 재현해 검증함):
+
+1. `ephemeral` GX 컨텍스트에 `TupleFilesystemStoreBackend`(존재하는
+   클래스) 기반 data docs site를 로컬 임시 디렉터리(`tempfile.mkdtemp()`)로
+   추가한다.
+2. **`batch.validate(suite)`를 직접 호출하지 않는다** —
+   `sensor_processing_validation.py`/`standard_score_validation.py`(#249)가
+   쓰는 이 직접 호출 패턴은 결과를 `validation_results_store`에 전혀 남기지
+   않는다는 것을 로컬 재현으로 확인했다(`build_data_docs()`를 불러도 빈
+   `index.html` 하나만 나옴 — suite 이름도, 통과/실패 표시도 없음). 대신
+   `context.suites.add(suite)` → `ValidationDefinition(name=..., data=batch_definition,
+   suite=suite)`를 `context.validation_definitions.add(...)`로 등록 →
+   `Checkpoint(name=..., validation_definitions=[...], actions=[UpdateDataDocsAction(name=...)])`를
+   `context.checkpoints.add(...)`로 등록 → `checkpoint.run(...)`으로
+   실행한다. 이 경로로 실행하면 `validation_results_store`에 실제로
+   기록되고, `UpdateDataDocsAction`이 checkpoint 실행 직후 자동으로
+   `build_data_docs()`를 호출해 suite별/validation별 상세 HTML 페이지까지
+   렌더링되는 것을 로컬에서 확인했다(`expectations/<suite>.html`,
+   `validations/<suite>/.../<asset>.html` 실제 생성 확인).
+3. 우리 코드는 그렇게 렌더된 임시 디렉터리 트리를 **`boto3`로 직접
+   순회하며 S3에 업로드**한다(상대 경로를 그대로 키 접두사 뒤에 붙임).
+   GX 자체가 S3에 쓰는 게 아니라, "렌더는 GX(Checkpoint), 업로드는 우리
+   코드"로 역할을 나눈다.
+4. 최종 결과(사람이 S3에서 실제 pass/fail이 표시된 Data Docs를 열람할 수
+   있다)는 원래 의도와 동일하다 — 메커니즘만 바뀌었다.
+
+이 정정은 ADR-0004 본문에도 수정 노트로 반영한다(제외 범위 절, 구현 PR에서
+처리).
 
 **뒤집힌 근거**: 처음엔 이 repo 전체에 아직 실 AWS 연동이 하나도 없다는
 점(Bronze조차 local-lake Parquet)과 "Local-first boundaries: AWS 없이 개발
@@ -52,6 +93,10 @@ host 위에 있기 때문일 뿐이다. EMR Serverless job은 그 자체가 매�
 | Block Public Access | 네 항목 모두 체크 |
 | Versioning | 비활성화 |
 | 암호화 | 기본값(SSE-S3) |
+
+**보존 정책**: 매 실행이 같은 S3 키 경로(`.../<table>/index.html` 등)를
+덮어쓴다 — "최신 리포트만" 유지하는 latest-only 모드(Versioning 비활성화
+결정과 일치). 실행 이력을 날짜별로 남기는 것은 이번 범위 밖이다.
 
 **자격증명**: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`을
 `.env`(직접 추가, git에 올리지 않음)에서 읽어 `docker run -e`로 전달한다.
@@ -100,8 +145,14 @@ IAM 정책은 이 버킷 ARN으로만 범위를 좁힌다. 버킷 이름은
 
 `SqlAlchemyExecutionEngine`(`context.data_sources.add_postgres` +
 `add_query_asset` + `add_batch_definition_whole_table`, #249의
-`standard_score_validation.py` 패턴 재사용)으로 테이블당 쿼리 2개를 각각
-GX 배치로 검증한다:
+`standard_score_validation.py`가 쓰는 datasource/asset 구성 자체는
+재사용하되, **검증 실행은 `batch.validate(suite)` 직접 호출이 아니라
+`ValidationDefinition` + `Checkpoint`(`UpdateDataDocsAction` 포함) 경로로
+한다**(§1의 메커니즘 정정 — Data Docs가 필요 없는 #220/#249는 직접 호출로
+충분하지만, 우리는 Data Docs가 완료 조건이라 Checkpoint 경로가 필수)로
+테이블당 쿼리 2개를 각각 GX 배치로 검증한다. 한 테이블당 `Checkpoint` 1개에
+`ValidationDefinition` 2개(range, summary)를 담아 `checkpoint.run()` 한 번으로
+둘 다 실행하고 Data Docs도 그 실행 안에서 함께 렌더링한다:
 
 1. **range 배치**: `SELECT * FROM <table>` — 전체 행 대상으로
    `comfort_score`/`vertical_score`/`longitudinal_score`/`lateral_score`가
@@ -153,28 +204,29 @@ GX 배치로 검증한다:
 
 ### 6. 실패 정책 — soft fail
 
-검증에 실패해도 **Data Docs는 항상 먼저 빌드/업로드한 뒤** 예외를 던져
-Airflow task를 fail시킨다(`try`로 두 배치 검증 결과를 모으고 `finally`에서
-`build_data_docs()` 호출 후, 실패 시 `GoldAuditValidationFailed`를 raise).
-이 DAG는 outlet이 없어 다른 DAG를 구독하지 않으므로, task가 실패해도
-`current_score_pipeline` 등 다른 파이프라인은 막히지 않는다(ADR-0004:
-"task 실패로 신호만 주고 다른 DAG는 막지 않음").
+`checkpoint.run()`은 `UpdateDataDocsAction` 덕분에 성공/실패와 무관하게
+항상 Data Docs를 로컬 임시 디렉터리에 렌더링한 뒤 결과를 반환한다(§4). 그
+직후 우리 코드가 그 디렉터리를 S3에 업로드하고, `CheckpointResult.success`가
+`False`면 그제서야 `GoldAuditValidationFailed`를 raise해 Airflow task를
+fail시킨다 — 즉 "렌더/업로드 실패 여부와 무관하게 항상 먼저 실행 → 검증
+성공/실패는 그다음에 판정"하는 순서다. 이 DAG는 outlet이 없어 다른 DAG를
+구독하지 않으므로, task가 실패해도 `current_score_pipeline` 등 다른
+파이프라인은 막히지 않는다(ADR-0004: "task 실패로 신호만 주고 다른 DAG는
+막지 않음").
 
 ## 전체 데이터 흐름
 
 ```
-standard_segment_comfort_score (Postgres)  ─┐
-current_segment_comfort_score (Postgres)   ─┤
-                                             │  SqlAlchemyExecutionEngine
-                                             ▼
-                          batch_jobs.gold_audit_validation
-                          (range 배치 + summary 배치, 테이블당)
-                                             │
-                          ┌──────────────────┴──────────────────┐
-                          ▼                                     ▼
-                  성공/실패 판정                       Data Docs 빌드
-                  (task 성공/soft fail)         → S3(de4-data-quality-docs/
-                                                   data-quality-audit/gold/)
+<table> (Postgres)
+  │  SqlAlchemyExecutionEngine (add_postgres + add_query_asset ×2)
+  ▼
+range/summary ValidationDefinition ×2 → Checkpoint(actions=[UpdateDataDocsAction])
+  │
+  ▼
+checkpoint.run()
+  ├─ 로컬 임시 디렉터리에 Data Docs 렌더(TupleFilesystemStoreBackend)
+  │     → boto3로 S3 업로드 (de4-data-quality-docs/data-quality-audit/gold/<table>/)
+  └─ CheckpointResult.success → False면 GoldAuditValidationFailed raise (soft fail)
 ```
 
 ## 컴포넌트
@@ -183,11 +235,31 @@ current_segment_comfort_score (Postgres)   ─┤
 
 - `src/batch_jobs/gold_audit_validation.py`(신규) —
   `GoldAuditValidationConfig.from_env()`(`POSTGRES_*`,
-  `GOLD_AUDIT_S3_BUCKET`, `AWS_REGION` 재사용 + suite 경로),
+  `GOLD_AUDIT_S3_BUCKET`, `AWS_REGION` 재사용 + suite 경로).
   `run_gold_audit(config, connection, table)` → 인자로 받은 테이블 하나에
-  대해 range/summary 배치 검증 + Data Docs 빌드, `GoldAuditSummary`
-  dataclass(row_count/age_seconds/orphan_count/성공 여부)를 반환.
-  `GoldAuditValidationFailed` 예외로 실패 신호. `table`은
+  대해:
+  1. `tempfile.mkdtemp()`로 임시 디렉터리를 만들고 `ephemeral` 컨텍스트에
+     `TupleFilesystemStoreBackend` data docs site를 그 경로로 추가한다.
+  2. `context.data_sources.add_postgres` + `add_query_asset`(range 쿼리,
+     summary 쿼리 각각) + `add_batch_definition_whole_table`로 배치 정의 2개를
+     만든다.
+  3. suite 2개를 로드해 `context.suites.add(...)`로 등록하고,
+     `ValidationDefinition(name=..., data=<배치정의>, suite=<suite>)`를
+     `context.validation_definitions.add(...)`로 등록한다(range/summary
+     각각).
+  4. `Checkpoint(name=..., validation_definitions=[range_vdef,
+     summary_vdef], actions=[UpdateDataDocsAction(name="update_data_docs")])`를
+     `context.checkpoints.add(...)`로 등록하고 `checkpoint.run()`을
+     호출한다 — `UpdateDataDocsAction`이 실행 직후 임시 디렉터리에 Data
+     Docs를 렌더링한다.
+  5. `upload_data_docs_to_s3(local_dir, bucket, prefix, s3_client)`로
+     임시 디렉터리 전체를 `boto3` `put_object`로 S3에 업로드한다(상대
+     경로를 그대로 키로 사용).
+  6. `CheckpointResult.success`가 `False`면 `GoldAuditValidationFailed`를
+     raise한다(§6).
+
+  `GoldAuditSummary` dataclass(row_count/age_seconds/orphan_count/성공
+  여부)를 반환. `table`은
   `standard_segment_comfort_score`/`current_segment_comfort_score` 리터럴만
   허용(그 외 값은 즉시 `ValueError`).
 - `resources/expectations/*_audit_*_suite.json`(신규 4개, §5).
@@ -196,9 +268,11 @@ current_segment_comfort_score (Postgres)   ─┤
   DAG의 task 2개가 각각 테이블 하나씩만 대상으로 호출한다(아래 orchestration
   절). `run_gold_audit_cli`가 psycopg2 connection을 열고
   `run_gold_audit(config, connection, table)` 호출, 결과를 JSON으로 출력.
-- `pyproject.toml`에 `great-expectations[spark,postgresql,s3]` (S3 store
-  backend용 `boto3` extra 추가 — `[spark]`는 기존 sensor_processing
-  검증에서 이미 필요).
+- `pyproject.toml`에 `great-expectations[spark,postgresql]`(`[spark]`는
+  기존 sensor_processing 검증에서 이미 필요, `[postgresql]`은 #249가 이미
+  추가한 것과 동일)와 `boto3`(S3 업로드 직접 호출용, GX extra가 아니라
+  독립 의존성으로 추가 — §1 정정에 따라 GX가 아니라 우리 코드가 S3에
+  쓰기 때문).
 
 ### `services/orchestration`
 
