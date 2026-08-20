@@ -2,8 +2,8 @@
 
 Apache Airflow(LocalExecutor)를 로컬 개발 환경에서 부트스트랩하는 서비스다.
 `hello_world`(부트스트랩 동작 확인용)에 이어, `standard_score_pipeline` DAG가
-batch-jobs의 sensor processing(#205)·hourly scoring(#169)·publish(#176)·
-standard score(#217) 4단계를 오케스트레이션한다. Sensor processing은
+batch-jobs의 sensor processing(#205)·hourly scoring(#169)·standard score(#217)
+3단계를 오케스트레이션한다(publish는 #227에서 제거). Sensor processing은
 cleansing과 feature 계산을 같은 Spark 세션에서 실행한다.
 
 `weather_pipeline` DAG(#207)는 다른 방식이다 — batch-jobs(EMR/Spark 전용)로
@@ -69,13 +69,8 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   `score-hourly-comfort` 커맨드가 읽는 입출력 경로다. 비워두면
   `HourlyComfortJobConfig.from_env()`가 `data/local-lake` 하위 기본 경로로
   대체하므로(의도된 동작이다), 로컬 개발에서는 채우지 않아도 된다.
-- `SEGMENT_COMFORT_SCORE_DATA_LAKE_URI`, `SEGMENT_COMFORT_SCORE_WINDOW_HOURS`,
-  `SEGMENT_COMFORT_SCORE_CONFIG_PATH` — batch-jobs의
-  `load-segment-comfort-score` 커맨드(publish 단계)가 읽는 값이다. 비워두면
-  `SegmentComfortScoreJobConfig.from_env()`가 로컬 기본값으로 대체한다(scoring과
-  동일하게 의도된 동작).
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
-  `POSTGRES_PASSWORD` — publish 단계가 Gold 결과를 적재할 서빙 Postgres 접속
+  `POSTGRES_PASSWORD` — standard score 단계가 Gold 결과를 적재할 서빙 Postgres 접속
   정보다. `SegmentComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
   있으면(기본값 대체 없이) 즉시 실패한다. 로컬 개발에서는 `infra/compose/postgres.yaml`의
   `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
@@ -87,7 +82,7 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
 구간을 처리하며, 아래 순서로 실행된다.
 
 ```text
-sensor_processing >> hourly_scoring >> publish >> standard_score
+sensor_processing >> hourly_scoring >> standard_score
 ```
 
 각 TaskGroup의 BashOperator는 `docker run`으로 host에 별도의 `batch-jobs`
@@ -101,12 +96,11 @@ feature 계산은 `sensor_processing`의 단일 컨테이너와 Spark 세션에�
 | --- | --- | --- |
 | sensor processing | `cleanse-sensor-events` | Bronze + road snapshot → `sensor_event_quarantine`, `hourly_segment_features` |
 | hourly scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
-| publish | `load-segment-comfort-score` | scoring 결과 → 서빙 PostgreSQL |
 | standard score | `load-standard-segment-comfort-score` | `hourly_comfort_score` 168시간 롤업 → 서빙 PostgreSQL(`standard_segment_comfort_score`) |
 
-publish와 standard score의 `--as-of`에는 둘 다 `data_interval_end`가 전달된다.
+standard score의 `--as-of`에는 `data_interval_end`가 전달된다.
 예를 들어 logical date가 `2026-08-18 09:00 UTC`이면 sensor processing은 09시
-구간을 처리하고, publish/standard score는 해당 구간의 끝인
+구간을 처리하고, standard score는 해당 구간의 끝인
 `2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
 
 > ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
@@ -280,7 +274,7 @@ docker stop de4-airflow-backfill-scheduler
 | 시간 범위 밖 이벤트 | 1,000건 모두 09시 결과에서 제외 |
 | sensor processing features | 80건 = 20 segment × 4 profile, unmatched 0건 |
 | scoring | 80건, rejected 0건 |
-| 첫 publish | 100건 insert = 20 segment × (4 profile + 대표 profile 0) |
+| 첫 publish (당시 단계, #227에서 제거) | 100건 insert = 20 segment × (4 profile + 대표 profile 0) |
 | 동일 시간 재실행 | 0건 insert, 100건 update, 전체 행 수 증가 없음 |
 
 

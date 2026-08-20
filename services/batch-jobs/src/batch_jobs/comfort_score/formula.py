@@ -17,11 +17,9 @@ Step 1의 가중치로 합쳐서 만든다. Step 1~5가 전부 선형이라 "먼
 않는다. T_min 필터가 trip_count(방향과 무관한 값)에만 걸리므로 qualifying hour 집합 H도
 세 방향이 공유한다.
 
-두 개의 진입점이 있다.
-  - compute_segment_comfort_scores: 기존 segment_comfort_score용. 관측된 조합만
-    산출한다(mu가 없으면 행을 만들지 않는다).
-  - compute_standard_comfort_scores: standard_segment_comfort_score용(#198).
-    호출자가 넘긴 universe의 모든 조합에 대해 행을 만든다.
+진입점은 compute_standard_comfort_scores 하나다 — 호출자가 넘긴 universe의 모든
+조합에 대해 행을 만든다. 관측된 조합만 산출하던 구 segment_comfort_score 경로는
+#227에서 제거했다.
 """
 
 from __future__ import annotations
@@ -64,20 +62,6 @@ REQUIRED_SCHEMA = StructType(
 UNIVERSE_COLUMNS = ("segment_id", "vehicle_profile_id")
 
 
-def compute_segment_comfort_scores(
-    hourly_df: DataFrame,
-    config: ComfortScoreConfig,
-) -> DataFrame:
-    """Segment x vehicle_profile 단위와, 차량 구분 없는 Segment 단위(vehicle_profile_id=0)
-    comfort_score/confidence_score를 한 DataFrame에 담아 반환한다.
-
-    기존 segment_comfort_score 경로다. universe를 입력 데이터에서 유도하므로
-    윈도우에 등장하지 않은 조합은 행이 생기지 않고, mu_p가 정의되지 않는 프로필의
-    행도 만들지 않는다.
-    """
-    return _compute(hourly_df, config, universe_df=None, global_mu_fallback=False)
-
-
 def compute_standard_comfort_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
@@ -94,14 +78,13 @@ def compute_standard_comfort_scores(
     vehicle-agnostic 경로의 전역 mu로 대체한다.
     """
     _validate_universe(universe_df)
-    return _compute(hourly_df, config, universe_df=universe_df, global_mu_fallback=True)
+    return _compute(hourly_df, config, universe_df)
 
 
 def _compute(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame | None,
-    global_mu_fallback: bool,
+    universe_df: DataFrame,
 ) -> DataFrame:
     _validate_schema(hourly_df.schema, REQUIRED_SCHEMA, source="hourly_comfort_score")
     _validate_no_reserved_vehicle_profile_id(hourly_df)
@@ -114,9 +97,7 @@ def _compute(
     # 대체값으로도 쓰이므로 한 번만 계산해 양쪽이 같은 값을 보게 한다.
     global_mu = _population_means(_qualifying_hours(pooled_hourly, config), group_keys=())
 
-    per_vehicle = _per_vehicle_scores(
-        hourly_df, config, universe_df, global_mu if global_mu_fallback else None
-    )
+    per_vehicle = _per_vehicle_scores(hourly_df, config, universe_df, global_mu)
     vehicle_agnostic = _vehicle_agnostic_scores(pooled_hourly, config, universe_df, global_mu)
     return per_vehicle.unionByName(vehicle_agnostic)
 

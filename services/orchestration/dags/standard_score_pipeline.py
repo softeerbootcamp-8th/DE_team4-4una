@@ -8,7 +8,8 @@ cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 
 서빙 테이블까지 한 DAG에서 채운다. 이슈 #229(ADR-0007): current 전량 갱신
 책임을 current_score_pipeline(#231)으로 넘기고, 이 DAG는
 standard_segment_comfort_score까지만 담당한다. dag_id도
-standard_score_pipeline으로 바꾼다.
+standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 경로를
+제거하면서 publish 단계도 함께 빠졌다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -107,35 +108,16 @@ _VALIDATE_SENSOR_PROCESSING_BASH_COMMAND = (
     'sensor_event_quarantine}"'
 )
 
-# publish는 local-lake를 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 다른
-# 단계와 달리 쓰기 마운트가 필요 없다. 나머지 설정(SegmentComfortScoreJobConfig)은
-# SEGMENT_COMFORT_SCORE_*(옵션, 기본값 있음)와 POSTGRES_*(필수, 없으면 즉시
-# 실패) 환경변수에서 읽는다. as_of는 `[as_of - window_hours, as_of)` 윈도우의
-# 끝을 의미하므로, 방금 끝난 데이터 구간의 끝인 data_interval_end를 쓴다
-# (features가 처리 대상 구간의 시작인 data_interval_start를 쓰는 것과 대칭).
-_RUN_PUBLISH_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
-    "/app/data/local-lake:ro "
-    "-e SEGMENT_COMFORT_SCORE_DATA_LAKE_URI -e SEGMENT_COMFORT_SCORE_WINDOW_HOURS "
-    "-e SEGMENT_COMFORT_SCORE_CONFIG_PATH "
-    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "load-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
-)
-
 # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 PostgreSQL에 UPSERT한다.
-# publish와 마찬가지로 local-lake를 읽기만 하고, as_of는 방금 끝난 구간의 끝을 쓴다.
-# 설정은 STANDARD_COMFORT_SCORE_*(없으면 SEGMENT_COMFORT_SCORE_*로 폴백)에서 읽는다.
+# local-lake는 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 쓰기 마운트가 필요 없다.
+# as_of는 `[as_of - window_hours, as_of)` 윈도우의 끝을 의미하므로, 방금 끝난 데이터
+# 구간의 끝인 data_interval_end를 쓴다. 설정은 STANDARD_COMFORT_SCORE_*에서 읽는다.
 _RUN_STANDARD_SCORE_BASH_COMMAND = (
     "docker run --rm --network de4-local "
     "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
     "/app/data/local-lake:ro "
     "-e STANDARD_COMFORT_SCORE_DATA_LAKE_URI -e STANDARD_COMFORT_SCORE_WINDOW_HOURS "
     "-e STANDARD_COMFORT_SCORE_CONFIG_PATH "
-    "-e SEGMENT_COMFORT_SCORE_DATA_LAKE_URI -e SEGMENT_COMFORT_SCORE_WINDOW_HOURS "
-    "-e SEGMENT_COMFORT_SCORE_CONFIG_PATH "
     "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
     "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
     "uv run --no-sync --package batch-jobs batch-jobs "
@@ -145,10 +127,10 @@ _RUN_STANDARD_SCORE_BASH_COMMAND = (
 
 with DAG(
     dag_id="standard_score_pipeline",
-    description="sensor processing -> scoring -> publish 3단계 시간배치 파이프라인",
+    description="sensor processing -> scoring -> standard 3단계 시간배치 파이프라인",
     # Airflow 3의 bare cron 기본값인 CronTriggerTimetable은 data interval의
     # 시작과 끝을 같은 시각으로 만든다. 이 DAG는 09시 실행을 [09:00, 10:00)으로
-    # 처리하고 publish의 as_of에 10:00을 넘겨야 하므로 interval timetable을
+    # 처리하고 standard 적재의 as_of에 10:00을 넘겨야 하므로 interval timetable을
     # 명시한다.
     schedule=CronDataIntervalTimetable(
         "0 * * * *",
@@ -179,12 +161,6 @@ with DAG(
             bash_command=_RUN_HOURLY_SCORING_BASH_COMMAND,
         )
 
-    with TaskGroup(group_id="publish") as publish:
-        run_publish = BashOperator(
-            task_id="run_publish",
-            bash_command=_RUN_PUBLISH_BASH_COMMAND,
-        )
-
     with TaskGroup(group_id="standard_score") as standard_score:
         run_standard_score = BashOperator(
             task_id="run_standard_score",
@@ -192,8 +168,4 @@ with DAG(
             outlets=[STANDARD_SCORE_ASSET],
         )
 
-    # publish(구 segment_comfort_score 경로)와 standard를 병렬로 두면 Spark 컨테이너 두 개가
-    # 로컬 자원을 두고 경합한다. migration order 7단계에서 publish가 삭제될 때까지만
-    # 직렬로 둔다 — 둘 사이에 데이터 의존관계는 없다.
-    sensor_processing >> hourly_scoring >> publish >> standard_score
-
+    sensor_processing >> hourly_scoring >> standard_score

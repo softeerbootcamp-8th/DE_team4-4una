@@ -426,9 +426,14 @@ the new path is proven end to end:
    `weather_time` and `weather_rule_version` are null on the fallback path.
    The staleness-based fallback (serving standard when the zone's weather is
    older than a freshness threshold) is still open — see "Open items".
-7. Remove `segment_comfort_score` and its Gold writer.
+7. Remove `segment_comfort_score` and its Gold writer. **Done** (issue #227):
+   migration `0010` drops the table and its staging copy, `gold_job`/`gold_writer`
+   and the `load-segment-comfort-score` command are gone, and the hourly DAG runs
+   `scoring → standard_score → current_score` with no publish step.
 
 Steps 2-7 are each their own follow-up issue and are out of scope for #193.
+All seven steps are now complete; the standard/current split is the only Gold
+path in the repository.
 
 ## Open items
 
