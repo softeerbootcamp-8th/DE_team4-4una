@@ -544,7 +544,7 @@ observation (migration 0007). There is no history table; anything that needs
 | Wind gusts | `wind_gusts_10m_mps` | DOUBLE | Y |  | 10m wind gusts, m/s |
 | Weather code | `weather_code` | INTEGER | Y |  | Open-Meteo WMO weather code |
 | Weather state | `weather_state` | STRING | N |  | Human-readable condition bucket derived from the fields above (dry, rain, snow, fog, or high-wind, in that priority order — see `jobs.weather.classify_weather_state`). Single-valued and for display/debug only; it is **not** the scoring input, and it is classified separately from `impact_signature`'s buckets |
-| Impact signature | `impact_signature` | STRING | N |  | The set of active weather conditions for this observation, not a hash of the raw values, so it changes only when a condition turns on or off (`jobs.weather_rules.build_impact_signature`). Rule-version-tagged and sorted: `1.0.0\|ice,snow`, or `1.0.0\|clear` when none apply. `parse_impact_signature` reads it back, so the current-score job applies deductions without reclassifying these columns. It is also the change trigger — the job compares it against the value it last acted on (`context/comfort-score.md`, Step A); `latest_zone_weather` keeps no history, so where that previous value is stored is an open item there |
+| Impact signature | `impact_signature` | STRING | N |  | The set of active weather conditions for this observation, not a hash of the raw values, so it changes only when a condition turns on or off (`jobs.weather_rules.build_impact_signature`). Rule-version-tagged and sorted: `1.0.0\|ice,snow`, or `1.0.0\|clear` when none apply. `parse_impact_signature` reads it back, so the current-score job applies deductions without reclassifying these columns. It is also the change trigger — the recompute job compares it against `current_segment_comfort_score.weather_impact_signature`, the value it last acted on, since this table keeps no history (`context/comfort-score.md`, Step A) |
 | Fetched time | `fetched_at` | TIMESTAMP | N |  | Time this row was last retrieved from Open-Meteo |
 
 `weather_state` and `impact_signature` are both derived from the same raw
@@ -568,6 +568,10 @@ standard score with the latest applicable weather adjustment applied.
 vehicle profile at all times; no period is part of the key.
 
 **Storage policy:** UPSERT only, keyed by `(segment_id, vehicle_profile_id)`.
+A segment with no zone (`road_segment.location_id` is null) gets no row, because
+`location_id` here is `NOT NULL` — such segments exist only in
+`standard_segment_comfort_score` (issue #216). `location_id` is indexed, since
+the 15-minute path selects by zone while the primary key is segment-first.
 
 - On the hourly standard run (top of the hour): every row is recomputed and
   upserted from the new `standard_segment_comfort_score` snapshot and the
@@ -592,6 +596,7 @@ vehicle profile at all times; no period is part of the key.
 | Sensor sample count | `sample_count` | BIGINT | N |  | Copied from the referenced `standard_segment_comfort_score.sample_count` |
 | Confidence score | `confidence_score` | DOUBLE | N |  | Copied from the referenced `standard_segment_comfort_score.confidence_score`; weather adjustment does not change confidence |
 | Standard score version | `standard_score_version` | STRING | N |  | Copied from the referenced `standard_segment_comfort_score.score_version` |
+| Weather impact signature | `weather_impact_signature` | STRING | Y |  | The `latest_zone_weather.impact_signature` this row was computed from, so the recompute job can tell whether a zone's weather changed without a weather history table (migration `0009`, issue #216). `NULL` exactly when `weather_time` is `NULL`, enforced by `CHECK ((weather_time IS NULL) = (weather_impact_signature IS NULL))` |
 | Weather rule version | `weather_rule_version` | STRING | Y |  | Version of the weather-adjustment rule set (thresholds and score deductions); versioned independently of `standard_score_version` since it changes on its own schedule (finalized in a follow-up issue). `NULL` exactly when `weather_time` is `NULL` (before the zone's first weather snapshot) — enforced by a `CHECK ((weather_time IS NULL) = (weather_rule_version IS NULL))` |
 | Calculated time | `calculated_at` | TIMESTAMP | N |  | Time this row was last upserted |
 
