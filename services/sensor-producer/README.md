@@ -67,12 +67,32 @@ The bounded sample uses trips whose pickup and drop-off are both inside the
 selected taxi zone. This keeps the reference-data download and local routing
 graph small while still using real TLC rows.
 
+The producer no longer parses `lion.geojson` directly (#225) — it routes over
+the canonical `road_segment` Parquet instead: a single-`snapshot_date`
+Parquet file (`segment_id`, `from_node_id`, `to_node_id`, `traffic_direction`,
+`street_name`, `geometry_wkb` in EPSG:32118, `length_m`, `posted_speed_mph`,
+`curve_radius_m`), the same contract Transform 2's
+`cleanse-sensor-events --road-segment-path` reads
+(`batch_jobs.road_segment.persist.write_road_segment_snapshot`'s
+`<dir>/snapshot_date=<date>/data.parquet` layout). Point `--road-segment-path`
+at that exact file — the same one given to Transform 2 — so both stages route
+against the identical road reference.
+
+> Producing this file for local dev currently has to be done by hand (see
+> `data/processed/road_segment/snapshot_date=.../data.parquet` under
+> "통합 테스트" in `services/orchestration/README.md`): `build-road-environment`
+> only publishes the versioned `normalized/road_segment/snapshot_date=.../
+> build_id=.../part-00000.parquet` layout today, nothing yet copies that into
+> this simple single-file shape. That gap is unrelated to #225 and out of
+> scope here.
+
 Start Kafka and replay in wall-clock time:
 
 ```bash
 docker compose -f infra/compose/kafka.yaml up -d
 uv run --package sensor-producer sensor-producer run \
   --input-dir data/nyc-sensor \
+  --road-segment-path data/processed/road_segment/snapshot_date=2026-08-19/data.parquet \
   --publisher kafka \
   --bootstrap-servers localhost:9092 \
   --topic sensor-events \
@@ -110,8 +130,10 @@ before enforcing the threshold.
 
 ## Environment approximation
 
-- LION `SegmentID` is the canonical routing identifier. `TrafDir` controls the
-  directed graph and shortest route length is the Dijkstra cost.
+- `road_segment.segment_id` (from the canonical Parquet, ultimately sourced
+  from LION `SegmentID`) is the routing identifier. `traffic_direction`
+  (LION `TrafDir`) controls the directed graph and shortest route length is
+  the Dijkstra cost.
 - Pickup and drop-off road nodes are deterministically selected from LION nodes
   covered by the TLC taxi-zone polygons. Candidate routes are ranked against the
   source `trip_miles` so zone-level coordinate synthesis does not create a
