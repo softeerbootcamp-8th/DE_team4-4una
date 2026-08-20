@@ -110,3 +110,30 @@ conservation invariant is reframed around those two:
 - Component score ranges and confidence-score semantics need explicit contracts.
 - A result that fails the accepted minimum coverage rule must not appear as an
   ordinary high-confidence score.
+
+### Gold at-rest audit (implemented, #253)
+
+`standard_segment_comfort_score` and `current_segment_comfort_score` are
+audited in full once a day by the independent `data_quality_audit` DAG
+(`0 3 * * *`, soft fail — a failing task signals via a red Airflow task and
+a Great Expectations Data Docs report in S3, but blocks no other DAG).
+Implemented as `batch_jobs.gold_audit_validation` (GX `SqlAlchemyExecutionEngine`
+against Postgres, ADR-0004):
+
+- **Range**: `comfort_score`/`vertical_score`/`longitudinal_score`/
+  `lateral_score` must each be in `[0, 100]`, checked across every row in
+  the table (not just the latest run).
+- **Freshness**: the newest row (`score_as_of` for
+  `standard_segment_comfort_score`, `calculated_at` for
+  `current_segment_comfort_score`, since the latter has no `score_as_of`
+  column) must be no older than 10800 seconds (3 hours).
+- **`vehicle_profile_id` referential integrity**: zero rows may reference a
+  `vehicle_profile_id` absent from `vehicle_profile`.
+  `standard_segment_comfort_score` already enforces this with a database
+  `FOREIGN KEY` (migration `0006`), so this check is a no-op safety net
+  there; `current_segment_comfort_score.vehicle_profile_id` has no such FK,
+  so this is the only place that violation would be caught.
+
+Schema/PK/required-column invariants remain the writers' responsibility
+(`standard_writer.py`, `jobs/current_score.py`) at write time — this audit
+does not duplicate them (ADR-0004: hard invariants stay in code, not GX).
