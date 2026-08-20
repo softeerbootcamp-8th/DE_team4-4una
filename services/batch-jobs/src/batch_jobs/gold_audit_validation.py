@@ -95,3 +95,28 @@ class GoldAuditValidationConfig:
             range_suite_paths=DEFAULT_RANGE_SUITE_PATHS,
             summary_suite_paths=DEFAULT_SUMMARY_SUITE_PATHS,
         )
+
+
+def build_range_query(table: str) -> str:
+    _validate_table(table)
+    return f"SELECT * FROM {table}"
+
+
+def build_summary_query(table: str) -> str:
+    """freshness(초)와 orphan `vehicle_profile_id` 수를 한 행으로 묶어 낸다.
+
+    `current_segment_comfort_score.vehicle_profile_id`엔 DB FK가 없어(0006
+    마이그레이션) 이 anti-join이 실제로 의미가 있다. `standard_segment_comfort_score`는
+    이미 FK로 이 위반이 불가능하지만, 검증 비용이 저렴해 안전망으로 그대로 둔다.
+    """
+    _validate_table(table)
+    freshness_column = _FRESHNESS_COLUMN[table]
+    return (
+        f"SELECT EXTRACT(EPOCH FROM (now() - MAX({freshness_column})))"
+        f"::double precision AS age_seconds, "
+        f"(SELECT count(*) FROM {table} t "
+        f"LEFT JOIN vehicle_profile vp "
+        f"ON t.vehicle_profile_id = vp.vehicle_profile_id "
+        f"WHERE vp.vehicle_profile_id IS NULL) AS orphan_vehicle_profile_count "
+        f"FROM {table}"
+    )

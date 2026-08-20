@@ -139,3 +139,42 @@ class TestGoldAuditValidationConfig:
         )
 
         assert config.connection_string == "postgresql+psycopg2://app:secret@db.local:5433/de4"
+
+
+from batch_jobs.gold_audit_validation import build_range_query, build_summary_query
+
+
+class TestBuildRangeQuery:
+    def test_selects_the_full_table(self) -> None:
+        query = build_range_query("standard_segment_comfort_score")
+
+        assert query == "SELECT * FROM standard_segment_comfort_score"
+
+    def test_rejects_unknown_table(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            build_range_query("not_a_real_table")
+
+
+class TestBuildSummaryQuery:
+    def test_standard_table_uses_score_as_of_for_freshness(self) -> None:
+        query = build_summary_query("standard_segment_comfort_score")
+
+        assert "MAX(score_as_of)" in query
+        assert "age_seconds" in query
+        assert "orphan_vehicle_profile_count" in query
+        assert "LEFT JOIN vehicle_profile vp" in query
+        assert "FROM standard_segment_comfort_score" in query
+
+    def test_current_table_uses_calculated_at_for_freshness(self) -> None:
+        query = build_summary_query("current_segment_comfort_score")
+
+        assert "MAX(calculated_at)" in query
+        assert "FROM current_segment_comfort_score" in query
+
+    def test_rejects_unknown_table(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            build_summary_query("not_a_real_table")
