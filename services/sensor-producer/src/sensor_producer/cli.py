@@ -36,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--input-dir", type=Path, required=True)
+    run_parser.add_argument(
+        "--road-segment-path",
+        type=Path,
+        required=True,
+        help="canonical road_segment 단일 snapshot_date Parquet 파일 (Transform 2와 같은 경로여야 함)",
+    )
     run_parser.add_argument("--publisher", choices=("kafka", "jsonl"), default="kafka")
     run_parser.add_argument("--output", type=Path)
     run_parser.add_argument("--bootstrap-servers", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
@@ -67,7 +73,7 @@ def main(argv: list[str] | None = None) -> None:
 
     input_dir: Path = arguments.input_dir
     environment = RoadEnvironment.from_files(
-        input_dir / "lion.geojson",
+        arguments.road_segment_path,
         input_dir / "pavement.geojson",
         input_dir / "speed_humps.geojson",
         input_dir / "taxi_zones.zip",
@@ -98,6 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     manifest = json.loads((input_dir / "manifest.json").read_text())
     summary = {
         "run_id": config.run_id,
+        "road_segment_snapshot_date": environment.road_segment_snapshot_date.isoformat(),
         "publisher": arguments.publisher,
         "topic": arguments.topic if arguments.publisher == "kafka" else None,
         "sample_hz": config.sample_hz,
