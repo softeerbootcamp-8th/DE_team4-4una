@@ -428,11 +428,24 @@ the new path is proven end to end:
    older than a freshness threshold) is still open — see "Open items".
 7. Remove `segment_comfort_score` and its Gold writer. **Done** (issue #227):
    migration `0010` drops the table and its staging copy, `gold_job`/`gold_writer`
-   and the `load-segment-comfort-score` command are gone, and the hourly DAG runs
-   `scoring → standard_score → current_score` with no publish step.
+   and the `load-segment-comfort-score` command are gone.
+8. Split `current_segment_comfort_score` writes into their own DAG so the
+   hourly and 15-minute producers stop writing it directly (ADR-0007, issues
+   #229/#230/#231). **Done**: `standard_score_pipeline` runs
+   `scoring → standard_score` and stops there; `zone_weather_pipeline` collects
+   weather and gates on changed zones; both publish an Airflow Asset
+   (`STANDARD_SCORE_ASSET`/`ZONE_WEATHER_ASSET`) instead of writing
+   `current_segment_comfort_score` themselves. The new `current_score_pipeline`
+   DAG is that table's sole writer, scheduled by `AssetAny(...)` with
+   `max_active_runs=1`, and picks full vs. changed-zone recompute from which
+   Asset triggered it. Verified end to end against a local fixture in issue
+   #245 (including that two producers triggering while `current_score_pipeline`
+   is busy correctly queue and get consumed together by one DagRun, preferring
+   the full recompute) — see
+   `docs/adr/0007-split-comfort-score-pipeline-into-three-dags.md`.
 
-Steps 2-7 are each their own follow-up issue and are out of scope for #193.
-All seven steps are now complete; the standard/current split is the only Gold
+Steps 2-8 are each their own follow-up issue and are out of scope for #193.
+All eight steps are now complete; the standard/current split is the only Gold
 path in the repository.
 
 ## Open items
