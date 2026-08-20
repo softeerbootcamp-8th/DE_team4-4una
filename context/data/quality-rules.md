@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-20
 ---
 
 # Data Quality and Idempotency Rules
@@ -55,15 +55,32 @@ because no prior observation exists.
 
 ## Bronze-to-Silver conservation
 
-- Every Bronze `sensor_event` produces exactly one `sensor_events_matched` row.
-- Do not delete unmatched, ambiguous, late, duplicated, or otherwise invalid
-  observations during map matching.
-- Preserve a status and reason that make each non-success state measurable.
-- The expected count invariant is:
-  `COUNT(bronze sensor_event) = COUNT(silver sensor_events_matched)` after
-  applying the accepted deduplication boundary consistently.
-- An unmatched rate above 5% fails the Airflow task. The denominator and
-  treatment of ambiguous records still require exact definitions.
+As of issue #205, cleansing and map matching run as one in-memory Spark
+execution (`sensor_processing`, no persisted intermediate
+`sensor_events_matched` table — see the T1→T2 cleansed sensor-event contract
+in `schema-catalog.md`). Only two artifacts survive that execution:
+the cleansing quarantine partition and `hourly_segment_features`. The
+conservation invariant is reframed around those two:
+
+- Every Bronze `sensor_event` is either accepted into a `hourly_segment_features`
+  row's `sample_count` or quarantined with a measurable `reject_reason` — none
+  are silently dropped.
+- **Quarantine rate**: `quarantined_count / (quarantined_count +
+  SUM(hourly_segment_features.sample_count))` for the target hour. A rate
+  above 5% fails the Airflow task. Implemented as a GX Expectation
+  (`ExpectColumnValuesToBeBetween` on a one-row `quarantine_rate` DataFrame)
+  in `batch_jobs.sensor_processing_validation` (issue #220, ADR-0004), run as
+  the `validate_sensor_processing` task right after `run_sensor_processing`.
+- **`hourly_segment_features` magnitude ranges**: every RMS/P95 acceleration,
+  jerk, and steering-rate/vibration column, plus `avg_speed_mps`, must be
+  non-negative when present (they are physical magnitudes/absolute values, so
+  a negative value indicates a computation bug). Also a GX Expectation Suite
+  (`resources/expectations/hourly_segment_features_suite.json`), checked by
+  the same `validate_sensor_processing` task. Schema, non-null required
+  columns, PK uniqueness, and the `data_period_start`/`data_period_end`
+  one-hour span remain hard invariants enforced inline by
+  `sensor_features.aggregation.validate_hourly_segment_features` at write
+  time (ADR-0004: hard invariants stay in code, not GX).
 
 ## Map-matching quality
 

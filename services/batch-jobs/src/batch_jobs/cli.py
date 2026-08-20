@@ -65,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     
     standard_parser = subparsers.add_parser("load-standard-segment-comfort-score")
     standard_parser.add_argument("--as-of", required=True)
+
+    validate_sensor_processing_parser = subparsers.add_parser("validate-sensor-processing")
+    validate_sensor_processing_parser.add_argument(
+        "--target-hour", type=datetime.fromisoformat, required=True
+    )
+    validate_sensor_processing_parser.add_argument("--output-path")
+    validate_sensor_processing_parser.add_argument("--quarantine-output-path")
     return parser
 
 
@@ -311,6 +318,43 @@ def run_standard_comfort_score_loading(arguments: argparse.Namespace) -> None:
         connection.close()
 
 
+def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
+    from batch_jobs.sensor_processing_validation import (
+        SensorProcessingValidationConfig,
+        build_spark_session,
+        run_sensor_processing_validation,
+    )
+
+    defaults = SensorProcessingValidationConfig.from_env()
+    config = SensorProcessingValidationConfig(
+        feature_output_path=arguments.output_path or defaults.feature_output_path,
+        quarantine_output_path=(
+            arguments.quarantine_output_path or defaults.quarantine_output_path
+        ),
+        feature_ranges_suite_path=defaults.feature_ranges_suite_path,
+        quarantine_rate_suite_path=defaults.quarantine_rate_suite_path,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        summary = run_sensor_processing_validation(spark, config, arguments.target_hour)
+        print(
+            json.dumps(
+                {
+                    "feature_row_count": summary.feature_row_count,
+                    "accepted_sample_count": summary.accepted_sample_count,
+                    "quarantine_row_count": summary.quarantine_row_count,
+                    "quarantine_rate": summary.quarantine_rate,
+                    "success": summary.success,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -327,6 +371,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "load-standard-segment-comfort-score":
         run_standard_comfort_score_loading(arguments)
+        return
+    if arguments.command == "validate-sensor-processing":
+        run_sensor_processing_validation_cli(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(

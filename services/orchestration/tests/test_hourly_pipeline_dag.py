@@ -69,11 +69,12 @@ def test_dag_preserves_retry_policy():
         assert task.retry_delay == datetime.timedelta(minutes=5)
 
 
-def test_sensor_processing_task_group_contains_only_combined_job():
+def test_sensor_processing_task_group_contains_the_combined_job_and_its_validation():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert "sensor_processing.run_sensor_processing" in task_ids
+    assert "sensor_processing.validate_sensor_processing" in task_ids
 
 
 def test_scoring_task_group_contains_only_run_scoring():
@@ -112,6 +113,22 @@ def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     assert "HOURLY_SEGMENT_FEATURE_INPUT_PATH" not in command
 
 
+def test_validate_sensor_processing_invokes_gx_validation_with_matching_paths():
+    module = _load_dag_module()
+
+    validate_sensor_processing = module.dag.get_task(
+        "sensor_processing.validate_sensor_processing"
+    )
+    command = validate_sensor_processing.bash_command
+    assert "validate-sensor-processing" in command
+    assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
+    # run_sensor_processing과 같은 env var를 참조해야 같은 파티션을 가리킨다.
+    assert "--output-path=" in command
+    assert "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH" in command
+    assert "--quarantine-output-path=" in command
+    assert "CLEANSING_QUARANTINE_OUTPUT_PATH" in command
+
+
 def test_run_scoring_invokes_score_hourly_comfort_with_templated_run_id():
     module = _load_dag_module()
 
@@ -145,6 +162,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
         "sensor_processing.run_sensor_processing",
+        "sensor_processing.validate_sensor_processing",
         "scoring.run_scoring",
         "publish.run_publish",
         "standard_score.run_standard_score",
@@ -158,12 +176,21 @@ def test_task_groups_follow_hourly_pipeline_order():
     run_sensor_processing = module.dag.get_task(
         "sensor_processing.run_sensor_processing"
     )
+    validate_sensor_processing = module.dag.get_task(
+        "sensor_processing.validate_sensor_processing"
+    )
     run_scoring = module.dag.get_task("scoring.run_scoring")
     run_publish = module.dag.get_task("publish.run_publish")
 
-    assert run_sensor_processing.downstream_task_ids == {"scoring.run_scoring"}
-    assert run_scoring.upstream_task_ids == {
+    assert run_sensor_processing.downstream_task_ids == {
+        "sensor_processing.validate_sensor_processing"
+    }
+    assert validate_sensor_processing.upstream_task_ids == {
         "sensor_processing.run_sensor_processing"
+    }
+    assert validate_sensor_processing.downstream_task_ids == {"scoring.run_scoring"}
+    assert run_scoring.upstream_task_ids == {
+        "sensor_processing.validate_sensor_processing"
     }
     assert run_scoring.downstream_task_ids == {"publish.run_publish"}
     assert run_publish.upstream_task_ids == {"scoring.run_scoring"}
