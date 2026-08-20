@@ -127,24 +127,36 @@ Only the target-hour quarantine and `hourly_segment_features` are stored. The
 Airflow DAG invokes the combined command once in its `sensor_processing`
 TaskGroup, then continues to scoring and publication.
 
-The same DAG then loads `standard_segment_comfort_score` and refreshes every
-`current_segment_comfort_score` row, while a separate 15-minute DAG collects
-Open-Meteo weather into `latest_zone_weather` and refreshes only the segments in
-zones whose weather actually changed (issues #207, #216, #217):
+`standard_score_pipeline`(renamed from `hourly_pipeline`, issue #229) loads
+`standard_segment_comfort_score` from `hourly_comfort_score` and stops there — it
+no longer writes `current_segment_comfort_score`. A separate 15-minute
+`weather_pipeline` (to be renamed `zone_weather_pipeline`, issue #230) collects
+Open-Meteo weather into `latest_zone_weather` and is, for now, the only writer of
+`current_segment_comfort_score`, refreshing just the segments in zones whose
+weather actually changed (issues #207, #216, #217):
 
 ```mermaid
 flowchart LR
     HC[(Silver: hourly_comfort_score)] --> ST[Standard score load]
     ST --> SS[(Gold: standard_segment_comfort_score)]
-    SS --> CS[Weather adjustment]
     W[Open-Meteo] --> WC[Weather collection]
     WC --> LZ[(latest_zone_weather)]
-    LZ --> CS
+    LZ --> CS[Changed-zone current recompute]
     CS --> CU[(Gold: current_segment_comfort_score)]
 ```
 
-Weather collection and the weather adjustment need no Spark, so both run as
+Weather collection and the changed-zone recompute need no Spark, so both run as
 Python tasks inside the Airflow scheduler rather than as separate containers.
+
+**Target (ADR-0007, in progress)**: both DAGs independently writing
+`current_segment_comfort_score` is a known race (issue #228) — `zone_weather_pipeline`'s
+changed-zone read can race a full standard-driven refresh. ADR-0007 moves this
+write into a single new `current_score_pipeline` DAG, scheduled by an Airflow
+Asset either producer DAG emits (`STANDARD_SCORE_ASSET` from
+`standard_score_pipeline`, `ZONE_WEATHER_ASSET` from `zone_weather_pipeline` once
+it gates on changed zones), with `max_active_runs=1` serializing writes. That DAG
+does not exist yet — it and `zone_weather_pipeline`'s remaining changes are
+tracked by issues #230 and #231.
 
 ### Silver map matching
 

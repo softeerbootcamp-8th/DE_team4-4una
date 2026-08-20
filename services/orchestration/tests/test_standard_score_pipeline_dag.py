@@ -1,8 +1,10 @@
-"""hourly_pipeline DAG의 구조를 docker 없이 검증하는 테스트.
+"""standard_score_pipeline DAG의 구조를 docker 없이 검증하는 테스트.
 
 실제 task 실행(batch-jobs 컨테이너 기동)은 로컬 Airflow에서 수동으로 확인하고,
-여기서는 DAG가 정상 파싱되는지와 sensor_processing/scoring/publish TaskGroup의
-골격이 의도대로 구성됐는지만 확인한다.
+여기서는 DAG가 정상 파싱되는지와 sensor_processing/hourly_scoring/publish/
+standard_score TaskGroup의 골격이 의도대로 구성됐는지, current_score
+TaskGroup이 제거됐는지, standard_score에 STANDARD_SCORE_ASSET outlet이
+붙어 있는지를 확인한다(#229, ADR-0007).
 """
 
 from __future__ import annotations
@@ -13,17 +15,25 @@ import sys
 from pathlib import Path
 
 import pendulum
-from airflow.providers.standard.operators.python import PythonOperator
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
 DAG_PATH = (
-    Path(__file__).resolve().parents[1] / "dags" / "hourly_pipeline.py"
+    Path(__file__).resolve().parents[1] / "dags" / "standard_score_pipeline.py"
 )
+
+# Airflow의 DagBag은 dags 폴더 자체를 sys.path에 넣어서 그 안의 sibling 모듈
+# (comfort_score_assets.py)을 top-level import로 가져올 수 있게 해준다. 여기서는
+# DagBag을 안 쓰고 파일을 직접 로드하므로, 같은 동작을 수동으로 재현한다.
+_DAGS_DIR = str(DAG_PATH.parent)
+if _DAGS_DIR not in sys.path:
+    sys.path.insert(0, _DAGS_DIR)
+
+from comfort_score_assets import STANDARD_SCORE_ASSET
 
 
 def _load_dag_module():
-    spec = importlib.util.spec_from_file_location("hourly_pipeline", DAG_PATH)
+    spec = importlib.util.spec_from_file_location("standard_score_pipeline", DAG_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -33,7 +43,7 @@ def _load_dag_module():
 def test_dag_parses_with_expected_schedule():
     module = _load_dag_module()
 
-    assert module.dag.dag_id == "hourly_pipeline"
+    assert module.dag.dag_id == "standard_score_pipeline"
     assert isinstance(module.dag.timetable, CronDataIntervalTimetable)
     assert module.dag.timetable.summary == "0 * * * *"
     assert module.dag.catchup is False
@@ -77,11 +87,11 @@ def test_sensor_processing_task_group_contains_the_combined_job_and_its_validati
     assert "sensor_processing.validate_sensor_processing" in task_ids
 
 
-def test_scoring_task_group_contains_only_run_scoring():
+def test_hourly_scoring_task_group_contains_only_run_hourly_scoring():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert "scoring.run_scoring" in task_ids
+    assert "hourly_scoring.run_hourly_scoring" in task_ids
 
 
 def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
@@ -129,12 +139,12 @@ def test_validate_sensor_processing_invokes_gx_validation_with_matching_paths():
     assert "CLEANSING_QUARANTINE_OUTPUT_PATH" in command
 
 
-def test_run_scoring_invokes_score_hourly_comfort_with_templated_run_id():
+def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id():
     module = _load_dag_module()
 
-    run_scoring = module.dag.get_task("scoring.run_scoring")
-    assert "score-hourly-comfort" in run_scoring.bash_command
-    assert "--run-id={{ run_id }}" in run_scoring.bash_command
+    run_hourly_scoring = module.dag.get_task("hourly_scoring.run_hourly_scoring")
+    assert "score-hourly-comfort" in run_hourly_scoring.bash_command
+    assert "--run-id={{ run_id }}" in run_hourly_scoring.bash_command
 
 
 def test_publish_task_group_contains_only_run_publish():
@@ -163,14 +173,20 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
     assert task_ids == {
         "sensor_processing.run_sensor_processing",
         "sensor_processing.validate_sensor_processing",
-        "scoring.run_scoring",
+        "hourly_scoring.run_hourly_scoring",
         "publish.run_publish",
         "standard_score.run_standard_score",
-        "current_score.run_current_score",
     }
 
 
-def test_task_groups_follow_hourly_pipeline_order():
+def test_current_score_task_group_is_removed():
+    module = _load_dag_module()
+
+    task_ids = {task.task_id for task in module.dag.tasks}
+    assert not any(task_id.startswith("current_score") for task_id in task_ids)
+
+
+def test_task_groups_follow_standard_score_pipeline_order():
     module = _load_dag_module()
 
     run_sensor_processing = module.dag.get_task(
@@ -179,8 +195,9 @@ def test_task_groups_follow_hourly_pipeline_order():
     validate_sensor_processing = module.dag.get_task(
         "sensor_processing.validate_sensor_processing"
     )
-    run_scoring = module.dag.get_task("scoring.run_scoring")
+    run_hourly_scoring = module.dag.get_task("hourly_scoring.run_hourly_scoring")
     run_publish = module.dag.get_task("publish.run_publish")
+    run_standard_score = module.dag.get_task("standard_score.run_standard_score")
 
     assert run_sensor_processing.downstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
@@ -188,19 +205,16 @@ def test_task_groups_follow_hourly_pipeline_order():
     assert validate_sensor_processing.upstream_task_ids == {
         "sensor_processing.run_sensor_processing"
     }
-    assert validate_sensor_processing.downstream_task_ids == {"scoring.run_scoring"}
-    assert run_scoring.upstream_task_ids == {
+    assert validate_sensor_processing.downstream_task_ids == {
+        "hourly_scoring.run_hourly_scoring"
+    }
+    assert run_hourly_scoring.upstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
     }
-    assert run_scoring.downstream_task_ids == {"publish.run_publish"}
-    assert run_publish.upstream_task_ids == {"scoring.run_scoring"}
-
-    run_standard_score = module.dag.get_task("standard_score.run_standard_score")
-    run_current_score = module.dag.get_task("current_score.run_current_score")
-
+    assert run_hourly_scoring.downstream_task_ids == {"publish.run_publish"}
+    assert run_publish.upstream_task_ids == {"hourly_scoring.run_hourly_scoring"}
     assert run_publish.downstream_task_ids == {"standard_score.run_standard_score"}
-    assert run_standard_score.downstream_task_ids == {"current_score.run_current_score"}
-    assert run_current_score.downstream_task_ids == set()
+    assert run_standard_score.downstream_task_ids == set()
 
 
 def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
@@ -217,10 +231,8 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     assert "POSTGRES_PASSWORD" in command
 
 
-def test_run_current_score_refreshes_every_row():
+def test_run_standard_score_emits_standard_score_asset():
     module = _load_dag_module()
 
-    task = module.dag.get_task("current_score.run_current_score")
-
-    assert isinstance(task, PythonOperator)
-    assert task.python_callable is module._refresh_current_scores
+    task = module.dag.get_task("standard_score.run_standard_score")
+    assert task.outlets == [STANDARD_SCORE_ASSET]
