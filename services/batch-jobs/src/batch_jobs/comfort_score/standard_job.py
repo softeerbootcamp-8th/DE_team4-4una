@@ -1,7 +1,7 @@
 """Spark batch entry point for standard_segment_comfort_score loading (#198).
 
-gold_job.py와 나란히 두고, 기존 segment_comfort_score 경로는 그대로 둔다
-(context/comfort-score.md "Migration order" 2단계).
+context/comfort-score.md "Migration order" 2단계. 함께 있던 구 segment_comfort_score
+경로(gold_job/gold_writer)는 7단계에서 제거했다(#227).
 """
 
 from __future__ import annotations
@@ -59,16 +59,13 @@ class StandardComfortScoreJobConfig:
         source = env if env is not None else os.environ
         return cls(
             data_lake_uri=source.get("STANDARD_COMFORT_SCORE_DATA_LAKE_URI")
-            or source.get("SEGMENT_COMFORT_SCORE_DATA_LAKE_URI")
             or "data/local-lake",
             window_hours=int(
                 source.get("STANDARD_COMFORT_SCORE_WINDOW_HOURS")
-                or source.get("SEGMENT_COMFORT_SCORE_WINDOW_HOURS")
                 or DEFAULT_WINDOW_HOURS
             ),
             comfort_score_config_path=Path(
                 source.get("STANDARD_COMFORT_SCORE_CONFIG_PATH")
-                or source.get("SEGMENT_COMFORT_SCORE_CONFIG_PATH")
                 or DEFAULT_COMFORT_SCORE_CONFIG_PATH
             ),
             postgres_host=_require(source, "POSTGRES_HOST"),

@@ -13,17 +13,6 @@ RUN_INTEGRATION = os.environ.get("RUN_INTEGRATION") == "1"
 
 MIGRATION_FILENAME = "0006_create_weather_aware_comfort_score_tables.sql"
 
-EXISTING_SEGMENT_COMFORT_SCORE_COLUMNS = {
-    "segment_id",
-    "vehicle_profile_id",
-    "comfort_score",
-    "confidence_score",
-    "sample_count",
-    "score_version",
-    "calculated_at",
-    "data_period_start",
-    "data_period_end",
-}
 
 
 def _connect():
@@ -167,16 +156,15 @@ class TestWeatherAwareComfortScoreMigration:
         finally:
             connection.close()
 
-    def test_existing_segment_comfort_score_table_is_untouched(self):
+    def test_the_superseded_gold_table_is_gone(self):
+        # 0006은 구 테이블을 건드리지 않았지만, 0010이 지웠다(#227). 마이그레이션을
+        # 전부 적용한 DB에서는 남아 있으면 안 된다.
         connection = _connect()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'segment_comfort_score'"
-                )
-                columns = {row[0] for row in cursor.fetchall()}
-            assert columns == EXISTING_SEGMENT_COMFORT_SCORE_COLUMNS
+                cursor.execute("SELECT to_regclass('segment_comfort_score')")
+                (existing,) = cursor.fetchone()
+            assert existing is None
         finally:
             connection.close()
 
