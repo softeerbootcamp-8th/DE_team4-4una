@@ -18,6 +18,9 @@ dependencies = [
     "shapely>=2.1.2",
 ]
 
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
+
 [project.scripts]
 batch-jobs = "batch_jobs:main"
 
