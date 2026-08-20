@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import great_expectations as gx
+from great_expectations.checkpoint.actions import UpdateDataDocsAction
+from great_expectations.checkpoint.checkpoint import Checkpoint
+from great_expectations.core.validation_definition import ValidationDefinition
 
 from batch_jobs.resources import RESOURCE_DIR
 
@@ -152,3 +156,100 @@ def upload_data_docs_to_s3(local_dir: Path, bucket: str, prefix: str, s3_client)
             s3_client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes())
             uploaded += 1
     return uploaded
+
+
+@dataclass(frozen=True, slots=True)
+class GoldAuditSummary:
+    table: str
+    row_count: int
+    success: bool
+
+
+class GoldAuditValidationFailed(Exception):
+    """검증 실패 시 발생시켜 Airflow task를 soft fail시킨다(ADR-0004, spec §6)."""
+
+
+def run_gold_audit(
+    config: GoldAuditValidationConfig,
+    connection,
+    table: str,
+    s3_client,
+) -> GoldAuditSummary:
+    """`table` 전체를 range/freshness/참조무결성 기준으로 감사한다(at-rest,
+    이번 실행분이 아니라 전체 이력).
+
+    성공/실패와 무관하게 Data Docs를 항상 렌더링 후 S3에 업로드한 다음에야
+    실패 여부를 판정한다(spec §6) — 단, 테이블이 아예 비어 있으면 GX를
+    실행할 대상 자체가 없으므로 그 전에 바로 실패시킨다(#249의
+    `run_standard_score_validation`과 동일한 선례).
+    """
+    _validate_table(table)
+    row_count = count_rows(connection, table)
+    if row_count == 0:
+        raise GoldAuditValidationFailed(f"no rows found in {table}")
+
+    with tempfile.TemporaryDirectory(prefix="gold-audit-data-docs-") as tmp_dir:
+        context = gx.get_context(mode="ephemeral")
+        context.add_data_docs_site(
+            site_name="gold_audit_site",
+            site_config={
+                "class_name": "SiteBuilder",
+                "store_backend": {
+                    "class_name": "TupleFilesystemStoreBackend",
+                    "base_directory": tmp_dir,
+                },
+                "site_index_builder": {"class_name": "DefaultSiteIndexBuilder"},
+            },
+        )
+
+        datasource = context.data_sources.add_postgres(
+            name=f"{table}_datasource", connection_string=config.connection_string
+        )
+
+        range_asset = datasource.add_query_asset(
+            name=f"{table}_range", query=build_range_query(table)
+        )
+        range_batch_definition = range_asset.add_batch_definition_whole_table(
+            f"{table}_range_batch"
+        )
+        range_suite = context.suites.add(
+            load_expectation_suite(config.range_suite_paths[table])
+        )
+        range_vdef = context.validation_definitions.add(
+            ValidationDefinition(
+                name=f"{table}_range_vdef", data=range_batch_definition, suite=range_suite
+            )
+        )
+
+        summary_asset = datasource.add_query_asset(
+            name=f"{table}_summary", query=build_summary_query(table)
+        )
+        summary_batch_definition = summary_asset.add_batch_definition_whole_table(
+            f"{table}_summary_batch"
+        )
+        summary_suite = context.suites.add(
+            load_expectation_suite(config.summary_suite_paths[table])
+        )
+        summary_vdef = context.validation_definitions.add(
+            ValidationDefinition(
+                name=f"{table}_summary_vdef", data=summary_batch_definition, suite=summary_suite
+            )
+        )
+
+        checkpoint = context.checkpoints.add(
+            Checkpoint(
+                name=f"{table}_audit_checkpoint",
+                validation_definitions=[range_vdef, summary_vdef],
+                actions=[UpdateDataDocsAction(name="update_data_docs")],
+            )
+        )
+        result = checkpoint.run()
+
+        upload_data_docs_to_s3(
+            Path(tmp_dir), config.s3_bucket, f"{S3_PREFIX}/{table}", s3_client
+        )
+
+    summary = GoldAuditSummary(table=table, row_count=row_count, success=result.success)
+    if not summary.success:
+        raise GoldAuditValidationFailed(f"gold audit failed for table={table}: {summary}")
+    return summary

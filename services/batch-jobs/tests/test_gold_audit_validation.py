@@ -271,3 +271,234 @@ class TestUploadDataDocsToS3:
                 "data-quality-audit/gold/standard_segment_comfort_score/expectations/suite.html",
             )
         ] == b"<html>suite</html>"
+
+
+import os
+from datetime import UTC, datetime, timedelta
+
+import psycopg2
+import pytest
+from batch_jobs.gold_audit_validation import (
+    GoldAuditSummary,
+    GoldAuditValidationFailed,
+    run_gold_audit,
+)
+
+RUN_INTEGRATION = os.environ.get("RUN_INTEGRATION") == "1"
+
+
+def _pg_connect():
+    return psycopg2.connect(
+        host=os.environ["POSTGRES_HOST"],
+        port=int(os.environ["POSTGRES_PORT"]),
+        dbname=os.environ["POSTGRES_DB"],
+        user=os.environ["POSTGRES_USER"],
+        password=os.environ["POSTGRES_PASSWORD"],
+    )
+
+
+def _config() -> GoldAuditValidationConfig:
+    from batch_jobs.gold_audit_validation import GoldAuditValidationConfig
+
+    return GoldAuditValidationConfig(
+        postgres_host=os.environ["POSTGRES_HOST"],
+        postgres_port=int(os.environ["POSTGRES_PORT"]),
+        postgres_db=os.environ["POSTGRES_DB"],
+        postgres_user=os.environ["POSTGRES_USER"],
+        postgres_password=os.environ["POSTGRES_PASSWORD"],
+        s3_bucket="de4-data-quality-docs",
+        range_suite_paths=DEFAULT_RANGE_SUITE_PATHS,
+        summary_suite_paths=DEFAULT_SUMMARY_SUITE_PATHS,
+    )
+
+
+def _standard_row(**overrides: object) -> dict[str, object]:
+    now = datetime.now(UTC)
+    row = {
+        "segment_id": "seg-1",
+        "vehicle_profile_id": 0,
+        "score_as_of": now,
+        "data_period_start": now - timedelta(hours=168),
+        "data_period_end": now,
+        "vertical_score": 50.0,
+        "longitudinal_score": 50.0,
+        "lateral_score": 50.0,
+        "comfort_score": 50.0,
+        "sample_count": 10,
+        "confidence_score": 0.5,
+        "score_version": "1.0.0",
+        "calculated_at": now,
+    }
+    row.update(overrides)
+    return row
+
+
+def _insert(connection, table: str, rows: list[dict[str, object]]) -> None:
+    columns = list(rows[0].keys())
+    placeholders = ", ".join(["%s"] * len(columns))
+    with connection.cursor() as cursor:
+        for row in rows:
+            cursor.execute(
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+                [row[column] for column in columns],
+            )
+    connection.commit()
+
+
+@pytest.mark.skipif(
+    not RUN_INTEGRATION, reason="set RUN_INTEGRATION=1 to run against a real Postgres"
+)
+class TestRunGoldAuditAgainstStandardSegmentComfortScore:
+    TABLE = "standard_segment_comfort_score"
+
+    @pytest.fixture(autouse=True)
+    def _clean_table(self):
+        connection = _pg_connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"DELETE FROM {self.TABLE}")
+            connection.commit()
+        finally:
+            connection.close()
+        yield
+
+    def test_succeeds_with_fresh_in_range_data(self) -> None:
+        connection = _pg_connect()
+        try:
+            _insert(connection, self.TABLE, [_standard_row()])
+            s3_client = FakeS3Client()
+
+            summary = run_gold_audit(_config(), connection, self.TABLE, s3_client)
+
+            assert summary == GoldAuditSummary(table=self.TABLE, row_count=1, success=True)
+            assert len(s3_client.objects) > 0
+            assert any(
+                key.startswith(f"data-quality-audit/gold/{self.TABLE}/")
+                for _, key in s3_client.objects
+            )
+        finally:
+            connection.close()
+
+    def test_fails_on_out_of_range_comfort_score(self) -> None:
+        # comfort_score 자체는 DB CHECK 제약(0002/0006/0008 마이그레이션)이 있어
+        # INSERT 단계에서 걸린다. GX range suite가 실제로 걸러내는 걸 보이려면
+        # DB 제약이 없는 다른 범위 컬럼(vertical_score)으로 위반을 재현해야 한다.
+        connection = _pg_connect()
+        try:
+            _insert(connection, self.TABLE, [_standard_row(vertical_score=150.0)])
+            s3_client = FakeS3Client()
+
+            with pytest.raises(GoldAuditValidationFailed):
+                run_gold_audit(_config(), connection, self.TABLE, s3_client)
+
+            # Data Docs는 실패해도 업로드돼 있어야 한다(soft fail, spec §6).
+            assert len(s3_client.objects) > 0
+        finally:
+            connection.close()
+
+    def test_fails_on_stale_score_as_of(self) -> None:
+        connection = _pg_connect()
+        try:
+            stale_time = datetime.now(UTC) - timedelta(hours=10)
+            _insert(
+                connection,
+                self.TABLE,
+                [_standard_row(score_as_of=stale_time, data_period_end=stale_time)],
+            )
+            s3_client = FakeS3Client()
+
+            with pytest.raises(GoldAuditValidationFailed):
+                run_gold_audit(_config(), connection, self.TABLE, s3_client)
+        finally:
+            connection.close()
+
+    def test_fails_when_table_is_empty(self) -> None:
+        connection = _pg_connect()
+        try:
+            with pytest.raises(GoldAuditValidationFailed, match="no rows"):
+                run_gold_audit(_config(), connection, self.TABLE, FakeS3Client())
+        finally:
+            connection.close()
+
+
+@pytest.mark.skipif(
+    not RUN_INTEGRATION, reason="set RUN_INTEGRATION=1 to run against a real Postgres"
+)
+class TestRunGoldAuditAgainstCurrentSegmentComfortScore:
+    TABLE = "current_segment_comfort_score"
+
+    @pytest.fixture(autouse=True)
+    def _clean_table(self):
+        connection = _pg_connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"DELETE FROM {self.TABLE}")
+            connection.commit()
+        finally:
+            connection.close()
+        yield
+
+    def _row(self, **overrides: object) -> dict[str, object]:
+        now = datetime.now(UTC)
+        row = {
+            "segment_id": "seg-1",
+            "vehicle_profile_id": 0,
+            "location_id": 1,
+            "standard_score_as_of": now,
+            "weather_time": None,
+            "data_period_start": now - timedelta(hours=168),
+            "vertical_score": 50.0,
+            "longitudinal_score": 50.0,
+            "lateral_score": 50.0,
+            "comfort_score": 50.0,
+            "sample_count": 10,
+            "confidence_score": 0.5,
+            "standard_score_version": "1.0.0",
+            "weather_rule_version": None,
+            "calculated_at": now,
+        }
+        row.update(overrides)
+        return row
+
+    def test_succeeds_with_fresh_in_range_data(self) -> None:
+        connection = _pg_connect()
+        try:
+            standard_as_of = datetime.now(UTC)
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM standard_segment_comfort_score")
+                cursor.execute(
+                    "INSERT INTO standard_segment_comfort_score "
+                    "(segment_id, vehicle_profile_id, score_as_of, data_period_start, "
+                    "data_period_end, vertical_score, longitudinal_score, lateral_score, "
+                    "comfort_score, sample_count, confidence_score, score_version, calculated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        "seg-1", 0, standard_as_of, standard_as_of, standard_as_of,
+                        50.0, 50.0, 50.0, 50.0, 10, 0.5, "1.0.0", standard_as_of,
+                    ),
+                )
+            connection.commit()
+            _insert(
+                connection,
+                self.TABLE,
+                [self._row(standard_score_as_of=standard_as_of)],
+            )
+            s3_client = FakeS3Client()
+
+            summary = run_gold_audit(_config(), connection, self.TABLE, s3_client)
+
+            assert summary == GoldAuditSummary(table=self.TABLE, row_count=1, success=True)
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM current_segment_comfort_score")
+                cursor.execute("DELETE FROM standard_segment_comfort_score")
+            connection.commit()
+            connection.close()
+
+    def test_fails_when_table_is_empty(self) -> None:
+        connection = _pg_connect()
+        try:
+            with pytest.raises(GoldAuditValidationFailed, match="no rows"):
+                run_gold_audit(_config(), connection, self.TABLE, FakeS3Client())
+        finally:
+            connection.close()
