@@ -21,8 +21,17 @@ def _changed_zones_only(triggering_asset_events) -> bool:
     맞춰 반영한다. 그렇지 않고 ZONE_WEATHER_ASSET만 있으면(날씨만 바뀜) 변경된 zone만
     재계산한다. 두 Asset이 동시에 트리거에 걸려도(겹친 실행이 max_active_runs=1로 큐잉됐다가
     한 번에 소비되는 경우) 전량 쪽이 변경분을 포함하므로 안전한 쪽을 우선한다.
+
+    `triggering_asset_events`(TriggeringAssetEventsAccessor)는 내부적으로
+    `defaultdict(list)`를 감싸고 있어, 트리거하지 않은 Asset을 조회해도 KeyError 없이 빈
+    리스트를 돌려준다. 그래서 `in`(멤버십 체크, __contains__)은 __getitem__이 KeyError를
+    던지는지로 판단하는데 여기서는 절대 던지지 않아 어떤 Asset을 넣어도 항상 True가
+    나온다 — 이 함수가 항상 전량 모드로 고정되는 실제 버그였다(#245에서 로컬 통합
+    테스트로 발견). 대신 조회 결과 리스트의 진위값(빈 리스트는 falsy)으로 판단한다.
+    `.get(..., [])`을 쓰는 이유는 테스트가 이 accessor 대신 plain dict를 넘기기
+    때문이다 — plain dict는 없는 키를 `[]`로 직접 인덱싱하면 KeyError를 던진다.
     """
-    return STANDARD_SCORE_ASSET not in triggering_asset_events
+    return not triggering_asset_events.get(STANDARD_SCORE_ASSET, [])
 
 
 def _run_current_score(triggering_asset_events) -> None:
