@@ -13,12 +13,16 @@ lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
 
 ## comfort score 적재 (#217)
 
-`current_segment_comfort_score`는 지금 `weather_pipeline` 하나만 갱신한다 — 15분
+`current_segment_comfort_score`는 지금 `weather_pipeline`이 직접 쓴다 — 15분
 수집 뒤 `run_changed_zone_recompute`가 `impact_signature`가 달라진 zone의 segment만
 다시 만든다. `standard_score_pipeline`(구 `hourly_pipeline`)은 예전엔 `standard_score`
 (batch-jobs Spark, `standard_segment_comfort_score` 적재) 다음에 `current_score`가
-전량을 다시 만들었지만, 이슈 #229(ADR-0007)에서 그 태스크를 제거했다 — current 전량
-갱신 책임은 신규 `current_score_pipeline`(#231, 아직 미구현)으로 넘어간다.
+전량을 다시 만들었지만, 이슈 #229(ADR-0007)에서 그 태스크를 제거했다 — 지금은 이
+전량 갱신을 아무 DAG도 하지 않는다. ADR-0007의 최종 그림에서는
+`standard_score_pipeline`/`zone_weather_pipeline` 둘 다 직접 쓰지 않고 Asset만
+발행해 신규 `current_score_pipeline`(#231, 아직 미구현)을 트리거하고, 그 DAG가
+유일한 writer가 된다 — 이건 #230(`weather_pipeline` → `zone_weather_pipeline` 전환)과
+#231이 끝나야 완성된다.
 
 지금은 writer가 `weather_pipeline` 하나뿐이라 두 DAG 간 경합은 없지만,
 `jobs/current_score.py`의 PostgreSQL advisory lock은 수동 트리거·백필 등으로

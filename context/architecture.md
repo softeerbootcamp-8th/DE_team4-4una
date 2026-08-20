@@ -130,8 +130,8 @@ TaskGroup, then continues to scoring and publication.
 `standard_score_pipeline`(renamed from `hourly_pipeline`, issue #229) loads
 `standard_segment_comfort_score` from `hourly_comfort_score` and stops there — it
 no longer writes `current_segment_comfort_score`. A separate 15-minute
-`zone_weather_pipeline` (renamed from `weather_pipeline`) collects Open-Meteo
-weather into `latest_zone_weather` and is, for now, the only writer of
+`weather_pipeline` (to be renamed `zone_weather_pipeline`, issue #230) collects
+Open-Meteo weather into `latest_zone_weather` and is, for now, the only writer of
 `current_segment_comfort_score`, refreshing just the segments in zones whose
 weather actually changed (issues #207, #216, #217):
 
