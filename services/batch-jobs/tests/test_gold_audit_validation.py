@@ -178,3 +178,96 @@ class TestBuildSummaryQuery:
 
         with pytest.raises(ValueError):
             build_summary_query("not_a_real_table")
+
+
+from batch_jobs.gold_audit_validation import (
+    count_rows,
+    load_expectation_suite,
+    upload_data_docs_to_s3,
+)
+
+
+class _FakeCursor:
+    def __init__(self, row: tuple) -> None:
+        self._row = row
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def execute(self, sql: str) -> None:
+        self.executed_sql = sql
+
+    def fetchone(self) -> tuple:
+        return self._row
+
+
+class _FakeConnection:
+    def __init__(self, row: tuple) -> None:
+        self._row = row
+        self.cursor_used: _FakeCursor | None = None
+
+    def cursor(self) -> _FakeCursor:
+        self.cursor_used = _FakeCursor(self._row)
+        return self.cursor_used
+
+
+class TestCountRows:
+    def test_returns_the_count_from_the_query(self) -> None:
+        connection = _FakeConnection((42,))
+
+        assert count_rows(connection, "standard_segment_comfort_score") == 42
+        assert "COUNT(*)" in connection.cursor_used.executed_sql
+        assert "standard_segment_comfort_score" in connection.cursor_used.executed_sql
+
+    def test_rejects_unknown_table(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            count_rows(_FakeConnection((0,)), "not_a_real_table")
+
+
+class TestLoadExpectationSuite:
+    def test_loads_the_committed_range_suite(self) -> None:
+        from batch_jobs.gold_audit_validation import DEFAULT_RANGE_SUITE_PATHS
+
+        suite = load_expectation_suite(
+            DEFAULT_RANGE_SUITE_PATHS["standard_segment_comfort_score"]
+        )
+
+        assert suite.name == "standard_segment_comfort_score_audit_range_suite"
+        assert len(suite.expectations) == 4
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, **kwargs: object) -> None:
+        self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
+
+
+class TestUploadDataDocsToS3:
+    def test_uploads_every_file_with_relative_path_as_key(self, tmp_path: Path) -> None:
+        (tmp_path / "index.html").write_text("<html></html>")
+        nested = tmp_path / "expectations"
+        nested.mkdir()
+        (nested / "suite.html").write_text("<html>suite</html>")
+        client = FakeS3Client()
+
+        uploaded = upload_data_docs_to_s3(
+            tmp_path, "de4-data-quality-docs", "data-quality-audit/gold/standard_segment_comfort_score", client
+        )
+
+        assert uploaded == 2
+        assert client.objects[
+            ("de4-data-quality-docs", "data-quality-audit/gold/standard_segment_comfort_score/index.html")
+        ] == b"<html></html>"
+        assert client.objects[
+            (
+                "de4-data-quality-docs",
+                "data-quality-audit/gold/standard_segment_comfort_score/expectations/suite.html",
+            )
+        ] == b"<html>suite</html>"

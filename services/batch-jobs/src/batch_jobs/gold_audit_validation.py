@@ -15,10 +15,13 @@ Data Docs를 S3에서 열람 가능해야 하므로(완료 조건), 다른 GX �
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+import great_expectations as gx
 
 from batch_jobs.resources import RESOURCE_DIR
 
@@ -120,3 +123,32 @@ def build_summary_query(table: str) -> str:
         f"WHERE vp.vehicle_profile_id IS NULL) AS orphan_vehicle_profile_count "
         f"FROM {table}"
     )
+
+
+def count_rows(connection, table: str) -> int:
+    _validate_table(table)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")  # table validated above
+        return cursor.fetchone()[0]
+
+
+def load_expectation_suite(path: Path) -> gx.ExpectationSuite:
+    payload = json.loads(Path(path).read_text())
+    return gx.ExpectationSuite(**payload)
+
+
+def upload_data_docs_to_s3(local_dir: Path, bucket: str, prefix: str, s3_client) -> int:
+    """렌더된 Data Docs 임시 디렉터리를 S3에 업로드한다.
+
+    GX의 `TupleS3StoreBackend`가 great-expectations==1.21.0엔 없어(#253 스펙
+    §1) GX는 로컬에만 렌더링하고, 이 함수가 그 결과물을 boto3로 직접 옮긴다.
+    """
+    local_dir = Path(local_dir)
+    uploaded = 0
+    for path in sorted(local_dir.rglob("*")):
+        if path.is_file():
+            relative = path.relative_to(local_dir).as_posix()
+            key = f"{prefix}/{relative}"
+            s3_client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes())
+            uploaded += 1
+    return uploaded
