@@ -215,29 +215,25 @@ ECR 권한이 필요하다. 이걸 빼면 배포가 `docker pull`에서 실패�
 
 ## EC2 사전 조건
 
-배포 스크립트가 인스턴스에서 쓰는 것들이다. AMI는 정해지지 않았고, 아래가 갖춰지면
-배포판은 무관하다.
+인스턴스는 Amazon Linux 2023, `t4g.large`(Graviton, arm64)다. arm64 이미지가 필요하므로
+워크플로는 arm 러너(`runs-on: ubuntu-24.04-arm`)에서 빌드한다.
 
-| 항목 | 쓰는 곳 |
-| --- | --- |
-| docker | 컨테이너 교체 |
-| **AWS CLI** | ECR 로그인 (`aws ecr get-login-password`) |
-| **curl** | `/health` 확인 |
-| SSM Agent | 워크플로가 보낸 스크립트 수신 |
-| 인스턴스 프로파일 | 위 3번 |
-| 아웃바운드 443 | Agent가 AWS로 나간다. **인바운드는 열지 않아도 된다** |
-| env 파일 | 아래 참고 |
+배포 스크립트가 인스턴스에서 쓰는 것들은 다음과 같다.
 
-배포판별로 기본 제공 여부가 다르다. 없는 것은 인스턴스를 만들 때 user data로 설치한다.
-
-| | Amazon Linux 2023 | Ubuntu |
+| 항목 | 쓰는 곳 | Amazon Linux 2023 |
 | --- | --- | --- |
-| SSM Agent | 기본 | 기본 (snap) |
-| AWS CLI | 기본 | **없음 — 설치 필요** |
-| docker | 없음 (`dnf install docker`) | 없음 (`apt install docker.io`) |
+| docker | 컨테이너 교체 | **설치 필요** (`dnf install docker`) |
+| AWS CLI | ECR 로그인 (`aws ecr get-login-password`) | 기본 포함 |
+| curl | `/health` 확인 | 기본 포함 |
+| SSM Agent | 워크플로가 보낸 스크립트 수신 | 기본 포함 |
 
-Agent 서비스 이름이 배포판마다 달라 `systemctl`로 확인하면 헷갈린다. 아래 명령으로
-확인하는 편이 확실하다. 인스턴스가 목록에 뜨면 정상이다.
+그 밖에:
+
+- **인스턴스 프로파일** 부착 (위 3번)
+- **아웃바운드 443** 허용. Agent가 AWS로 나간다. 인바운드는 열지 않아도 된다
+- **env 파일** — 아래 참고
+
+인스턴스가 SSM에 등록됐는지는 아래로 확인한다. 목록에 뜨면 정상이다.
 
 ```bash
 aws ssm describe-instance-information
@@ -307,7 +303,7 @@ docker inspect --format \
 | 자격증명 획득 실패 | OIDC provider 미등록, trust policy의 `sub` 불일치 |
 | `docker push` 실패 | 배포 Role의 ECR 권한, 또는 `ECR_REPOSITORY`에 전체 URI를 넣음 |
 | `InvalidInstanceId` | 인스턴스가 SSM에 등록되지 않음 (Agent, 인스턴스 프로파일, 아웃바운드 확인) |
-| `aws: command not found` | 인스턴스에 AWS CLI 미설치 |
+| `exec format error` (컨테이너 로그) | 이미지가 arm64로 빌드되지 않았다 |
 | `env 파일이 없습니다` | 인스턴스에 env 파일 미생성, 또는 `SERVING_API_ENV_FILE` 경로 불일치 |
 | `docker pull` 실패 | 인스턴스 프로파일의 ECR 권한 누락 |
 | health 실패 후 rollback | DB 접속 정보 오류가 흔하다. 함께 출력되는 컨테이너 로그를 본다 |

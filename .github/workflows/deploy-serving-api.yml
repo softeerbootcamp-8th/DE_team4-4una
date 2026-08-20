@@ -37,7 +37,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
-    runs-on: ubuntu-latest
+    # 배포 대상이 arm64(t4g) 인스턴스라 arm 러너에서 빌드한다.
+    runs-on: ubuntu-24.04-arm
     env:
       # 배포할 커밋. CI가 검사한 바로 그 커밋이어야 한다.
       # github.sha를 쓰면 안 된다 — 이 워크플로에서 그 값은 main의 최신 커밋을 가리켜서,
