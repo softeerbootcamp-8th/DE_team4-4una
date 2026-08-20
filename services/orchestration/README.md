@@ -6,7 +6,7 @@ batch-jobs의 sensor processing(#205)·hourly scoring(#169)·standard score(#217
 3단계를 오케스트레이션한다(publish는 #227에서 제거). Sensor processing은
 cleansing과 feature 계산을 같은 Spark 세션에서 실행한다.
 
-`weather_pipeline` DAG(#207)는 다른 방식이다 — batch-jobs(EMR/Spark 전용)로
+`zone_weather_pipeline` DAG(#207)는 다른 방식이다 — batch-jobs(EMR/Spark 전용)로
 docker를 띄우는 대신, `jobs/weather.py`(#209, Open-Meteo 수집 + `latest_zone_weather`
 UPSERT)를 `airflow-scheduler` 컨테이너 안에서 PythonOperator로 직접 실행하는
 lightweight job이다. Spark가 필요 없어 이 편이 더 가볍다.
@@ -54,7 +54,8 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   synchronized..." 경고만 뜬다. `AIRFLOW_JWT_SECRET`과 마찬가지로
   `openssl rand -hex 32`로 생성.
 - `BATCH_JOBS_IMAGE_TAG` — `standard_score_pipeline`의 batch-jobs task가 실행할
-  batch-jobs 이미지 태그. 아래 "hourly_pipeline 실행하기"에서 만든다.
+  batch-jobs 이미지 태그. 아래 "통합 테스트 > 사전 준비"의 `make build-batch-jobs-image`로
+  만든다.
 - `CLEANSING_BRONZE_INPUT_PATH`, `CLEANSING_QUARANTINE_OUTPUT_PATH`,
   `HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH`,
   `HOURLY_SEGMENT_FEATURE_OUTPUT_PATH` — 통합 `cleanse-sensor-events` 커맨드의
@@ -74,7 +75,7 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   대체하므로(의도된 동작이다), 로컬 개발에서는 채우지 않아도 된다.
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
   `POSTGRES_PASSWORD` — standard score 단계가 Gold 결과를 적재할 서빙 Postgres 접속
-  정보다. `SegmentComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
+  정보다. `StandardComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
   있으면(기본값 대체 없이) 즉시 실패한다. 로컬 개발에서는 `infra/compose/postgres.yaml`의
   `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
   가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
@@ -116,7 +117,7 @@ standard score의 `--as-of`에는 `data_interval_end`가 전달된다.
 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
 
-## weather_pipeline (#207)
+## zone_weather_pipeline (#207, #230)
 
 UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection` task 하나가 실행되며,
 `jobs.weather.run_latest_zone_weather_job`을 `airflow-scheduler` 컨테이너 안에서

@@ -129,34 +129,40 @@ TaskGroup, then continues to scoring and publication.
 
 `standard_score_pipeline`(renamed from `hourly_pipeline`, issue #229) loads
 `standard_segment_comfort_score` from `hourly_comfort_score` and stops there — it
-no longer writes `current_segment_comfort_score`. A separate 15-minute
-`weather_pipeline` (to be renamed `zone_weather_pipeline`, issue #230) collects
-Open-Meteo weather into `latest_zone_weather` and is, for now, the only writer of
-`current_segment_comfort_score`, refreshing just the segments in zones whose
-weather actually changed (issues #207, #216, #217):
+does not write `current_segment_comfort_score`. A separate 15-minute
+`zone_weather_pipeline` (renamed from `weather_pipeline`, issue #230) collects
+Open-Meteo weather into `latest_zone_weather` and, when its changed-zone gate
+(reusing `find_changed_zones()`) finds zones whose weather actually changed,
+publishes `ZONE_WEATHER_ASSET` (issues #207, #216, #230).
+
+Writing `current_segment_comfort_score` from two independently scheduled DAGs
+was a known race (issue #228) — `zone_weather_pipeline`'s changed-zone read
+could race a full standard-driven refresh, letting a stale weather snapshot
+overwrite a fresher one. ADR-0007 (accepted) moves that write into a single
+DAG, `current_score_pipeline` (issue #231), scheduled by
+`AssetAny(STANDARD_SCORE_ASSET, ZONE_WEATHER_ASSET)` so either producer DAG
+wakes it, with `max_active_runs=1` serializing writes. It inspects
+`context["triggering_asset_events"]` to pick the recompute mode: a full
+refresh when `STANDARD_SCORE_ASSET` triggered, changed-zones-only when only
+`ZONE_WEATHER_ASSET` did:
 
 ```mermaid
 flowchart LR
     HC[(Silver: hourly_comfort_score)] --> ST[Standard score load]
     ST --> SS[(Gold: standard_segment_comfort_score)]
+    ST -. outlet .-> SA{{STANDARD_SCORE_ASSET}}
     W[Open-Meteo] --> WC[Weather collection]
     WC --> LZ[(latest_zone_weather)]
-    LZ --> CS[Changed-zone current recompute]
+    LZ --> DZ[Changed-zone gate]
+    DZ -. outlet, only if changed .-> ZA{{ZONE_WEATHER_ASSET}}
+    SA --> CS[current_score_pipeline: run_current_score]
+    ZA --> CS
     CS --> CU[(Gold: current_segment_comfort_score)]
 ```
 
-Weather collection and the changed-zone recompute need no Spark, so both run as
-Python tasks inside the Airflow scheduler rather than as separate containers.
-
-**Target (ADR-0007, in progress)**: both DAGs independently writing
-`current_segment_comfort_score` is a known race (issue #228) — `zone_weather_pipeline`'s
-changed-zone read can race a full standard-driven refresh. ADR-0007 moves this
-write into a single new `current_score_pipeline` DAG, scheduled by an Airflow
-Asset either producer DAG emits (`STANDARD_SCORE_ASSET` from
-`standard_score_pipeline`, `ZONE_WEATHER_ASSET` from `zone_weather_pipeline` once
-it gates on changed zones), with `max_active_runs=1` serializing writes. That DAG
-does not exist yet — it and `zone_weather_pipeline`'s remaining changes are
-tracked by issues #230 and #231.
+Weather collection and the changed-zone gate need no Spark, so both run as
+Python tasks inside the Airflow scheduler rather than as separate containers —
+`current_score_pipeline`'s single task does too.
 
 ### Silver map matching
 
