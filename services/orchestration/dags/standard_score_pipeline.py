@@ -2,10 +2,14 @@
 
 이슈 #162: cleanse 단계를 TaskGroup으로 구현했다. 이슈 #169: 같은 패턴으로
 scoring 단계를 추가했다. 이슈 #171: features 단계를 추가하고, 이슈 #176에서
-publish 단계를 추가했다(#227에서 제거). 이슈 #189: 4단계 의존관계를 완성했다. 이슈 #205:
+publish 단계를 추가했다. 이슈 #189: 4단계 의존관계를 완성했다. 이슈 #205:
 cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 단계로
 통합한다. 이슈 #217: standard 점수 적재와 current 점수 전량 갱신 단계를 붙여
-서빙 테이블까지 한 DAG에서 채운다.
+서빙 테이블까지 한 DAG에서 채운다. 이슈 #229(ADR-0007): current 전량 갱신
+책임을 current_score_pipeline(#231)으로 넘기고, 이 DAG는
+standard_segment_comfort_score까지만 담당한다. dag_id도
+standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 경로를
+제거하면서 publish 단계도 함께 빠졌다.
 
 ## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
 
@@ -31,9 +35,9 @@ import datetime
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG, TaskGroup
 from airflow.timetables.interval import CronDataIntervalTimetable
+from comfort_score_assets import STANDARD_SCORE_ASSET
 
 # BATCH_JOBS_IMAGE_TAG는 `make build-batch-jobs-image`가 만든 git-SHA 태그를
 # 가리켜야 한다(재현성). HOST_PROJECT_DIR와 BATCH_JOBS_IMAGE_TAG가 없으면
@@ -73,7 +77,7 @@ _RUN_SENSOR_PROCESSING_BASH_COMMAND = (
 )
 
 # run_id 외 나머지 설정은 HourlyComfortJobConfig.from_env()가 환경변수에서 읽는다.
-_RUN_SCORING_BASH_COMMAND = (
+_RUN_HOURLY_SCORING_BASH_COMMAND = (
     "docker run --rm --network de4-local "
     "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:/app/data/local-lake "
     "-e HOURLY_COMFORT_INPUT_PATH -e HOURLY_COMFORT_OUTPUT_PATH "
@@ -121,25 +125,9 @@ _RUN_STANDARD_SCORE_BASH_COMMAND = (
 )
 
 
-# current 점수 전량 갱신. Spark가 필요 없어 weather_pipeline과 같이 scheduler 컨테이너
-# 안에서 PythonOperator로 직접 돈다.
-def _refresh_current_scores() -> None:
-    # 날씨가 그대로여도 standard 스냅샷이 새로 생겼으므로 전량을 다시 만든다.
-    from jobs.current_score import run_from_env
-
-    summary = run_from_env(changed_zones_only=False)
-    print(
-        {
-            "zone_count": summary.zone_count,
-            "upserted_count": summary.upserted_count,
-            "skipped_unzoned_count": summary.skipped_unzoned_count,
-        }
-    )
-
-
 with DAG(
-    dag_id="hourly_pipeline",
-    description="sensor processing -> scoring -> standard -> current 시간배치 파이프라인",
+    dag_id="standard_score_pipeline",
+    description="sensor processing -> scoring -> standard 3단계 시간배치 파이프라인",
     # Airflow 3의 bare cron 기본값인 CronTriggerTimetable은 data interval의
     # 시작과 끝을 같은 시각으로 만든다. 이 DAG는 09시 실행을 [09:00, 10:00)으로
     # 처리하고 standard 적재의 as_of에 10:00을 넘겨야 하므로 interval timetable을
@@ -154,7 +142,7 @@ with DAG(
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
     },
-    tags=["hourly-pipeline"],
+    tags=["standard-score-pipeline", "comfort-score"],
 ) as dag:
     with TaskGroup(group_id="sensor_processing") as sensor_processing:
         run_sensor_processing = BashOperator(
@@ -167,22 +155,17 @@ with DAG(
         )
         run_sensor_processing >> validate_sensor_processing
 
-    with TaskGroup(group_id="scoring") as scoring:
-        run_scoring = BashOperator(
-            task_id="run_scoring",
-            bash_command=_RUN_SCORING_BASH_COMMAND,
+    with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
+        run_hourly_scoring = BashOperator(
+            task_id="run_hourly_scoring",
+            bash_command=_RUN_HOURLY_SCORING_BASH_COMMAND,
         )
 
     with TaskGroup(group_id="standard_score") as standard_score:
         run_standard_score = BashOperator(
             task_id="run_standard_score",
             bash_command=_RUN_STANDARD_SCORE_BASH_COMMAND,
+            outlets=[STANDARD_SCORE_ASSET],
         )
 
-    with TaskGroup(group_id="current_score") as current_score:
-        run_current_score = PythonOperator(
-            task_id="run_current_score",
-            python_callable=_refresh_current_scores,
-        )
-
-    sensor_processing >> scoring >> standard_score >> current_score
+    sensor_processing >> hourly_scoring >> standard_score
