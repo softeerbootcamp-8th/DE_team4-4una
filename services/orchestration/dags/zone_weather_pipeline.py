@@ -11,10 +11,12 @@ import datetime
 
 import pendulum
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.providers.standard.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.providers.standard.operators.python import (
+    PythonOperator,
+    ShortCircuitOperator,
+)
 from airflow.sdk import DAG
 from airflow.timetables.interval import CronDataIntervalTimetable
-
 from assets import ZONE_WEATHER_ASSET
 
 

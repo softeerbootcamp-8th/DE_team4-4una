@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pendulum
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.providers.standard.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.providers.standard.operators.python import (
+    PythonOperator,
+    ShortCircuitOperator,
+)
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
