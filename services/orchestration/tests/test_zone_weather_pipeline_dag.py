@@ -11,7 +11,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
-DAG_PATH = Path(__file__).resolve().parents[1] / "dags" / "weather_pipeline.py"
+DAG_PATH = Path(__file__).resolve().parents[1] / "dags" / "zone_weather_pipeline.py"
 
 
 def _load_dag_module():
