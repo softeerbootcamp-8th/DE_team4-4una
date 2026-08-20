@@ -1,7 +1,7 @@
 """hourly_pipeline DAG의 구조를 docker 없이 검증하는 테스트.
 
 실제 task 실행(batch-jobs 컨테이너 기동)은 로컬 Airflow에서 수동으로 확인하고,
-여기서는 DAG가 정상 파싱되는지와 sensor_processing/scoring/publish TaskGroup의
+여기서는 DAG가 정상 파싱되는지와 각 TaskGroup의
 골격이 의도대로 구성됐는지만 확인한다.
 """
 
@@ -137,25 +137,6 @@ def test_run_scoring_invokes_score_hourly_comfort_with_templated_run_id():
     assert "--run-id={{ run_id }}" in run_scoring.bash_command
 
 
-def test_publish_task_group_contains_only_run_publish():
-    module = _load_dag_module()
-
-    task_ids = {task.task_id for task in module.dag.tasks}
-    assert "publish.run_publish" in task_ids
-
-
-def test_run_publish_invokes_load_segment_comfort_score_with_templated_as_of():
-    module = _load_dag_module()
-
-    run_publish = module.dag.get_task("publish.run_publish")
-    command = run_publish.bash_command
-    assert "load-segment-comfort-score" in command
-    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
-    assert "SEGMENT_COMFORT_SCORE_DATA_LAKE_URI" in command
-    assert "POSTGRES_HOST" in command
-    assert "POSTGRES_PASSWORD" in command
-
-
 def test_dag_contains_expected_pipeline_tasks_so_far():
     module = _load_dag_module()
 
@@ -164,7 +145,6 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "sensor_processing.run_sensor_processing",
         "sensor_processing.validate_sensor_processing",
         "scoring.run_scoring",
-        "publish.run_publish",
         "standard_score.run_standard_score",
         "current_score.run_current_score",
     }
@@ -180,7 +160,6 @@ def test_task_groups_follow_hourly_pipeline_order():
         "sensor_processing.validate_sensor_processing"
     )
     run_scoring = module.dag.get_task("scoring.run_scoring")
-    run_publish = module.dag.get_task("publish.run_publish")
 
     assert run_sensor_processing.downstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
@@ -192,13 +171,11 @@ def test_task_groups_follow_hourly_pipeline_order():
     assert run_scoring.upstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
     }
-    assert run_scoring.downstream_task_ids == {"publish.run_publish"}
-    assert run_publish.upstream_task_ids == {"scoring.run_scoring"}
-
     run_standard_score = module.dag.get_task("standard_score.run_standard_score")
     run_current_score = module.dag.get_task("current_score.run_current_score")
 
-    assert run_publish.downstream_task_ids == {"standard_score.run_standard_score"}
+    assert run_scoring.downstream_task_ids == {"standard_score.run_standard_score"}
+    assert run_standard_score.upstream_task_ids == {"scoring.run_scoring"}
     assert run_standard_score.downstream_task_ids == {"current_score.run_current_score"}
     assert run_current_score.downstream_task_ids == set()
 
@@ -210,10 +187,7 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
 
     assert "load-standard-segment-comfort-score" in command
     assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
-    # STANDARD_COMFORT_SCORE_* 가 비어 있으면 job이 SEGMENT_COMFORT_SCORE_* 로 폴백하므로
-    # 두 묶음을 모두 넘긴다.
     assert "STANDARD_COMFORT_SCORE_DATA_LAKE_URI" in command
-    assert "SEGMENT_COMFORT_SCORE_DATA_LAKE_URI" in command
     assert "POSTGRES_PASSWORD" in command
 
 

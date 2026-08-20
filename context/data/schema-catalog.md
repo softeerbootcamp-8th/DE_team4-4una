@@ -27,7 +27,6 @@ design and must not be invented silently.
 | `PROCESSED_SENSOR_EVENT_SCHEMA` | — | Execution-local T1→T2 DataFrame | One accepted cleansed Bronze `sensor_event` row |
 | `hourly_segment_features` | `hourly_segment_features` | Silver | One hour x segment x vehicle profile feature row |
 | `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
-| `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period — **superseded**, see below |
 | `standard_segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x standard scoring hour |
 | `latest_zone_weather` | TBD | Silver/Serving (PostgreSQL) | One TLC taxi zone's latest weather observation |
 | `zone_weather_snapshot` | `zone_weather_snapshot` | Bronze (local Parquet, `data/local-lake`) | One TLC taxi zone x 15-minute weather observation |
@@ -388,58 +387,14 @@ the Gold layer, as `segment_comfort_score.comfort_score`.
 | Run ID | `_run_id` | STRING | N |  | Spark/Airflow ETL run identifier |
 | Processed time | `_processed_at` | TIMESTAMP | N |  | Processing completion time |
 
-## `segment_comfort_score`
+## `segment_comfort_score` (removed)
 
-**Status:** superseded by `standard_segment_comfort_score`,
-`latest_zone_weather`, and `current_segment_comfort_score` below (issue
-#193). Its Gold writer is unchanged, but nothing reads it any more — the serving API
-moved to `current_segment_comfort_score` in issue #226. Removing the table is
-the remaining step — see "Migration order" in
-`context/comfort-score.md`. Removing this table is the last migration step,
-not part of #193.
-
-The physical table name is not yet confirmed. **Layer:** Gold. **Storage:**
-PostgreSQL.
-
-**Grain:** one LION segment x vehicle profile x score period, rolled up from
-`hourly_comfort_score`.
-
-**Primary key:** the supplied design marks only `(segment_id,
-vehicle_profile_id)` as key columns. Despite the per-period grain, neither
-`data_period_start`/`data_period_end` nor `reference_date` is marked as part of
-the key — this is an **open question**; do not assume a period-based key
-without confirmation.
-
-| Attribute | Column | Type | Nullable | Key | Description |
-| --- | --- | --- | --- | --- | --- |
-| Road segment | `segment_id` | STRING | N | PK, FK | Canonical LION segment |
-| Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile` |
-| Data-period start | `data_period_start` | TIMESTAMP | N |  | Start of the driving-data period used for the score, rolled up (MIN) from `hourly_comfort_score.data_period_start` over the qualifying hours |
-| Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the driving-data period used for the score, rolled up (MAX) from `hourly_comfort_score.data_period_end` over the qualifying hours |
-| Reference date | `reference_date` | DATE | N | FK | `enriched_segment_reference` version used |
-| Comfort score | `comfort_score` | DOUBLE | N |  | Final score from 0 through 100 |
-| Sensor sample count | `sample_count` | BIGINT | N |  | Sensor events used by the score |
-| Confidence score | `confidence_score` | DOUBLE | N |  | Coverage and data-quality confidence |
-| Score version | `score_version` | STRING | N |  | Comfort formula version |
-| Calculated time | `calculated_at` | TIMESTAMP | N |  | Gold calculation time |
-| Speed band | TBD | TBD | TBD |  | Which speed band the row belongs to; column name and type not yet supplied |
-
-### Column calculation mapping
-
-Per issue #102; the full formula is defined in `context/comfort-score.md`.
-
-| Column | Computed from |
-| --- | --- |
-| `segment_id` | Passed through from `hourly_comfort_score.segment_id` |
-| `vehicle_profile_id` | Passed through from `hourly_comfort_score.vehicle_profile_id`. The vehicle-agnostic (all-profile) score is represented in this same column as a sentinel `vehicle_profile_id = 0` row (OQ-038, accepted 2026-08-16 — see `context/comfort-score.md`) |
-| `data_period_start` / `data_period_end` | `MIN(hourly_comfort_score.data_period_start)` / `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}` (#163). For a `(segment_id, vehicle_profile_id)` pair with zero qualifying hours (`N=0`, falls back to the population mean — comfort-score.md Step 4), there is no qualifying hour to roll up from; the Gold job (`comfort_score/gold_job.py::_fill_missing_periods`) fills that pair's bounds with the batch run's own window `[as_of - window_hours, as_of)` instead. Whether this pair joins the primary key is still the open question noted above |
-| `reference_date` | `enriched_segment_reference` version active during the scoring window |
-| `comfort_score` | `ComfortScore` in comfort-score.md (the shrinkage-adjusted mean), or its vehicle-agnostic variant |
-| `sample_count` | Sum of `hourly_comfort_score.sample_count` (raw sensor events, matching the Silver-level definition) over the qualifying hours in `H_{s,p}` (comfort-score.md Step 2) — **not** the hour count `N`. `N` is not stored as its own column; it is recoverable from `confidence_score` and the fixed `k` (`N = k * Confidence / (1 - Confidence)`). The traffic count used for the `T_min` filter (`T_h`) is a separate concept, sourced from `hourly_segment_features.trip_count`; whether the Gold job joins that table or `hourly_comfort_score` grows its own traffic-count column is **open** — see OQ-039 |
-| `confidence_score` | `Confidence = N / (N + k)` (comfort-score.md Step 5) |
-| `score_version` | Matches the `SCORE_VERSION` constant of the formula implementation (`comfort_score/formula.py`, added in a follow-up sub-issue) |
-| `calculated_at` | Gold job completion timestamp |
-| Speed band (TBD) | Out of scope for issue #102 |
+**Status:** removed in issue #227 (migration `0010`). It was the single Gold
+table before issue #193 split it into `standard_segment_comfort_score`,
+`latest_zone_weather`, and `current_segment_comfort_score`. Its writer
+(`gold_job`/`gold_writer`) and the `load-segment-comfort-score` command are
+gone as well. Kept here as a pointer only — historical column definitions are
+in the git history of this file.
 
 ## `standard_segment_comfort_score`
 

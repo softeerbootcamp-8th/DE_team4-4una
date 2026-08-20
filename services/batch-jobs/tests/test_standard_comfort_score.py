@@ -1,8 +1,7 @@
 """Tests for directional standard comfort scores (#198).
 
-기존 segment_comfort_score 경로의 테스트는 test_segment_comfort_score.py에 그대로 둔다 —
-여기서는 방향별 점수 산출과 universe materialization만 다룬다. 적재 경로(migration,
-writer, job, CLI)와 그 테스트는 후속 PR의 범위다.
+방향별 점수 산출과 universe materialization을 다룬다. 구 segment_comfort_score
+경로는 #227에서 제거했다.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import pytest
 from batch_jobs.comfort_score.config import ComfortScoreConfig
 from batch_jobs.comfort_score.formula import (
     VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID,
-    compute_segment_comfort_scores,
     compute_standard_comfort_scores,
 )
 from batch_jobs.comfort_score.universe import resolve_segment_artifact_uri
@@ -138,17 +136,22 @@ class TestDirectionalScores:
         for row in result.collect():
             assert row.comfort_score == pytest.approx(weighted_sum(row), abs=1e-5)
 
-    def test_comfort_score_matches_the_existing_gold_path(self, spark):
-        """방향별 산출로 바꿔도 기존 segment_comfort_score 값이 달라지지 않는다."""
+    def test_comfort_score_follows_the_documented_steps(self, spark):
+        """comfort-score.md Step 1~5를 손으로 계산한 값과 일치한다.
+
+        구 segment_comfort_score 경로와 값을 비교하던 테스트였다(#227에서 그 경로를
+        제거). 공식에서 직접 계산한 기대값으로 바꿔, 산출식이 바뀌면 여기서 깨지도록
+        회귀 보증을 유지한다.
+        """
         rows = (
             hour(segment_id="seg-x", vertical_score=90.0, longitudinal_score=20.0,
                  lateral_score=70.0, sample_count=10),
             hour(segment_id="seg-y", vertical_score=10.0, longitudinal_score=80.0,
                  lateral_score=30.0, sample_count=20),
-            # T_min 미달 — 양쪽 경로 모두에서 제외돼야 한다.
+            # T_min 미달 — 집계에서 제외돼야 한다.
             hour(segment_id="seg-y", vertical_score=99.0, trip_count=1, sample_count=99),
         )
-        legacy = rows_by_key(compute_segment_comfort_scores(hourly_df(spark, *rows), TEST_CONFIG))
+
         standard = rows_by_key(
             compute_standard_comfort_scores(
                 hourly_df(spark, *rows),
@@ -157,14 +160,20 @@ class TestDirectionalScores:
             )
         )
 
-        for key, legacy_row in legacy.items():
-            assert standard[key].comfort_score == pytest.approx(
-                legacy_row.comfort_score, abs=1e-5
-            )
-            assert standard[key].confidence_score == pytest.approx(
-                legacy_row.confidence_score, abs=1e-5
-            )
-            assert standard[key].sample_count == legacy_row.sample_count
+        # Step 1: 방향 점수를 가중 결합
+        c_x = 0.6 * 90.0 + 0.3 * 20.0 + 0.1 * 70.0
+        c_y = 0.6 * 10.0 + 0.3 * 80.0 + 0.1 * 30.0
+        # Step 4: mu_p는 프로필 1의 qualifying hour 전체 평균, N=1, k=4
+        mu = (c_x + c_y) / 2
+        k = 4.0
+        for key, c_obs in (("seg-x", c_x), ("seg-y", c_y)):
+            row = standard[(key, 1)]
+            assert row.comfort_score == pytest.approx((c_obs + k * mu) / (1 + k), abs=1e-5)
+            # Step 5: Confidence = N / (N + k)
+            assert row.confidence_score == pytest.approx(1 / (1 + k), abs=1e-5)
+
+        # T_min 미달 행의 sample_count(99)는 합산되지 않는다
+        assert standard[("seg-y", 1)].sample_count == 20
 
     def test_vehicle_agnostic_row_also_carries_directional_scores(self, spark):
         df = hourly_df(

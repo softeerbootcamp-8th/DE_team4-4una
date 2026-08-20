@@ -10,8 +10,10 @@ from __future__ import annotations
 # batch_jobs.migrate가 마이그레이션 적용 중 동시 실행을 막는 데 쓴다.
 MIGRATION_LOCK_KEY = 1001
 
-# comfort_score.gold_writer가 staging 테이블 write~MERGE 구간을 보호하는 데 쓴다.
-GOLD_JOB_STAGING_LOCK_KEY = 1002
+# 구 comfort_score.gold_writer가 쓰던 키. 그 경로는 #227에서 제거됐다. 상수는
+# 지우지 않고 예약해 둔다 — 번호를 재사용하면 옛 실행이 남아 있는 환경에서 서로
+# 다른 자원이 같은 락을 두고 다투게 된다.
+_RETIRED_GOLD_JOB_STAGING_LOCK_KEY = 1002
 
 # comfort_score.standard_writer가 standard staging 테이블 write~MERGE 구간을
 # 보호하는 데 쓴다. Gold와 키를 나눠야 두 실행이 서로를 막지 않는다 (#198).
