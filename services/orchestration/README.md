@@ -131,14 +131,36 @@ UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection` task 하나가 �
 다시 빌드해 이 방식을 없애야 한다. `zone_master.parquet`은 `data/reference`를
 `airflow-scheduler`에 읽기 전용으로 마운트해서 읽는다.
 
-Open-Meteo 호출 실패나 일부 zone의 날씨 누락 시 `run_latest_zone_weather_job`이
-예외를 던져 task가 실패하고, `retries=2, retry_delay=2분`으로 Airflow가
-재시도한다(hourly_pipeline의 5분 간격은 15분 주기에 비해 너무 길어 줄였다).
+`jobs.weather.fetch_open_meteo`는 zone을 50개씩 batch로 나눠 요청하는데(#222),
+한 batch가 HTTP 오류나 zone 수 불일치로 실패해도 그 batch의 zone만 실패
+처리하고 나머지 batch는 계속 조회한다 — 일부 zone 실패는 task를 실패시키지
+않는다. 그 zone들은 `latest_zone_weather` UPSERT에서 빠져 기존 행을 그대로
+두고, `zone_weather_snapshot`에는 `fetch_status="failed"` 행으로만 남는다
+(아래 참고). 반대로 **요청한 zone 전체**가 실패하면(Open-Meteo가 통째로
+다운된 경우 등) `run_latest_zone_weather_job`이 snapshot을 남긴 뒤 예외를
+던져 task를 실패시키고, `retries=2, retry_delay=2분`으로 Airflow가 재시도한다
+(hourly_pipeline의 5분 간격은 15분 주기에 비해 너무 길어 줄였다).
 `latest_zone_weather`는 `location_id`만 갖고 UPSERT하므로, 순서가 뒤바뀐 실행이
 최신 값을 옛 값으로 덮어쓰지 않도록 SQL에 `weather_time` 역전 방지 조건을 걸고,
 DAG에도 `max_active_runs=1`을 둬 이전 실행이 끝나기 전에 다음 tick이 겹치지
 않게 한다(둘 다 걸어야 안전하다). `current_segment_comfort_score` 재계산은 이
 DAG의 범위 밖이다(후속 이슈).
+
+같은 실행에서 `jobs.weather.write_zone_weather_snapshot`이 `latest_zone_weather`
+UPSERT보다 먼저 `zone_weather_snapshot` Parquet 이력을 남긴다(#222). 경로는
+`ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`(비우면 `data/local-lake/bronze/zone_weather_snapshot`)
+아래 `weather_date=YYYY-MM-DD/weather_time=....parquet`로, `weather_time`이 파일
+키라 같은 tick을 재시도해도 파일을 덮어쓸 뿐 중복 snapshot이 생기지 않는다.
+지금은 로컬 경로만 지원한다 — S3 연동은 #222 범위 밖이라, 나중에 이 값을
+`s3://...`로 바꿀 때 `write_zone_weather_snapshot`의 내부 쓰기 방식만 바뀌고
+config/호출부는 그대로 둘 수 있게만 이름을 지어뒀다(de4-core는 batch-jobs
+이미지에만 설치돼 있어 이 lightweight 컨테이너에서는 못 쓴다).
+
+`zone_weather_snapshot`은 요청한 zone 전체를 매번 한 행씩 남긴다 — target_time
+데이터가 없던 zone도 측정값/`weather_state`/`impact_signature`는 NULL로,
+`fetch_status="failed"`(`error_reason`에 사유)로 기록된다. 성공/실패 여부를
+나중에 구분할 수 있는 곳은 이 테이블뿐이다 — `latest_zone_weather`는 실패한
+zone을 아예 건드리지 않으므로 흔적이 남지 않는다.
 
 ## 통합 테스트 (#189, #205)
 

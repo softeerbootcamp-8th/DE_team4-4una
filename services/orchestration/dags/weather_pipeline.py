@@ -33,6 +33,8 @@ def _collect_latest_zone_weather(data_interval_end) -> None:
         {
             "requested_zone_count": summary.requested_zone_count,
             "collected_count": summary.collected_count,
+            "failed_zone_count": summary.failed_zone_count,
+            "snapshot_uri": summary.snapshot_uri,
         }
     )
 

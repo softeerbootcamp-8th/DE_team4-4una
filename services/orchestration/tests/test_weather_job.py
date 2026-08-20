@@ -11,6 +11,7 @@ import psycopg2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -30,6 +31,7 @@ from jobs.weather import (
     fetch_open_meteo,
     load_zone_coordinates,
     run_latest_zone_weather_job,
+    write_zone_weather_snapshot,
 )
 
 RUN_INTEGRATION = os.environ.get("RUN_INTEGRATION") == "1"
@@ -69,6 +71,20 @@ class FakeSession:
     def get(self, url, params=None, timeout=None):
         self.calls.append({"url": url, "params": params, "timeout": timeout})
         return FakeResponse(self._payloads[len(self.calls) - 1])
+
+
+class SequencedSession:
+    # 호출 순서대로 payload를 돌려주되, Exception이 오면 그대로 raise한다(batch 실패 시뮬레이션용).
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    def get(self, url, params=None, timeout=None):
+        item = self._responses[self.calls]
+        self.calls += 1
+        if isinstance(item, Exception):
+            raise item
+        return FakeResponse(item)
 
 
 def reading(**overrides) -> dict:
@@ -207,10 +223,11 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings = fetch_open_meteo(zones, TARGET_TIME, session=session)
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session)
 
         assert readings[181]["rain"] == 0.5
         assert readings[182]["rain"] == 0.0
+        assert failures == {}
 
     def test_skips_a_zone_whose_response_has_no_matching_target_time(self):
         zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
@@ -223,9 +240,126 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings = fetch_open_meteo(zones, TARGET_TIME, session=session)
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session)
 
         assert set(readings) == {181}
+        assert failures == {182: "missing target_time in Open-Meteo response"}
+
+    def test_a_failed_batch_does_not_stop_other_batches(self):
+        zones = [
+            ZoneCoordinate(181, 40.7, -73.9),
+            ZoneCoordinate(182, 40.8, -74.0),
+            ZoneCoordinate(183, 40.9, -74.1),
+        ]
+        session = SequencedSession(
+            [
+                [location_payload([TARGET_KEY], rain=[1.0])],
+                requests.ConnectionError("boom"),
+                [location_payload([TARGET_KEY], rain=[2.0])],
+            ]
+        )
+
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+
+        assert set(readings) == {181, 183}
+        assert "boom" in failures[182]
+
+    def test_a_batch_with_a_mismatched_location_count_fails_only_that_batch(self):
+        zones = [
+            ZoneCoordinate(181, 40.7, -73.9),
+            ZoneCoordinate(182, 40.8, -74.0),
+            ZoneCoordinate(183, 40.9, -74.1),
+        ]
+        session = SequencedSession(
+            [
+                [location_payload([TARGET_KEY])],  # 2개 zone 요청인데 응답은 1개뿐
+                [location_payload([TARGET_KEY], rain=[3.0])],
+            ]
+        )
+
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=2)
+
+        assert set(readings) == {183}
+        assert 181 in failures
+        assert 182 in failures
+
+
+def snapshot_row(**overrides) -> dict:
+    values = {
+        "location_id": 181,
+        "weather_time": TARGET_TIME,
+        "latitude": 40.7,
+        "longitude": -73.9,
+        "temperature_2m_c": 20.0,
+        "precipitation_mm": 0.0,
+        "rain_mm": 0.0,
+        "snowfall_cm": 0.0,
+        "visibility_m": 10000.0,
+        "wind_speed_10m_mps": 3.0,
+        "wind_gusts_10m_mps": 5.0,
+        "weather_code": 0,
+        "weather_state": "dry",
+        "impact_signature": "1.0.0|clear",
+        "fetched_at": TARGET_TIME,
+        "fetch_status": "success",
+        "error_reason": None,
+    }
+    values.update(overrides)
+    return values
+
+
+class TestWriteZoneWeatherSnapshot:
+    def test_writes_one_parquet_file_keyed_by_weather_date_and_time(self, tmp_path):
+        root = tmp_path / "zone_weather_snapshot"
+
+        uri = write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()])
+
+        written = list(root.rglob("*.parquet"))
+        assert len(written) == 1
+        assert uri == str(written[0])
+        table = pq.read_table(written[0])
+        assert table.column("location_id").to_pylist() == [181]
+        assert table.column("rain_mm").to_pylist() == [0.0]
+        assert table.column("fetch_status").to_pylist() == ["success"]
+
+    def test_a_failed_zone_writes_null_measurements_with_fetch_status(self, tmp_path):
+        root = tmp_path / "zone_weather_snapshot"
+        failed_row = snapshot_row(
+            rain_mm=None,
+            weather_state=None,
+            impact_signature=None,
+            fetch_status="failed",
+            error_reason="missing target_time in Open-Meteo response",
+        )
+
+        write_zone_weather_snapshot(str(root), TARGET_TIME, [failed_row])
+
+        table = pq.read_table(next(iter(root.rglob("*.parquet"))))
+        assert table.column("rain_mm").to_pylist() == [None]
+        assert table.column("fetch_status").to_pylist() == ["failed"]
+        assert table.column("error_reason").to_pylist() == [
+            "missing target_time in Open-Meteo response"
+        ]
+
+    def test_rerunning_the_same_weather_time_overwrites_instead_of_duplicating(self, tmp_path):
+        root = tmp_path / "zone_weather_snapshot"
+
+        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row(rain_mm=0.0)])
+        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row(rain_mm=5.0)])
+
+        written = list(root.rglob("*.parquet"))
+        assert len(written) == 1
+        table = pq.read_table(written[0])
+        assert table.column("rain_mm").to_pylist() == [5.0]
+
+    def test_a_different_weather_time_writes_a_separate_file(self, tmp_path):
+        root = tmp_path / "zone_weather_snapshot"
+        later_target_time = TARGET_TIME + timedelta(minutes=15)
+
+        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()])
+        write_zone_weather_snapshot(str(root), later_target_time, [snapshot_row()])
+
+        assert len(list(root.rglob("*.parquet"))) == 2
 
 
 def _connect():
@@ -258,10 +392,11 @@ class TestWeatherJobIntegration:
         yield
 
     @staticmethod
-    def make_config(zone_master_path) -> LatestZoneWeatherJobConfig:
+    def make_config(zone_master_path, snapshot_uri) -> LatestZoneWeatherJobConfig:
         env = os.environ
         return LatestZoneWeatherJobConfig(
             zone_master_path=zone_master_path,
+            zone_weather_snapshot_uri=snapshot_uri,
             postgres_host=env["POSTGRES_HOST"],
             postgres_port=int(env["POSTGRES_PORT"]),
             postgres_db=env["POSTGRES_DB"],
@@ -271,7 +406,7 @@ class TestWeatherJobIntegration:
 
     def test_a_later_target_time_updates_the_same_row_instead_of_inserting(self, tmp_path):
         zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
-        config = self.make_config(zone_master_path)
+        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
         connection = _connect()
         try:
             session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
@@ -289,13 +424,16 @@ class TestWeatherJobIntegration:
                 )
                 rows = cursor.fetchall()
             assert rows == [(later_target_time, 5.0, "rain")]
+            # 서로 다른 weather_time이니 이력 Parquet는 2개 남아야 한다.
+            snapshot_files = list((tmp_path / "zone_weather_snapshot").rglob("*.parquet"))
+            assert len(snapshot_files) == 2
         finally:
             connection.close()
 
     def test_an_older_target_time_does_not_overwrite_a_newer_row(self, tmp_path):
         # 10:30이 먼저 끝나고 재시도 등으로 늦게 끝난 10:15가 그 뒤에 와도 10:30 값을 지키는지 확인.
         zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
-        config = self.make_config(zone_master_path)
+        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
         connection = _connect()
         try:
             newer_target_time = TARGET_TIME + timedelta(minutes=15)
@@ -316,8 +454,8 @@ class TestWeatherJobIntegration:
         finally:
             connection.close()
 
-    def test_a_missing_zone_fails_the_whole_run_and_writes_nothing(self, tmp_path):
-        zone_master_path = tmp_path / "zone_master.parquet"
+    @staticmethod
+    def write_two_zone_master(path) -> Path:
         table = pa.table(
             {
                 "location_id": [181, 182],
@@ -325,26 +463,101 @@ class TestWeatherJobIntegration:
                 "representative_longitude": [-73.9, -74.0],
             }
         )
-        pq.write_table(table, zone_master_path)
-        config = self.make_config(zone_master_path)
+        pq.write_table(table, path)
+        return path
+
+    def test_a_failed_zone_is_snapshotted_but_not_upserted(self, tmp_path):
+        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
+        snapshot_root = tmp_path / "zone_weather_snapshot"
+        config = self.make_config(zone_master_path, str(snapshot_root))
         connection = _connect()
         try:
             session = FakeSession(
                 [
                     [
-                        location_payload([TARGET_KEY]),
+                        location_payload([TARGET_KEY], rain=[1.2]),
                         location_payload(["2026-08-19T09:00"]),  # 182는 target_time 없음
                     ]
                 ]
             )
 
-            with pytest.raises(RuntimeError, match="182"):
+            summary = run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
+
+            assert summary.collected_count == 1
+            assert summary.failed_zone_count == 1
+
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT location_id, rain_mm FROM latest_zone_weather")
+                rows = cursor.fetchall()
+            assert rows == [(181, 1.2)]
+
+            table = pq.read_table(next(iter(snapshot_root.rglob("*.parquet"))))
+            by_zone = dict(zip(table.column("location_id").to_pylist(), range(2), strict=True))
+            statuses = table.column("fetch_status").to_pylist()
+            assert statuses[by_zone[181]] == "success"
+            assert statuses[by_zone[182]] == "failed"
+            assert table.column("rain_mm").to_pylist()[by_zone[182]] is None
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def test_a_zone_that_fails_this_run_keeps_its_previous_latest_row(self, tmp_path):
+        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
+        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
+        connection = _connect()
+        try:
+            session = FakeSession(
+                [[location_payload([TARGET_KEY], rain=[0.0]), location_payload([TARGET_KEY])]]
+            )
+            run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
+
+            later_target_time = TARGET_TIME + timedelta(minutes=15)
+            later_target_key = "2026-08-19T10:30"
+            session = FakeSession(
+                [
+                    [
+                        location_payload([later_target_key], rain=[5.0]),
+                        location_payload(["2026-08-19T09:00"]),  # 182는 이번에도 실패
+                    ]
+                ]
+            )
+            run_latest_zone_weather_job(config, later_target_time, connection, session=session)
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT location_id, weather_time FROM latest_zone_weather ORDER BY location_id"
+                )
+                rows = cursor.fetchall()
+            # 182는 두 실행 모두 실패했으니 첫 실행에서 남은 TARGET_TIME 행 그대로다.
+            assert rows == [(181, later_target_time), (182, TARGET_TIME)]
+        finally:
+            connection.close()
+
+    def test_all_zones_failing_raises_but_still_writes_the_snapshot(self, tmp_path):
+        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
+        snapshot_root = tmp_path / "zone_weather_snapshot"
+        config = self.make_config(zone_master_path, str(snapshot_root))
+        connection = _connect()
+        try:
+            session = FakeSession(
+                [
+                    [
+                        location_payload(["2026-08-19T09:00"]),
+                        location_payload(["2026-08-19T09:00"]),
+                    ]
+                ]
+            )
+
+            with pytest.raises(RuntimeError, match="all 2 zones failed"):
                 run_latest_zone_weather_job(config, TARGET_TIME, connection, session=session)
 
             with connection.cursor() as cursor:
                 cursor.execute("SELECT count(*) FROM latest_zone_weather")
                 (count,) = cursor.fetchone()
             assert count == 0
+
+            table = pq.read_table(next(iter(snapshot_root.rglob("*.parquet"))))
+            assert table.column("fetch_status").to_pylist() == ["failed", "failed"]
         finally:
             connection.rollback()
             connection.close()
