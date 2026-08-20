@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+# 루트 dev 그룹은 워크스페이스 전체를 대상으로 하는 실행(`make lint`, `make test`)에 쓴다.
+# CI는 패키지별로 나눠 돌기 때문에 각 워크스페이스 멤버도 자신의 dev 그룹을 따로 선언한다.
 [dependency-groups]
 dev = [
     "httpx2>=2.10.0",
