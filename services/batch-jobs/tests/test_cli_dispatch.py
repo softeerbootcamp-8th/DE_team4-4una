@@ -95,6 +95,25 @@ def test_main_returns_after_validate_sensor_processing_without_falling_through(
     assert len(calls) == 1
 
 
+def test_validate_hourly_scoring_command_accepts_path_override() -> None:
+    arguments = cli.build_parser().parse_args(
+        ["validate-hourly-scoring", "--output-path", "/scores"]
+    )
+
+    assert arguments.output_path == "/scores"
+
+
+def test_main_returns_after_validate_hourly_scoring_without_falling_through(
+    monkeypatch,
+) -> None:
+    calls: list[argparse.Namespace] = []
+    monkeypatch.setattr(cli, "run_hourly_scoring_validation_cli", calls.append)
+
+    cli.main(["validate-hourly-scoring"])
+
+    assert len(calls) == 1
+
+
 def test_main_returns_after_load_standard_segment_comfort_score_without_falling_through(
     monkeypatch,
 ) -> None:

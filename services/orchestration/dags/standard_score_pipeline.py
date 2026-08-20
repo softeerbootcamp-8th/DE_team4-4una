@@ -108,6 +108,21 @@ _VALIDATE_SENSOR_PROCESSING_BASH_COMMAND = (
     'sensor_event_quarantine}"'
 )
 
+# validate_hourly_scoring은 run_hourly_scoring이 방금 overwrite한 hourly_comfort_score
+# 전체(풀 리컴퓨트 결과)를 읽으므로(#249, ADR-0004), 같은 env var(HOURLY_COMFORT_OUTPUT_PATH)를
+# 재사용해 항상 같은 경로를 가리키게 한다. sensor_processing과 달리 hour 파티션이
+# 없어 --target-hour는 필요 없다.
+_VALIDATE_HOURLY_SCORING_BASH_COMMAND = (
+    "docker run --rm --network de4-local "
+    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
+    "/app/data/local-lake:ro "
+    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
+    "uv run --no-sync --package batch-jobs batch-jobs "
+    "validate-hourly-scoring "
+    '--output-path="${HOURLY_COMFORT_OUTPUT_PATH:-data/local-lake/silver/'
+    'hourly_comfort_score}"'
+)
+
 # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 PostgreSQL에 UPSERT한다.
 # local-lake는 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 쓰기 마운트가 필요 없다.
 # as_of는 `[as_of - window_hours, as_of)` 윈도우의 끝을 의미하므로, 방금 끝난 데이터
@@ -123,6 +138,7 @@ _RUN_STANDARD_SCORE_BASH_COMMAND = (
     "uv run --no-sync --package batch-jobs batch-jobs "
     "load-standard-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
 )
+
 
 
 with DAG(
@@ -160,6 +176,11 @@ with DAG(
             task_id="run_hourly_scoring",
             bash_command=_RUN_HOURLY_SCORING_BASH_COMMAND,
         )
+        validate_hourly_scoring = BashOperator(
+            task_id="validate_hourly_scoring",
+            bash_command=_VALIDATE_HOURLY_SCORING_BASH_COMMAND,
+        )
+        run_hourly_scoring >> validate_hourly_scoring
 
     with TaskGroup(group_id="standard_score") as standard_score:
         run_standard_score = BashOperator(
