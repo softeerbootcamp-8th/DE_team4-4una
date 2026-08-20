@@ -1,7 +1,11 @@
-"""Read `segment_comfort_score` rows from PostgreSQL (#160).
+"""Read comfort scores from PostgreSQL (#160, #226).
 
-ORM을 두지 않는다 — 저장소가 전반적으로 raw SQL을 쓰고, 조회가 두 개뿐이라
-매핑 계층을 얹을 이유가 없다.
+`current_segment_comfort_score`(날씨 반영)를 먼저 보고, 행이 없으면
+`standard_segment_comfort_score`(날씨 미보정)의 최신 행으로 대신 응답한다.
+current에 행이 없는 경우는 두 가지다 — 어느 taxi zone에도 속하지 않아 날씨를
+붙일 수 없는 구간, 그리고 아직 그 zone의 날씨를 한 번도 못 받은 경우.
+
+ORM을 두지 않는다 — 저장소가 전반적으로 raw SQL을 쓴다.
 
 커넥션은 호출자가 넘긴다. 풀에서 꺼내는 책임은 FastAPI 의존성에 있고, 이
 모듈은 넘겨받은 커넥션에 SQL을 실행해 응답 모델로 바꾸는 일만 한다.
@@ -16,27 +20,78 @@ import psycopg
 
 from serving_api.schemas import ComfortScore
 
-TABLE = "segment_comfort_score"
+CURRENT_TABLE = "current_segment_comfort_score"
+STANDARD_TABLE = "standard_segment_comfort_score"
 
-# 컬럼 목록을 여기 따로 적지 않고 응답 모델에서 가져온다. 두 곳에 적으면 컬럼을
-# 추가할 때 한쪽만 고치고 놓칠 수 있고, SELECT 순서와 모델 매핑이 어긋나면 값이
-# 조용히 뒤바뀐다. ComfortScore가 이 테이블 한 행과 1:1이라 성립하는 방식이며,
-# DB 컬럼이 아닌 응답 필드가 생기면 그 시점에 목록을 따로 두어야 한다.
-COLUMNS = tuple(ComfortScore.model_fields)
+CURRENT_SOURCE = "current"
+STANDARD_SOURCE = "standard"
 
-SINGLE_SQL = f"""
-SELECT {", ".join(COLUMNS)}
-FROM {TABLE}
+# 두 SELECT가 돌려주는 컬럼 순서. 응답 모델의 필드 순서와 같아야 하며, `source`는
+# DB 컬럼이 아니라 어느 테이블에서 왔는지를 나타내므로 여기 포함하지 않는다.
+ROW_FIELDS = (
+    "segment_id",
+    "vehicle_profile_id",
+    "comfort_score",
+    "vertical_score",
+    "longitudinal_score",
+    "lateral_score",
+    "confidence_score",
+    "sample_count",
+    "data_period_start",
+    "standard_score_as_of",
+    "standard_score_version",
+    "weather_time",
+    "weather_rule_version",
+    "calculated_at",
+)
+
+# 모델과 어긋난 채로 배포되면 SELECT 순서와 매핑이 조용히 뒤바뀌어 값이 섞인다.
+# 컬럼을 추가하고 한쪽만 고치는 실수를 import 시점에 잡는다.
+_expected = set(ROW_FIELDS) | {"source"}
+if _expected != set(ComfortScore.model_fields):
+    raise RuntimeError(
+        f"ROW_FIELDS is out of sync with ComfortScore: "
+        f"{_expected ^ set(ComfortScore.model_fields)}"
+    )
+
+_CURRENT_PROJECTION = ", ".join(ROW_FIELDS)
+
+# standard 테이블은 컬럼 이름이 조금 다르고 날씨 컬럼이 아예 없다. 두 쿼리의 행
+# 모양을 맞춰야 매핑을 하나로 유지할 수 있으므로 별칭과 NULL로 채운다.
+_STANDARD_PROJECTION = (
+    "segment_id, vehicle_profile_id, comfort_score, "
+    "vertical_score, longitudinal_score, lateral_score, "
+    "confidence_score, sample_count, data_period_start, "
+    "score_as_of AS standard_score_as_of, "
+    "score_version AS standard_score_version, "
+    "NULL::timestamptz AS weather_time, "
+    "NULL::text AS weather_rule_version, "
+    "calculated_at"
+)
+
+CURRENT_SINGLE_SQL = f"""
+SELECT {_CURRENT_PROJECTION}
+FROM {CURRENT_TABLE}
 WHERE segment_id = %s AND vehicle_profile_id = %s
 """
 
 # 구간 수가 늘어도 파라미터는 스칼라 1개 + 배열 1개로 고정된다. IN 목록을
 # 문자열로 조립하면 구간 수마다 다른 쿼리가 되어 실행 계획과 prepared statement를
 # 재사용할 수 없다.
-BATCH_SQL = f"""
-SELECT {", ".join(COLUMNS)}
-FROM {TABLE}
+CURRENT_BATCH_SQL = f"""
+SELECT {_CURRENT_PROJECTION}
+FROM {CURRENT_TABLE}
 WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
+"""
+
+# standard는 실행마다 행이 쌓이는 시계열이라 (구간, 프로필)별 최신 score_as_of
+# 하나만 골라야 한다. PK가 (segment_id, vehicle_profile_id, score_as_of)라
+# 이 ORDER BY는 인덱스를 그대로 탄다.
+STANDARD_BATCH_SQL = f"""
+SELECT DISTINCT ON (segment_id, vehicle_profile_id) {_STANDARD_PROJECTION}
+FROM {STANDARD_TABLE}
+WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
+ORDER BY segment_id, vehicle_profile_id, score_as_of DESC
 """
 
 
@@ -45,22 +100,39 @@ def fetch_one(
 ) -> ComfortScore | None:
     """행이 없으면 None을 돌려준다. 404 판단은 HTTP 계층의 몫이다."""
     with connection.cursor() as cursor:
-        cursor.execute(SINGLE_SQL, (segment_id, vehicle_profile_id))
+        cursor.execute(CURRENT_SINGLE_SQL, (segment_id, vehicle_profile_id))
         row = cursor.fetchone()
-    return _to_score(row) if row is not None else None
+        if row is not None:
+            return _to_score(row, CURRENT_SOURCE)
+
+        cursor.execute(STANDARD_BATCH_SQL, (vehicle_profile_id, [segment_id]))
+        row = cursor.fetchone()
+    return _to_score(row, STANDARD_SOURCE) if row is not None else None
 
 
 def fetch_many(
     connection: psycopg.Connection, vehicle_profile_id: int, segment_ids: Sequence[str]
 ) -> list[ComfortScore]:
-    """찾은 행만 돌려준다. 빠진 구간을 골라내는 것은 HTTP 계층의 몫이다."""
+    """찾은 행만 돌려준다. 빠진 구간을 골라내는 것은 HTTP 계층의 몫이다.
+
+    폴백이 필요한 구간만 두 번째 쿼리로 모아 조회하므로, 왕복은 항상 최대 2회다.
+    """
     if not segment_ids:
         return []
+
     with connection.cursor() as cursor:
-        cursor.execute(BATCH_SQL, (vehicle_profile_id, list(segment_ids)))
-        rows = cursor.fetchall()
-    return [_to_score(row) for row in rows]
+        cursor.execute(CURRENT_BATCH_SQL, (vehicle_profile_id, list(segment_ids)))
+        scores = [_to_score(row, CURRENT_SOURCE) for row in cursor.fetchall()]
+
+        found = {score.segment_id for score in scores}
+        missing = [
+            segment_id for segment_id in segment_ids if segment_id not in found
+        ]
+        if missing:
+            cursor.execute(STANDARD_BATCH_SQL, (vehicle_profile_id, missing))
+            scores.extend(_to_score(row, STANDARD_SOURCE) for row in cursor.fetchall())
+    return scores
 
 
-def _to_score(row: Iterable[Any]) -> ComfortScore:
-    return ComfortScore(**dict(zip(COLUMNS, row, strict=True)))
+def _to_score(row: Iterable[Any], source: str) -> ComfortScore:
+    return ComfortScore(**dict(zip(ROW_FIELDS, row, strict=True)), source=source)

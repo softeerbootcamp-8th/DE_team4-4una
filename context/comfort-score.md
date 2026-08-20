@@ -418,6 +418,14 @@ the new path is proven end to end:
 5. Wire both jobs into Airflow (hourly standard run, 15-minute weather run).
 6. Switch the FastAPI serving layer from `segment_comfort_score` to
    `current_segment_comfort_score` (with the standard-fallback rule above).
+   **Done** (issue #226): the repository reads `current_segment_comfort_score`
+   and falls back to the latest `standard_segment_comfort_score` row when the
+   segment has none — either because it belongs to no taxi zone, or because its
+   zone has no weather observation yet. The response carries `source`
+   (`current` / `standard`) so a client can tell whether weather was applied;
+   `weather_time` and `weather_rule_version` are null on the fallback path.
+   The staleness-based fallback (serving standard when the zone's weather is
+   older than a freshness threshold) is still open — see "Open items".
 7. Remove `segment_comfort_score` and its Gold writer.
 
 Steps 2-7 are each their own follow-up issue and are out of scope for #193.

@@ -392,8 +392,9 @@ the Gold layer, as `segment_comfort_score.comfort_score`.
 
 **Status:** superseded by `standard_segment_comfort_score`,
 `latest_zone_weather`, and `current_segment_comfort_score` below (issue
-#193). This table and its existing Gold writer are unchanged and keep serving
-reads until the migration completes — see "Migration order" in
+#193). Its Gold writer is unchanged, but nothing reads it any more — the serving API
+moved to `current_segment_comfort_score` in issue #226. Removing the table is
+the remaining step — see "Migration order" in
 `context/comfort-score.md`. Removing this table is the last migration step,
 not part of #193.
 

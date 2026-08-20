@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from serving_api.app import create_app
 from serving_api.config import MAX_BATCH_ITEMS, ServingApiConfig
+from serving_api.repository import CURRENT_TABLE, STANDARD_TABLE
 
 CONFIG = ServingApiConfig.from_env(
     {
@@ -28,18 +29,23 @@ CONFIG = ServingApiConfig.from_env(
 FAILURE = psycopg.OperationalError("connection refused")
 
 
+PERIOD_START = datetime(2026, 8, 10, tzinfo=UTC)
+AS_OF = datetime(2026, 8, 17, tzinfo=UTC)
+
+
 def row(segment_id: str, comfort_score: float) -> tuple[object, ...]:
-    """repository.COLUMNS 순서의 한 행."""
+    """repository.ROW_FIELDS 순서의 current 행."""
     return (
-        segment_id,
-        0,
-        datetime(2026, 8, 10, tzinfo=UTC),
-        datetime(2026, 8, 17, tzinfo=UTC),
-        comfort_score,
-        1200,
-        0.94,
-        "1.0.0",
-        datetime(2026, 8, 17, tzinfo=UTC),
+        segment_id, 0, comfort_score, 90.0, 70.0, 80.0, 0.94, 1200,
+        PERIOD_START, AS_OF, "1.0.0", AS_OF, "1.0.0", AS_OF,
+    )
+
+
+def standard_row(segment_id: str, comfort_score: float) -> tuple[object, ...]:
+    """같은 순서의 standard 폴백 행 — 날씨 컬럼은 NULL이다."""
+    return (
+        segment_id, 0, comfort_score, 96.0, 97.0, 96.0, 0.17, 900,
+        PERIOD_START, AS_OF, "1.0.0", None, None, AS_OF,
     )
 
 
@@ -50,8 +56,12 @@ class FakeConnection:
     `/health`가 쓰는 `execute`만 있으면 충분하다.
     """
 
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
+    def __init__(
+        self, rows: list[tuple[object, ...]], standard_rows: list[tuple[object, ...]]
+    ) -> None:
+        self._current = rows
+        self._standard = standard_rows
+        self._rows: list[tuple[object, ...]] = []
 
     def cursor(self) -> Self:
         return self
@@ -63,7 +73,14 @@ class FakeConnection:
         return False
 
     def execute(self, sql: str, parameters: tuple[object, ...] | None = None) -> None:
-        return None
+        # 폴백 분기를 재현하려면 조회 대상 테이블에 따라 다른 행을 돌려줘야 한다.
+        if CURRENT_TABLE in sql:
+            self._rows = list(self._current)
+        elif STANDARD_TABLE in sql:
+            requested = set(parameters[1]) if parameters else set()
+            self._rows = [row for row in self._standard if row[0] in requested]
+        else:
+            self._rows = []
 
     def fetchone(self) -> tuple[object, ...] | None:
         return self._rows[0] if self._rows else None
@@ -75,8 +92,14 @@ class FakeConnection:
 class FakePool:
     """`open`/`close`/`connection`만 있으면 앱이 요구하는 계약을 만족한다."""
 
-    def __init__(self, rows: list[tuple[object, ...]], failure: Exception | None) -> None:
+    def __init__(
+        self,
+        rows: list[tuple[object, ...]],
+        failure: Exception | None,
+        standard_rows: list[tuple[object, ...]] | None = None,
+    ) -> None:
         self._rows = rows
+        self._standard_rows = standard_rows or []
         self._failure = failure
 
     def open(self) -> None:
@@ -89,13 +112,15 @@ class FakePool:
     def connection(self):
         if self._failure is not None:
             raise self._failure
-        yield FakeConnection(self._rows)
+        yield FakeConnection(self._rows, self._standard_rows)
 
 
 def build_client(
-    rows: list[tuple[object, ...]] | None = None, failure: Exception | None = None
+    rows: list[tuple[object, ...]] | None = None,
+    failure: Exception | None = None,
+    standard_rows: list[tuple[object, ...]] | None = None,
 ) -> TestClient:
-    pool = FakePool(rows or [], failure)
+    pool = FakePool(rows or [], failure, standard_rows)
     return TestClient(create_app(CONFIG, pool_factory=lambda config: pool))
 
 
@@ -108,14 +133,52 @@ def test_single_lookup_returns_every_response_field() -> None:
     assert response.json() == {
         "segment_id": "0032900",
         "vehicle_profile_id": 0,
-        "data_period_start": "2026-08-10T00:00:00Z",
-        "data_period_end": "2026-08-17T00:00:00Z",
         "comfort_score": 82.5,
-        "sample_count": 1200,
+        "vertical_score": 90.0,
+        "longitudinal_score": 70.0,
+        "lateral_score": 80.0,
         "confidence_score": 0.94,
-        "score_version": "1.0.0",
+        "sample_count": 1200,
+        "data_period_start": "2026-08-10T00:00:00Z",
+        "standard_score_as_of": "2026-08-17T00:00:00Z",
+        "standard_score_version": "1.0.0",
+        "weather_time": "2026-08-17T00:00:00Z",
+        "weather_rule_version": "1.0.0",
         "calculated_at": "2026-08-17T00:00:00Z",
+        "source": "current",
     }
+
+
+def test_single_lookup_falls_back_to_the_standard_score() -> None:
+    # zone이 없거나 아직 날씨를 못 받은 구간은 current에 행이 없다. 404 대신
+    # 날씨 미보정 점수를 주고, source로 그 사실을 알린다.
+    with build_client(standard_rows=[standard_row("0032900", 96.3)]) as client:
+        response = client.get("/api/v1/segments/0032900/comfort-scores/0")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["source"] == "standard"
+    assert body["comfort_score"] == 96.3
+    assert body["weather_time"] is None
+    assert body["weather_rule_version"] is None
+
+
+def test_batch_lookup_mixes_current_and_fallback_scores() -> None:
+    with build_client(
+        [row("0032900", 82.5)], standard_rows=[standard_row("0032901", 96.3)]
+    ) as client:
+        response = client.post(
+            "/api/v1/comfort-scores/batch",
+            json={"vehicle_profile_id": 0, "segment_ids": ["0032900", "0032901", "9999999"]},
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert [(s["segment_id"], s["source"]) for s in body["scores"]] == [
+        ("0032900", "current"),
+        ("0032901", "standard"),
+    ]
+    assert body["not_found_segment_ids"] == ["9999999"]
 
 
 def test_single_lookup_returns_404_when_the_row_is_missing() -> None:
