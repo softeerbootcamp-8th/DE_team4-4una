@@ -78,6 +78,8 @@ services:
       # 이 값이 없어도 DAG를 정상 파싱한다.
       PYTHONPATH: ${AIRFLOW_HOME}/orchestration
       ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
+      # weather_pipeline(#222)이 15분마다 zone_weather_snapshot Parquet 이력을 쓰는 경로.
+      ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
       # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다.
       CURRENT_SCORE_ROAD_SEGMENT_PATH: ${AIRFLOW_HOME}/data/processed/road_segment
       CURRENT_SCORE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
@@ -91,6 +93,8 @@ services:
       - ../../data/reference:${AIRFLOW_HOME}/data/reference:ro
       # current_score의 road_segment 읽기용(:ro). batch-jobs task가 docker로 마운트하는 것과 같은 경로다.
       - ../../data/processed:${AIRFLOW_HOME}/data/processed:ro
+      # zone_weather_snapshot Parquet을 쓰는 대상이라 다른 마운트와 달리 쓰기 가능해야 한다.
+      - ../../data/local-lake:${AIRFLOW_HOME}/data/local-lake
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-init:

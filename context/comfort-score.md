@@ -26,7 +26,9 @@ weather refresh:
   refreshed every 15 minutes, independent of any segment. Originally
   designed as a `zone_weather_snapshot` history table (one row per zone per
   15-minute tick); #209 changed it to one row per zone, UPSERTed in place,
-  since nothing downstream needed the history.
+  since nothing downstream needed the history. #222 persists that history
+  again, but as a Parquet lake artifact decoupled from serving, not a
+  PostgreSQL table — see `zone_weather_snapshot` in schema-catalog.md.
 - **`current_segment_comfort_score`** — the single current-state row per
   segment x vehicle profile, combining the latest standard snapshot with the
   latest applicable weather (see "Weather-adjusted current score" below).

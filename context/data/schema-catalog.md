@@ -30,6 +30,7 @@ design and must not be invented silently.
 | `segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x score period — **superseded**, see below |
 | `standard_segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x standard scoring hour |
 | `latest_zone_weather` | TBD | Silver/Serving (PostgreSQL) | One TLC taxi zone's latest weather observation |
+| `zone_weather_snapshot` | `zone_weather_snapshot` | Bronze (local Parquet, `data/local-lake`) | One TLC taxi zone x 15-minute weather observation |
 | `current_segment_comfort_score` | TBD | Gold/Serving (PostgreSQL) | One segment x vehicle profile's current state |
 | `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
 | `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
@@ -502,6 +503,46 @@ and the fixed `k` as `N = k * C / (1 - C)`, and `N = 0` is identifiable as
 the `T_min` filter) remains open and applies here exactly as it did to
 `segment_comfort_score`.
 
+## `zone_weather_snapshot`
+
+**Status:** proposed (issue #222). **Layer:** Bronze. **Storage:** local
+Parquet under `data/local-lake/bronze/zone_weather_snapshot`. S3 upload is
+explicitly out of scope for #222; the config is named as a data-lake URI
+so a later switch only changes the write implementation, not the config
+or call sites.
+
+**Grain:** one TLC taxi zone x 15-minute weather observation — the time
+series that `latest_zone_weather` stopped keeping in #209. Reintroduced as
+a decoupled lake artifact (not a PostgreSQL table) since nothing in the
+serving path reads it; it exists for history/audit only.
+
+**Primary key (concept, not DB-enforced):** `(location_id, weather_time)`.
+Physically this is one Parquet file per `weather_time` tick (all zones for
+that tick in one file), keyed by path:
+`weather_date=YYYY-MM-DD/weather_time=YYYY-MM-DDTHH-MM-SSZ.parquet`
+(`jobs.weather.write_zone_weather_snapshot`). A re-run for a `weather_time`
+that was already written overwrites that same file, so retries do not
+produce duplicate snapshots.
+
+**Storage policy:** append (a new file per `weather_time`); never mutated
+after being written except by an overwrite for the same `weather_time`.
+Written from the same in-memory rows as the `latest_zone_weather` UPSERT
+in the same job run — history is written first, then `latest_zone_weather`
+is UPSERTed, so a snapshot-write failure blocks the latest-row update too
+(both are retried together, idempotently, by Airflow).
+
+Every requested zone gets a row **every run**, including zones Open-Meteo
+had no matching `weather_time` for — those get `NULL` measurement/state/
+signature columns and `fetch_status = 'failed'`. This is the one place a
+failed zone leaves a trace; `latest_zone_weather` simply skips it and
+keeps its old row (see below), so without this table a failed fetch would
+be invisible. Two columns beyond `latest_zone_weather`'s set:
+
+| Attribute | Column | Type | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| Fetch status | `fetch_status` | STRING | N | `success` or `failed` for this zone this run |
+| Error reason | `error_reason` | STRING | Y | Set only when `fetch_status = 'failed'`: "missing target_time in Open-Meteo response" (this zone's batch succeeded but had no matching timestamp) or "Open-Meteo request failed: ..." (the whole batch this zone was in failed — HTTP error or a location-count mismatch) |
+
 ## `latest_zone_weather`
 
 **Status:** proposed (issue #193); storage model changed from a
@@ -513,7 +554,9 @@ series. The original design (`zone_weather_snapshot`, migration 0006) kept
 one row per zone per 15-minute tick forever; #209 renamed the table and
 collapsed it to one row per zone, since nothing downstream reads the
 history and it makes "did this zone's weather change" a single UPSERT
-instead of a query over the previous row.
+instead of a query over the previous row. #222 reintroduced the history as
+a separate Parquet artifact (see `zone_weather_snapshot` above) — this
+table itself still keeps no history.
 
 **Primary key:** `location_id`. Named to match `taxi_zone_lookup.location_id`
 / `zone_master.location_id` / `road_segment.location_id` (OQ-029:
@@ -528,6 +571,24 @@ collection run overwrites each zone's single row with the latest Open-Meteo
 observation (migration 0007). There is no history table; anything that needs
 "did the weather change" must read this row's existing `impact_signature`
 **before** the UPSERT overwrites it.
+
+A zone Open-Meteo had no data for this run is **not** UPSERTed at all (#222)
+— its existing row (if any) is left exactly as it was, still holding
+whatever `weather_time`/`impact_signature` it last successfully collected.
+Because the row is untouched, the change-detection comparison in
+`current_score.py` naturally treats an unchanged-because-failed zone the
+same as an unchanged-because-the-weather-didn't-move zone — no recompute
+is triggered for it either way, which is the correct outcome.
+
+A **partial** miss (some zones failed, at least one succeeded) does not
+fail the Airflow task — only `zone_weather_snapshot` records which zones
+failed this run (`fetch_status`). A batch-level Open-Meteo request failure
+(HTTP error, or a response whose location count doesn't match the request)
+is caught per batch in `jobs.weather.fetch_open_meteo`, so one bad batch
+does not stop the other batches from being collected. If **every** zone
+fails, the task raises after writing the snapshot — `latest_zone_weather`
+is still untouched, but Airflow retries, since a 0-for-N result usually
+means Open-Meteo itself is down rather than N unrelated per-zone misses.
 
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |

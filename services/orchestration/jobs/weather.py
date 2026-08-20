@@ -1,4 +1,5 @@
-# Open-Meteo 15분 날씨를 latest_zone_weather(존당 최신 1행)에 수집한다 (#199, #209, #207).
+# Open-Meteo 15분 날씨를 latest_zone_weather(존당 최신 1행)에 수집하고, 같은 관측을
+# zone_weather_snapshot Parquet에 이력으로도 남긴다 (#199, #209, #207, #222).
 # batch-jobs(EMR/Spark 전용)가 아니라 orchestration의 lightweight Python job으로 둔다 — Spark가 필요 없다.
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 from psycopg2.extras import execute_values
@@ -54,6 +56,7 @@ HTTP_RETRY_BACKOFF_FACTOR = 1.0
 HTTP_RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
 DEFAULT_ZONE_MASTER_PATH = Path("data/reference/tlc_zone/zone_master.parquet")
+DEFAULT_ZONE_WEATHER_SNAPSHOT_URI = "data/local-lake/bronze/zone_weather_snapshot"
 
 TABLE = "latest_zone_weather"
 
@@ -97,6 +100,32 @@ WHERE {TABLE}.weather_time <= EXCLUDED.weather_time
 """
 # WHERE 없으면 늦게 끝난 옛 target_time 실행(재시도 등)이 더 최신 행을 덮어쓸 수 있다.
 
+# zone_weather_snapshot은 latest_zone_weather와 달리 실패한 zone도 행으로 남긴다(fetch_status).
+_SNAPSHOT_ROW_COLUMNS = (*_ROW_COLUMNS, "fetch_status", "error_reason")
+
+# zone_weather_snapshot Parquet 컬럼 타입 — PK 개념은 (location_id, weather_time).
+_SNAPSHOT_SCHEMA = pa.schema(
+    [
+        ("location_id", pa.int64()),
+        ("weather_time", pa.timestamp("us", tz="UTC")),
+        ("latitude", pa.float64()),
+        ("longitude", pa.float64()),
+        ("temperature_2m_c", pa.float64()),
+        ("precipitation_mm", pa.float64()),
+        ("rain_mm", pa.float64()),
+        ("snowfall_cm", pa.float64()),
+        ("visibility_m", pa.float64()),
+        ("wind_speed_10m_mps", pa.float64()),
+        ("wind_gusts_10m_mps", pa.float64()),
+        ("weather_code", pa.int64()),
+        ("weather_state", pa.string()),
+        ("impact_signature", pa.string()),
+        ("fetched_at", pa.timestamp("us", tz="UTC")),
+        ("fetch_status", pa.string()),
+        ("error_reason", pa.string()),
+    ]
+)
+
 # 날씨 상태 분류 임계값/코드(우선값, 최종 확정은 후속 이슈) — WMO weather_code 우선, 실측값 보완.
 HIGH_WIND_GUST_THRESHOLD_MPS = 15.0
 LOW_VISIBILITY_THRESHOLD_M = 1000.0
@@ -115,6 +144,7 @@ class ZoneCoordinate:
 @dataclass(frozen=True, slots=True)
 class LatestZoneWeatherJobConfig:
     zone_master_path: Path
+    zone_weather_snapshot_uri: str
     postgres_host: str
     postgres_port: int
     postgres_db: str
@@ -127,6 +157,10 @@ class LatestZoneWeatherJobConfig:
         return cls(
             zone_master_path=Path(
                 source.get("ZONE_MASTER_PATH") or DEFAULT_ZONE_MASTER_PATH
+            ),
+            zone_weather_snapshot_uri=(
+                source.get("ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI")
+                or DEFAULT_ZONE_WEATHER_SNAPSHOT_URI
             ),
             postgres_host=_require(source, "POSTGRES_HOST"),
             postgres_port=int(_require(source, "POSTGRES_PORT")),
@@ -147,6 +181,8 @@ def _require(source: Mapping[str, str], key: str) -> str:
 class LatestZoneWeatherJobSummary:
     requested_zone_count: int
     collected_count: int
+    failed_zone_count: int
+    snapshot_uri: str
 
 
 # target_time을 UTC로 통일하고, tz 정보와 15분 경계(00/15/30/45)를 검증한다.
@@ -197,42 +233,58 @@ def load_zone_coordinates(zone_master_path: Path) -> list[ZoneCoordinate]:
     ]
 
 
+# Open-Meteo batch 요청이 실패해도 잡아서 그 zone들만 실패 처리하고 다른 batch는 계속 조회한다.
+_BATCH_REQUEST_ERRORS = (requests.RequestException, ValueError, KeyError)
+
+
 def fetch_open_meteo(
     zones: Sequence[ZoneCoordinate],
     target_time: datetime,
     *,
     session: requests.Session | None = None,
     batch_size: int = ZONE_BATCH_SIZE,
-) -> dict[int, dict[str, float | int | None]]:
-    # target_time 관측값을 zone별로 반환 — HTTP 실패는 재시도 후 예외, target_time 없는 zone만 skip.
+) -> tuple[dict[int, dict[str, float | int | None]], dict[int, str]]:
+    # target_time 관측값을 zone별로 반환. 실패한 zone은 readings에서 빠지고 failure_reasons에 이유가 남는다.
     session = session or _build_default_session()
     target_key = target_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")
     readings: dict[int, dict[str, float | int | None]] = {}
+    failure_reasons: dict[int, str] = {}
 
     for start in range(0, len(zones), batch_size):
         batch = zones[start : start + batch_size]
-        response = session.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude": ",".join(str(zone.latitude) for zone in batch),
-                "longitude": ",".join(str(zone.longitude) for zone in batch),
-                "minutely_15": ",".join(MINUTELY_15_VARIABLES),
-                "wind_speed_unit": "ms",
-                "precipitation_unit": "mm",
-                "timezone": "UTC",
-                "past_minutely_15": PAST_MINUTELY_15_STEPS,
-                "forecast_minutely_15": FORECAST_MINUTELY_15_STEPS,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        locations = payload if isinstance(payload, list) else [payload]
-        if len(locations) != len(batch):
-            raise ValueError(
-                f"Open-Meteo returned {len(locations)} locations for a "
-                f"{len(batch)}-zone request — cannot match by position"
+        try:
+            response = session.get(
+                OPEN_METEO_URL,
+                params={
+                    "latitude": ",".join(str(zone.latitude) for zone in batch),
+                    "longitude": ",".join(str(zone.longitude) for zone in batch),
+                    "minutely_15": ",".join(MINUTELY_15_VARIABLES),
+                    "wind_speed_unit": "ms",
+                    "precipitation_unit": "mm",
+                    "timezone": "UTC",
+                    "past_minutely_15": PAST_MINUTELY_15_STEPS,
+                    "forecast_minutely_15": FORECAST_MINUTELY_15_STEPS,
+                },
+                timeout=30,
             )
+            response.raise_for_status()
+            payload = response.json()
+            locations = payload if isinstance(payload, list) else [payload]
+            if len(locations) != len(batch):
+                raise ValueError(
+                    f"Open-Meteo returned {len(locations)} locations for a "
+                    f"{len(batch)}-zone request — cannot match by position"
+                )
+        except _BATCH_REQUEST_ERRORS as error:
+            # 이 batch가 통째로 실패해도 다른 batch는 계속 조회한다 — 이 zone들만 나중에 failed로 남는다.
+            logger.warning(
+                "Open-Meteo request failed for zones %s: %s",
+                [zone.location_id for zone in batch],
+                error,
+            )
+            for zone in batch:
+                failure_reasons[zone.location_id] = f"Open-Meteo request failed: {error}"
+            continue
 
         for zone, location in zip(batch, locations, strict=True):
             series = location["minutely_15"]
@@ -244,12 +296,13 @@ def fetch_open_meteo(
                     target_key,
                     zone.location_id,
                 )
+                failure_reasons[zone.location_id] = "missing target_time in Open-Meteo response"
                 continue
             readings[zone.location_id] = {
                 variable: series[variable][index] for variable in MINUTELY_15_VARIABLES
             }
 
-    return readings
+    return readings, failure_reasons
 
 
 # snow -> rain -> fog -> high_wind -> dry 우선순위로 분류한다(실측값 0이어도 weather_code로 잡음).
@@ -272,6 +325,29 @@ def classify_weather_state(reading: Mapping[str, float | int | None]) -> str:
     if (reading.get("wind_gusts_10m") or 0) >= HIGH_WIND_GUST_THRESHOLD_MPS:
         return "high_wind"
     return "dry"
+
+
+# weather_time을 키로 삼아 zone_weather_snapshot에 15분 관측 전체를 Parquet 1개로 남긴다.
+# 같은 weather_time으로 재실행되면 같은 키를 덮어써서 중복 snapshot이 생기지 않는다.
+# snapshot_root는 로컬 경로만 지원한다 — s3:// 전환은 후속 이슈(#222 범위 밖)이고,
+# 그때도 이 함수의 시그니처와 호출부는 그대로 두고 안쪽 쓰기 방식만 바뀔 것이다.
+def write_zone_weather_snapshot(
+    snapshot_root: str | Path,
+    target_time: datetime,
+    rows: Sequence[Mapping[str, object]],
+) -> str:
+    path = (
+        Path(snapshot_root)
+        / f"weather_date={target_time.strftime('%Y-%m-%d')}"
+        / f"weather_time={target_time.strftime('%Y-%m-%dT%H-%M-%SZ')}.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pylist(
+        [{column: row[column] for column in _SNAPSHOT_ROW_COLUMNS} for row in rows],
+        schema=_SNAPSHOT_SCHEMA,
+    )
+    pq.write_table(table, path)
+    return str(path)
 
 
 # latest_zone_weather에 UPSERT — location_id당 최신 관측 1행만 유지된다.
@@ -300,25 +376,36 @@ def run_latest_zone_weather_job(
     # zone마다 YAML을 다시 읽지 않도록 한 번만 로드해 돌려 쓴다.
     rule_config = rule_config if rule_config is not None else load_weather_rule_config()
     zones = load_zone_coordinates(config.zone_master_path)
-    zones_by_id = {zone.location_id: zone for zone in zones}
-    readings = fetch_open_meteo(zones, target_time, session=session)
-
-    # 일부 zone만 누락돼도 전체를 쓰지 않는다 — Airflow가 이 target_time을 통째로 재시도한다.
-    skipped_zone_ids = tuple(sorted(set(zones_by_id) - set(readings)))
-    if skipped_zone_ids:
-        raise RuntimeError(
-            f"missing target_time={target_time.isoformat()} for zones "
-            f"{skipped_zone_ids} — refusing to write a partial snapshot"
-        )
-
+    readings, failure_reasons = fetch_open_meteo(zones, target_time, session=session)
     fetched_at = datetime.now(UTC)
 
-    rows = [
-        {
-            "location_id": location_id,
+    def _row_for_zone(zone: ZoneCoordinate) -> dict[str, object]:
+        reading = readings.get(zone.location_id)
+        if reading is None:
+            return {
+                "location_id": zone.location_id,
+                "weather_time": target_time,
+                "latitude": zone.latitude,
+                "longitude": zone.longitude,
+                "temperature_2m_c": None,
+                "precipitation_mm": None,
+                "rain_mm": None,
+                "snowfall_cm": None,
+                "visibility_m": None,
+                "wind_speed_10m_mps": None,
+                "wind_gusts_10m_mps": None,
+                "weather_code": None,
+                "weather_state": None,
+                "impact_signature": None,
+                "fetched_at": fetched_at,
+                "fetch_status": "failed",
+                "error_reason": failure_reasons.get(zone.location_id, "unknown fetch failure"),
+            }
+        return {
+            "location_id": zone.location_id,
             "weather_time": target_time,
-            "latitude": zones_by_id[location_id].latitude,
-            "longitude": zones_by_id[location_id].longitude,
+            "latitude": zone.latitude,
+            "longitude": zone.longitude,
             "temperature_2m_c": reading["temperature_2m"],
             "precipitation_mm": reading["precipitation"],
             "rain_mm": reading["rain"],
@@ -332,12 +419,28 @@ def run_latest_zone_weather_job(
             "weather_state": classify_weather_state(reading),
             "impact_signature": build_impact_signature(reading, rule_config),
             "fetched_at": fetched_at,
+            "fetch_status": "success",
+            "error_reason": None,
         }
-        for location_id, reading in readings.items()
-    ]
 
-    collected_count = upsert_latest_zone_weather(connection, rows)
+    snapshot_rows = [_row_for_zone(zone) for zone in zones]
+    success_rows = [row for row in snapshot_rows if row["fetch_status"] == "success"]
+    failed_zone_count = len(snapshot_rows) - len(success_rows)
+
+    # 이력(Parquet)을 먼저 남기고 latest를 갱신한다 — 실패한 zone은 UPSERT 대상에서 빠져 기존
+    # latest_zone_weather 행이 그대로 남는다.
+    snapshot_uri = write_zone_weather_snapshot(
+        config.zone_weather_snapshot_uri, target_time, snapshot_rows
+    )
+    collected_count = upsert_latest_zone_weather(connection, success_rows)
+
+    # 전 zone 실패는 latest_zone_weather를 손대지 않았어도 task를 실패시켜 Airflow가 재시도하게 한다.
+    if zones and not success_rows:
+        raise RuntimeError(f"all {len(zones)} zones failed for target_time={target_time.isoformat()}")
+
     return LatestZoneWeatherJobSummary(
         requested_zone_count=len(zones),
         collected_count=collected_count,
+        failed_zone_count=failed_zone_count,
+        snapshot_uri=snapshot_uri,
     )
