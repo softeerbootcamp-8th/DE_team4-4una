@@ -19,6 +19,7 @@ from serving_api.schemas import (
     ComfortScore,
     ComfortScoreBatchRequest,
     ComfortScoreBatchResponse,
+    ComfortScoreResponse,
     RouteCandidate,
     RouteComfortScore,
     RouteEvaluationRequest,
@@ -56,28 +57,39 @@ def read_health(
 
 @comfort_score_router.get(
     "/segments/{segment_id}/comfort-scores/{vehicle_profile_id}",
-    response_model=ComfortScore,
+    response_model=ComfortScoreResponse,
     summary="구간 승차감 점수 단건 조회",
     description=(
-        "구간 하나의 최신 점수를 돌려준다\n\n— `current`에 행이 없으면 최신"
-        " `standard` 점수로 대신 응답하고, 어느 쪽인지는 `source`로 알린다."
+        "구간 하나의 최신 점수를 돌려준다.\n\n"
+        "`current`에 행이 없으면 최신 `standard` 점수로 대신 응답하고, 어느"
+        " 쪽인지는 `source`로 알린다.\n\n"
+        "요청한 차량 프로필이 활성이 아니면 차량 무관 프로필로 조회하고"
+        " `vehicle_profile_fallback`으로 알린다."
     ),
 )
 def read_comfort_score(
     segment_id: Annotated[str, Path(min_length=1, max_length=64)],
     vehicle_profile_id: Annotated[int, Path(ge=0)],
     connection: Annotated[psycopg.Connection, Depends(get_connection)],
-) -> ComfortScore:
-    score = repository.fetch_one(connection, segment_id, vehicle_profile_id)
+) -> ComfortScoreResponse:
+    effective_vehicle_profile_id = _resolve_vehicle_profile_id(
+        connection, vehicle_profile_id
+    )
+    score = repository.fetch_one(connection, segment_id, effective_vehicle_profile_id)
     if score is None:
         raise HTTPException(
             status_code=404,
             detail=(
                 f"no comfort score for segment_id={segment_id} "
-                f"vehicle_profile_id={vehicle_profile_id}"
+                f"vehicle_profile_id={effective_vehicle_profile_id}"
             ),
         )
-    return score
+    return ComfortScoreResponse(
+        **score.model_dump(),
+        requested_vehicle_profile_id=vehicle_profile_id,
+        effective_vehicle_profile_id=effective_vehicle_profile_id,
+        vehicle_profile_fallback=effective_vehicle_profile_id != vehicle_profile_id,
+    )
 
 
 @comfort_score_router.post(
@@ -85,19 +97,24 @@ def read_comfort_score(
     response_model=ComfortScoreBatchResponse,
     summary="구간 승차감 점수 일괄(다건) 조회",
     description=(
-        "여러 구간의 점수를 요청 순서 그대로 돌려준다 \n\n— 점수가 없는 구간은"
-        " 오류가 아니라 `not_found_segment_ids`로 따로 담는다."
+        "여러 구간의 점수를 요청 순서 그대로 돌려준다.\n\n"
+        "점수가 없는 구간은 오류가 아니라 `not_found_segment_ids`로 따로 담는다.\n\n"
+        "요청한 차량 프로필이 활성이 아니면 차량 무관 프로필로 조회하고"
+        " `vehicle_profile_fallback`으로 알린다."
     ),
 )
 def read_comfort_scores(
     request: ComfortScoreBatchRequest,
     connection: Annotated[psycopg.Connection, Depends(get_connection)],
 ) -> ComfortScoreBatchResponse:
+    effective_vehicle_profile_id = _resolve_vehicle_profile_id(
+        connection, request.vehicle_profile_id
+    )
     segment_ids = _unique_segment_ids(request.segment_ids)
     found = {
         score.segment_id: score
         for score in repository.fetch_many(
-            connection, request.vehicle_profile_id, segment_ids
+            connection, effective_vehicle_profile_id, segment_ids
         )
     }
 
@@ -112,7 +129,13 @@ def read_comfort_scores(
         else:
             scores.append(score)
     return ComfortScoreBatchResponse(
-        scores=scores, not_found_segment_ids=not_found_segment_ids
+        requested_vehicle_profile_id=request.vehicle_profile_id,
+        effective_vehicle_profile_id=effective_vehicle_profile_id,
+        vehicle_profile_fallback=(
+            effective_vehicle_profile_id != request.vehicle_profile_id
+        ),
+        scores=scores,
+        not_found_segment_ids=not_found_segment_ids,
     )
 
 

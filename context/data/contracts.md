@@ -167,9 +167,13 @@ Rules the implementation fixes:
   `vehicle_profile_fallback` so the caller cannot mistake an all-vehicle score
   for their own vehicle's. The substitution is also logged at WARNING, since a
   200 response would otherwise hide a caller sending a bad id repeatedly. The
-  sentinel itself is not looked up — migration `0003` guarantees the row. This
-  fallback applies only to route evaluation; the point and batch lookups still
-  read the requested profile and report a miss.
+  sentinel itself is not looked up — migration `0003` guarantees the row.
+
+  All three serving endpoints resolve the profile this way and report it with
+  the same three field names, so a caller does not check for a substitution
+  differently per endpoint. On the point lookup those fields sit alongside the
+  score's own `vehicle_profile_id`, which describes the returned row rather
+  than the request, and therefore always equals the effective profile.
 
 - Routes are returned sorted by `comfort_score` descending, and
   `recommended_route_id` is the first of them. There is no `rank` field — it

@@ -170,6 +170,9 @@ def test_single_lookup_returns_every_response_field() -> None:
         "weather_rule_version": "1.0.0",
         "calculated_at": "2026-08-17T00:00:00Z",
         "source": "current",
+        "requested_vehicle_profile_id": 0,
+        "effective_vehicle_profile_id": 0,
+        "vehicle_profile_fallback": False,
     }
 
 
@@ -479,20 +482,29 @@ def test_route_evaluation_does_not_look_up_the_sentinel_profile() -> None:
             ),
             id="batch-lookup",
         ),
+        pytest.param(
+            lambda client: client.post(
+                "/api/v1/routes/evaluate",
+                json={
+                    "vehicle_profile_id": 999,
+                    "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+                },
+            ),
+            id="route-evaluation",
+        ),
     ],
 )
-def test_the_other_endpoints_keep_their_vehicle_profile_policy(endpoint_call) -> None:
-    # 폴백은 /routes/evaluate에만 적용한다 (#272). 두 엔드포인트는 요청한
-    # 프로필로만 조회하므로 프로필이 잘못되면 점수를 못 찾은 것으로 나타난다.
-    with build_client(active_profile_ids={0}) as client:
+def test_every_endpoint_reports_the_fallback_the_same_way(endpoint_call) -> None:
+    # 같은 잘못된 프로필 id가 엔드포인트마다 다르게 취급되면 호출자가 엔드포인트별로
+    # 다른 방식으로 폴백을 확인해야 한다. 세 응답의 세 필드를 같게 맞춘다.
+    with build_client([row("1001", 80.0)], active_profile_ids={0}) as client:
         response = endpoint_call(client)
 
     body = response.json()
-    assert response.status_code in (200, 404)
-    if response.status_code == 200:
-        assert body["not_found_segment_ids"] == ["1001"]
-    else:
-        assert body["error"]["code"] == "not_found"
+    assert response.status_code == 200
+    assert body["requested_vehicle_profile_id"] == 999
+    assert body["effective_vehicle_profile_id"] == 0
+    assert body["vehicle_profile_fallback"] is True
 
 
 @pytest.mark.parametrize(

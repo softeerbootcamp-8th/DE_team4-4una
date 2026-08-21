@@ -42,6 +42,14 @@ class ComfortScore(BaseModel):
     source: Literal["current", "standard"]
 
 
+class ComfortScoreResponse(ComfortScore):
+    """단건 조회 응답 — 점수에 어떤 차량 프로필로 조회했는지를 함께 담는다."""
+
+    requested_vehicle_profile_id: int
+    effective_vehicle_profile_id: int
+    vehicle_profile_fallback: bool
+
+
 class ComfortScoreBatchRequest(BaseModel):
     """경로 조회는 차량 하나를 기준으로 하므로 프로필은 요청당 하나만 받는다."""
 
@@ -56,6 +64,9 @@ class ComfortScoreBatchResponse(BaseModel):
     구간은 애초에 점수가 계산된 적이 없다.
     """
 
+    requested_vehicle_profile_id: int
+    effective_vehicle_profile_id: int
+    vehicle_profile_fallback: bool
     scores: list[ComfortScore]
     not_found_segment_ids: list[str]
 
