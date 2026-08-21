@@ -161,3 +161,12 @@ class TestRunHourlyScoringValidation:
 
         with pytest.raises(HourlyScoringValidationFailed):
             run_hourly_scoring_validation(spark, config)
+
+    def test_raises_when_output_has_zero_rows(self, spark, tmp_path) -> None:
+        # 경로는 존재하지만 row가 0개면 zero_sample_rate가 0.0(정상 범위)으로 계산되어
+        # 검증이 vacuously 통과할 수 있었던 케이스(#252 리뷰).
+        config = self.config(tmp_path)
+        self.score_rows_df(spark, []).write.mode("overwrite").parquet(config.score_output_path)
+
+        with pytest.raises(HourlyScoringValidationFailed):
+            run_hourly_scoring_validation(spark, config)

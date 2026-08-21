@@ -134,6 +134,12 @@ def run_hourly_scoring_validation(
         )
 
     row_count = scores_df.count()
+    if row_count == 0:
+        # row_count=0이면 compute_zero_sample_rate가 0.0(=정상 범위)을 반환해 zero_sample_rate
+        # 검증이 vacuously 통과한다(standard_score_validation.py와 동일한 가드, 리뷰 반영: #252).
+        raise HourlyScoringValidationFailed(
+            f"hourly_comfort_score output at {config.score_output_path} has zero rows"
+        )
     zero_sample_count = scores_df.filter(F.col("sample_count") == 0).count()
     zero_sample_rate = compute_zero_sample_rate(zero_sample_count, row_count)
 
