@@ -15,6 +15,7 @@ from serving_api import repository, route_comfort
 from serving_api.config import RouteComfortConfig
 from serving_api.dependencies import get_connection, get_pool, get_route_comfort_config
 from serving_api.schemas import (
+    VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID,
     ComfortScore,
     ComfortScoreBatchRequest,
     ComfortScoreBatchResponse,
@@ -123,7 +124,9 @@ def read_comfort_scores(
     summary="후보 경로 승차감 평가",
     description=(
         "후보 경로 목록을 받아 경로별 승차감 점수를 매긴다 — 점수 내림차순으로"
-        " 정렬되며, 맨 앞 경로가 `recommended_route_id`다."
+        " 정렬되며, 맨 앞 경로가 `recommended_route_id`다. 요청한 차량 프로필이"
+        " 활성이 아니면 차량 무관 프로필로 계산하고"
+        " `vehicle_profile_fallback`으로 알린다."
     ),
 )
 def evaluate_routes(
@@ -131,6 +134,9 @@ def evaluate_routes(
     connection: Annotated[psycopg.Connection, Depends(get_connection)],
     config: Annotated[RouteComfortConfig, Depends(get_route_comfort_config)],
 ) -> RouteEvaluationResponse:
+    effective_vehicle_profile_id = _resolve_vehicle_profile_id(
+        connection, request.vehicle_profile_id
+    )
     segment_ids = _unique_segment_ids(
         [segment_id for route in request.routes for segment_id in route.segment_ids]
     )
@@ -139,7 +145,7 @@ def evaluate_routes(
     scores = {
         score.segment_id: score.comfort_score
         for score in repository.fetch_many(
-            connection, request.vehicle_profile_id, segment_ids
+            connection, effective_vehicle_profile_id, segment_ids
         )
     }
 
@@ -151,7 +157,7 @@ def evaluate_routes(
         raise HTTPException(
             status_code=404,
             detail=(
-                f"no comfort score for vehicle_profile_id={request.vehicle_profile_id} "
+                f"no comfort score for vehicle_profile_id={effective_vehicle_profile_id} "
                 f"segment_ids: {_summarize(missing)}"
             ),
         )
@@ -161,8 +167,37 @@ def evaluate_routes(
     # 안정적이라 요청에 실려 온 순서가 유지된다.
     evaluated.sort(key=lambda route: route.comfort_score, reverse=True)
     return RouteEvaluationResponse(
-        recommended_route_id=evaluated[0].route_id, routes=evaluated
+        requested_vehicle_profile_id=request.vehicle_profile_id,
+        effective_vehicle_profile_id=effective_vehicle_profile_id,
+        vehicle_profile_fallback=(
+            effective_vehicle_profile_id != request.vehicle_profile_id
+        ),
+        recommended_route_id=evaluated[0].route_id,
+        routes=evaluated,
     )
+
+
+def _resolve_vehicle_profile_id(connection: psycopg.Connection, requested: int) -> int:
+    """활성 프로필이 아니면 차량 무관 sentinel로 내려간다 (#272).
+
+    경로 비교는 프로필 하나가 잘못됐다고 통째로 실패시키는 것보다, 차량 구분
+    없는 점수로라도 순위를 내주는 편이 쓸모 있다. 대신 그 사실을 응답과 로그
+    양쪽에 남긴다.
+    """
+    if requested == VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID:
+        # sentinel 행은 마이그레이션이 보장하므로(0003) 확인 왕복이 필요 없다.
+        return requested
+    if repository.is_active_vehicle_profile(connection, requested):
+        return requested
+
+    # 잘못된 id가 계속 들어오는 상황은 200 응답만 보고는 드러나지 않는다.
+    logger.warning(
+        "requested vehicle_profile_id=%s is unavailable; "
+        "fallback to vehicle_profile_id=%s",
+        requested,
+        VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID,
+    )
+    return VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID
 
 
 def _evaluate(

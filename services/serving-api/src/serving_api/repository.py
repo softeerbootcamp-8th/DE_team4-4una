@@ -22,6 +22,7 @@ from serving_api.schemas import ComfortScore
 
 CURRENT_TABLE = "current_segment_comfort_score"
 STANDARD_TABLE = "standard_segment_comfort_score"
+VEHICLE_PROFILE_TABLE = "vehicle_profile"
 
 CURRENT_SOURCE = "current"
 STANDARD_SOURCE = "standard"
@@ -93,6 +94,31 @@ FROM {STANDARD_TABLE}
 WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
 ORDER BY segment_id, vehicle_profile_id, score_as_of DESC
 """
+
+# 점수 테이블이 이 테이블을 FK로 참조하므로 같은 DB에 있다. 프로필 목록을
+# 서빙 계층에 복사해 두지 않는 이유는, 이미 마이그레이션과 sensor-producer
+# 두 곳에 중복 정의되어 있어 세 번째 사본을 만들면 어긋날 곳만 늘기 때문이다.
+ACTIVE_VEHICLE_PROFILE_SQL = f"""
+SELECT EXISTS (
+    SELECT 1
+    FROM {VEHICLE_PROFILE_TABLE}
+    WHERE vehicle_profile_id = %s AND is_active = TRUE
+)
+"""
+
+
+def is_active_vehicle_profile(
+    connection: psycopg.Connection, vehicle_profile_id: int
+) -> bool:
+    """그 프로필이 `vehicle_profile`에 있고 활성인지 알려준다 (#272).
+
+    없는 프로필과 비활성 프로필을 구분하지 않는다 — 둘 다 그 프로필로는 점수를
+    낼 수 없다는 같은 결론이고, 호출자가 할 일도 같다.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(ACTIVE_VEHICLE_PROFILE_SQL, (vehicle_profile_id,))
+        row = cursor.fetchone()
+    return bool(row[0]) if row is not None else False
 
 
 def fetch_one(
