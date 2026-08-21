@@ -8,53 +8,60 @@
 ## 흐름
 
 ```
-main에 머지 → CI 통과 → 배포 워크플로 시작
+main에 머지 → CI 통과 → ci.yml이 배포 워크플로 호출
   → repository variables 확인
   → 이미지 빌드, ECR push (태그 = commit SHA)
-  → SSM으로 EC2에 배포 스크립트 전송
+  → SSH로 EC2에 배포 스크립트 전송
        인스턴스: pull → 컨테이너 교체 → /health 확인
                  실패하면 이전 이미지로 되돌리고 실패 처리
-  → job summary에 commit, image, instance, SSM command 기록
+  → job summary에 commit, image, host 기록
 ```
 
-배포는 다음 세 조건을 모두 만족할 때만 시작한다.
+배포는 독립 워크플로가 아니라 `ci.yml`이 `workflow_call`로 호출하는 reusable
+workflow다. `ci.yml`의 `ci-passed` 뒤에 붙어 있고, `push` 이벤트이면서 `main`
+브랜치일 때만 호출된다.
 
-| 조건 | 확인하는 것 |
-| --- | --- |
-| CI가 성공 | 검증되지 않은 코드가 나가지 않게 한다 |
-| 이벤트가 push | `main`을 대상으로 한 PR의 CI로는 배포되지 않게 한다 |
-| 브랜치가 main | 다른 브랜치의 CI로는 배포되지 않게 한다 |
+`workflow_run`으로 받지 않는 이유는 OIDC 때문이다. `workflow_run`으로 실행되는
+워크플로는 기본 브랜치 컨텍스트로 돌아서 `sub` 클레임이 `main`을 가리키지 않고,
+`main`으로 제한한 trust policy와 어긋난다. 호출 방식으로 두면 호출자의 `main` push
+컨텍스트를 그대로 물려받는다.
 
-배포 대상 커밋은 CI가 검증한 커밋(`workflow_run.head_sha`)이다. `github.sha`는 이
-워크플로에서 `main`의 최신 커밋을 가리키므로 쓰지 않는다.
+## GitHub 설정
 
-## repository variables
+`Settings > Secrets and variables > Actions`에서 등록한다. AWS 리소스와 EC2를 만든
+뒤에 채운다.
 
-**GitHub 저장소** 설정의 `Settings > Secrets and variables > Actions > Variables`에
-등록한다. 값은 AWS 리소스의 식별자이고 비밀값이 아니므로 Secrets가 아니라 Variables를
-쓴다. AWS 리소스를 만든 뒤에 채운다.
+### Variables — 필수
 
-### 필수
-
-하나라도 비어 있으면 워크플로 첫 스텝이 비어 있는 이름을 알려주고 중단한다.
+식별자이고 비밀값이 아니므로 Variables에 둔다. 하나라도 비어 있으면 워크플로 첫
+스텝이 비어 있는 이름을 알려주고 중단한다.
 
 | 변수 | 예시 |
 | --- | --- |
 | `AWS_REGION` | `ap-northeast-2` |
 | `AWS_DEPLOY_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-actions-deploy` |
 | `ECR_REPOSITORY` | `de4/serving-api` |
-| `EC2_INSTANCE_ID` | `i-0abc123def4567890` |
+| `EC2_HOST` | EC2의 퍼블릭 IP 또는 DNS |
 
 `ECR_REPOSITORY`에는 **리포지토리 이름만** 넣는다. 워크플로가
 `<레지스트리>/<이 값>:<커밋 SHA>`로 조립하고 레지스트리 주소는 ECR 로그인 스텝이
 알려주므로, 전체 URI를 넣으면 주소가 중복되어 push가 실패한다.
 
-### 선택
+### Secrets — 필수
+
+| 이름 | 내용 |
+| --- | --- |
+| `EC2_SSH_PRIVATE_KEY` | EC2 키페어의 개인키 전문 |
+
+`-----BEGIN`부터 `-----END` 줄까지 줄바꿈을 포함해 그대로 붙여넣는다.
+
+### Variables — 선택
 
 기본값이 있어 비워두어도 동작한다.
 
 | 변수 | 기본값 |
 | --- | --- |
+| `EC2_USER` | `ec2-user` (Amazon Linux 2023 기본 계정) |
 | `SERVING_API_CONTAINER_NAME` | `serving-api` |
 | `SERVING_API_PORT` | `8000` |
 | `SERVING_API_ENV_FILE` | `/etc/serving-api/serving-api.env` |
@@ -105,8 +112,7 @@ trust policy에 브랜치 조건을 반드시 넣는다. 이 조건이 없으면
 }
 ```
 
-배포 워크플로는 `workflow_run`으로 실행되어 기본 브랜치(`main`) 컨텍스트로 돌기
-때문에 `sub`가 위 값이 된다.
+배포는 `main` push로 실행되는 `ci.yml`에서 호출되므로 `sub`가 위 값이 된다.
 
 권한 policy:
 
@@ -131,36 +137,17 @@ trust policy에 브랜치 조건을 반드시 넣는다. 이 조건이 없으면
         "ecr:PutImage"
       ],
       "Resource": "arn:aws:ecr:<REGION>:<ACCOUNT_ID>:repository/<ECR_REPOSITORY>"
-    },
-    {
-      "Sid": "SsmSendCommand",
-      "Effect": "Allow",
-      "Action": "ssm:SendCommand",
-      "Resource": [
-        "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<EC2_INSTANCE_ID>",
-        "arn:aws:ssm:<REGION>::document/AWS-RunShellScript"
-      ]
-    },
-    {
-      "Sid": "SsmReadResult",
-      "Effect": "Allow",
-      "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
-      "Resource": "*"
     }
   ]
 }
 ```
 
-`ssm:SendCommand`는 인스턴스와 document를 **둘 다** 리소스로 요구한다. 하나만 적으면
-거부된다. `ssm:GetCommandInvocation`은 리소스 단위 제한을 지원하지 않아 `*`를 쓴다.
+EC2 접근은 SSH로 하므로 이 Role에 SSM이나 EC2 권한은 필요하지 않다.
 
 ### 3. EC2 인스턴스 프로파일
 
 러너의 배포 Role과 **다른 Role**이다. 인스턴스가 이미지를 직접 pull하므로 여기에도
 ECR 권한이 필요하다. 이걸 빼면 배포가 `docker pull`에서 실패한다.
-
-- 관리형 정책 `AmazonSSMManagedInstanceCore` — SSM Agent가 SSM과 통신한다
-- ECR 읽기 권한
 
 ```json
 {
@@ -225,24 +212,33 @@ ECR 권한이 필요하다. 이걸 빼면 배포가 `docker pull`에서 실패�
 | docker | 컨테이너 교체 | **설치 필요** (`dnf install docker`) |
 | AWS CLI | ECR 로그인 (`aws ecr get-login-password`) | 기본 포함 |
 | curl | `/health` 확인 | 기본 포함 |
-| SSM Agent | 워크플로가 보낸 스크립트 수신 | 기본 포함 |
 
 그 밖에:
 
 - **인스턴스 프로파일** 부착 (위 3번)
-- **아웃바운드 443** 허용. Agent가 AWS로 나간다. 인바운드는 열지 않아도 된다
+- **보안그룹 22번 인바운드** — 러너가 SSH로 접속한다. GitHub 러너 IP 범위는 넓고
+  자주 바뀌므로 범위를 좁히기 어렵다
+- **퍼블릭 IP 또는 DNS** — 러너가 직접 접속하므로 필요하다
 - **env 파일** — 아래 참고
 
-인스턴스가 SSM에 등록됐는지는 아래로 확인한다. 목록에 뜨면 정상이다.
+`EC2_USER`가 `sudo` 없이 docker를 쓸 수 있어야 한다. `dnf install docker` 직후에는
+`ec2-user`가 docker 그룹에 없다.
 
 ```bash
-aws ssm describe-instance-information
+sudo usermod -aG docker ec2-user
+```
+
+적용은 재접속 후다. 접속해서 아래가 에러 없이 돌면 준비된 상태다.
+
+```bash
+docker ps
+aws ecr get-login-password --region <REGION> > /dev/null && echo OK
 ```
 
 ## env 파일
 
-파이프라인은 비밀값을 다루지 않는다. DB 접속 정보는 이 파일에만 두고, 스크립트는
-경로만 컨테이너에 넘긴다. 사람이 인스턴스에 직접 만든다.
+파이프라인이 다루는 비밀값은 SSH 개인키 하나뿐이다. DB 접속 정보는 이 파일에만 두고,
+스크립트는 경로만 컨테이너에 넘긴다. 사람이 인스턴스에 직접 만든다.
 
 기본 경로는 `/etc/serving-api/serving-api.env`이고, 필요한 키는 다음과 같다. 값은
 저장소에 기록하지 않는다.
@@ -302,11 +298,13 @@ docker inspect --format \
 | `repository variables가 비어 있습니다` | 위 필수 variables 미설정 |
 | 자격증명 획득 실패 | OIDC provider 미등록, trust policy의 `sub` 불일치 |
 | `docker push` 실패 | 배포 Role의 ECR 권한, 또는 `ECR_REPOSITORY`에 전체 URI를 넣음 |
-| `InvalidInstanceId` | 인스턴스가 SSM에 등록되지 않음 (Agent, 인스턴스 프로파일, 아웃바운드 확인) |
+| SSH 연결 시간 초과 | 보안그룹 22번 인바운드 없음, 또는 퍼블릭 IP 없음 |
+| `Permission denied (publickey)` | `EC2_SSH_PRIVATE_KEY`가 키페어와 불일치, 또는 `EC2_USER` 틀림 |
+| `docker` 관련 `permission denied` | `EC2_USER`가 docker 그룹에 없음 |
 | `exec format error` (컨테이너 로그) | 이미지가 arm64로 빌드되지 않았다 |
 | `env 파일이 없습니다` | 인스턴스에 env 파일 미생성, 또는 `SERVING_API_ENV_FILE` 경로 불일치 |
 | `docker pull` 실패 | 인스턴스 프로파일의 ECR 권한 누락 |
 | health 실패 후 rollback | DB 접속 정보 오류가 흔하다. 함께 출력되는 컨테이너 로그를 본다 |
 
-SSM command ID는 job summary에 남으므로, 필요하면 AWS 콘솔의 Systems Manager >
-Run Command에서 같은 실행을 다시 확인할 수 있다.
+인스턴스를 재생성해 호스트 키가 바뀌어도 워크플로가 매번 `ssh-keyscan`으로 받으므로
+따로 손댈 것은 없다. 대신 `EC2_HOST`는 새 주소로 갱신해야 한다.
