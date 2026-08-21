@@ -900,17 +900,30 @@ def captured_upserts(monkeypatch):
         # confidence_score/sample_count는 클램프 없이 그대로 통과하므로, 여기서는
         # standard_segment_comfort_score의 CHECK 제약이 어떤 이유로든(마이그레이션
         # 변경, 직접 데이터 수정 등) 뚫렸다고 가정한 방어적 시나리오를 검증한다.
+        # 격리율 25% 서킷브레이커 임계값(DEFAULT_MAX_QUARANTINE_RATE) 아래로 유지하려면
+        # 정상 행이 3건 이상 필요하다 (1개 격리 / 4개 전체 = 25%는 초과가 아니라 통과).
         path = write_road_segment(
-            tmp_path, [("12345", SNAPSHOT_DATE, 76), ("99999", SNAPSHOT_DATE, 76)]
+            tmp_path,
+            [
+                ("11111", SNAPSHOT_DATE, 76),
+                ("22222", SNAPSHOT_DATE, 76),
+                ("33333", SNAPSHOT_DATE, 76),
+                ("99999", SNAPSHOT_DATE, 76),
+            ],
         )
+        good_rows = [
+            ("11111", 1, SCORE_AS_OF, None, 80.0, 70.0, 60.0, 900, 0.9, "1.0.0"),
+            ("22222", 1, SCORE_AS_OF, None, 80.0, 70.0, 60.0, 900, 0.9, "1.0.0"),
+            ("33333", 1, SCORE_AS_OF, None, 80.0, 70.0, 60.0, 900, 0.9, "1.0.0"),
+        ]
         bad_row = ("99999", 1, SCORE_AS_OF, None, 80.0, 70.0, 60.0, 900, 1.5, "1.0.0")
-        connection = FakeConnection(weather_rows=[], standard_rows=[STANDARD_ROW, bad_row])
+        connection = FakeConnection(weather_rows=[], standard_rows=[*good_rows, bad_row])
 
         summary = run_current_score_job(
             config_for(path), connection, changed_zones_only=False, rule_config=RULE_CONFIG
         )
 
-        assert summary.upserted_count == 1
+        assert summary.upserted_count == 3
         assert summary.quarantined_count == 1
         assert len(connection.quarantined) == 1
         assert connection.quarantined[0][0] == "99999"
