@@ -87,11 +87,12 @@ def test_sensor_processing_task_group_contains_the_combined_job_and_its_validati
     assert "sensor_processing.validate_sensor_processing" in task_ids
 
 
-def test_hourly_scoring_task_group_contains_only_run_hourly_scoring():
+def test_hourly_scoring_task_group_contains_the_scoring_job_and_its_validation():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert "hourly_scoring.run_hourly_scoring" in task_ids
+    assert "hourly_scoring.validate_hourly_scoring" in task_ids
 
 
 def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
@@ -147,6 +148,17 @@ def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id()
     assert "--run-id={{ run_id }}" in run_hourly_scoring.bash_command
 
 
+def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path():
+    module = _load_dag_module()
+
+    validate_hourly_scoring = module.dag.get_task("hourly_scoring.validate_hourly_scoring")
+    command = validate_hourly_scoring.bash_command
+    assert "validate-hourly-scoring" in command
+    # run_hourly_scoring과 같은 env var를 참조해야 같은 output을 가리킨다.
+    assert "--output-path=" in command
+    assert "HOURLY_COMFORT_OUTPUT_PATH" in command
+
+
 def test_dag_contains_expected_pipeline_tasks_so_far():
     module = _load_dag_module()
 
@@ -155,7 +167,9 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "sensor_processing.run_sensor_processing",
         "sensor_processing.validate_sensor_processing",
         "hourly_scoring.run_hourly_scoring",
+        "hourly_scoring.validate_hourly_scoring",
         "standard_score.run_standard_score",
+        "standard_score.validate_standard_score",
     }
 
 
@@ -176,6 +190,7 @@ def test_task_groups_follow_standard_score_pipeline_order():
         "sensor_processing.validate_sensor_processing"
     )
     run_hourly_scoring = module.dag.get_task("hourly_scoring.run_hourly_scoring")
+    validate_hourly_scoring = module.dag.get_task("hourly_scoring.validate_hourly_scoring")
     run_standard_score = module.dag.get_task("standard_score.run_standard_score")
 
     assert run_sensor_processing.downstream_task_ids == {
@@ -190,9 +205,26 @@ def test_task_groups_follow_standard_score_pipeline_order():
     assert run_hourly_scoring.upstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
     }
-    assert run_hourly_scoring.downstream_task_ids == {"standard_score.run_standard_score"}
-    assert run_standard_score.upstream_task_ids == {"hourly_scoring.run_hourly_scoring"}
-    assert run_standard_score.downstream_task_ids == set()
+    assert run_hourly_scoring.downstream_task_ids == {
+        "hourly_scoring.validate_hourly_scoring"
+    }
+    assert validate_hourly_scoring.upstream_task_ids == {
+        "hourly_scoring.run_hourly_scoring"
+    }
+    assert validate_hourly_scoring.downstream_task_ids == {
+        "standard_score.run_standard_score"
+    }
+    validate_standard_score = module.dag.get_task("standard_score.validate_standard_score")
+    assert run_standard_score.upstream_task_ids == {
+        "hourly_scoring.validate_hourly_scoring"
+    }
+    assert run_standard_score.downstream_task_ids == {
+        "standard_score.validate_standard_score"
+    }
+    assert validate_standard_score.upstream_task_ids == {
+        "standard_score.run_standard_score"
+    }
+    assert validate_standard_score.downstream_task_ids == set()
 
 
 def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
@@ -206,8 +238,26 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     assert "POSTGRES_PASSWORD" in command
 
 
-def test_run_standard_score_emits_standard_score_asset():
+def test_validate_standard_score_invokes_gx_validation_with_templated_as_of():
+    module = _load_dag_module()
+
+    command = module.dag.get_task("standard_score.validate_standard_score").bash_command
+
+    assert "validate-standard-score" in command
+    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
+    assert "POSTGRES_PASSWORD" in command
+
+
+def test_run_standard_score_does_not_emit_standard_score_asset():
     module = _load_dag_module()
 
     task = module.dag.get_task("standard_score.run_standard_score")
+    assert task.outlets == []
+
+
+def test_validate_standard_score_emits_standard_score_asset():
+    """검증을 통과한 데이터만 current_score_pipeline을 깨우도록 outlet을 옮긴다(#249)."""
+    module = _load_dag_module()
+
+    task = module.dag.get_task("standard_score.validate_standard_score")
     assert task.outlets == [STANDARD_SCORE_ASSET]

@@ -357,7 +357,7 @@ source = { editable = "services/batch-jobs" }
 dependencies = [
     { name = "de4-core" },
     { name = "duckdb" },
-    { name = "great-expectations", extra = ["spark"] },
+    { name = "great-expectations", extra = ["postgresql", "spark"] },
     { name = "numpy" },
     { name = "pandas" },
     { name = "psycopg2-binary" },
@@ -378,7 +378,7 @@ dev = [
 requires-dist = [
     { name = "de4-core", editable = "libs/de4-core" },
     { name = "duckdb", specifier = ">=1.4.3" },
-    { name = "great-expectations", extras = ["spark"], specifier = ">=1.21.0" },
+    { name = "great-expectations", extras = ["spark", "postgresql"], specifier = ">=1.21.0" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "psycopg2-binary", specifier = ">=2.9,<3.0" },
@@ -819,6 +819,10 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+postgresql = [
+    { name = "psycopg2-binary" },
+    { name = "sqlalchemy" },
+]
 spark = [
     { name = "pyspark" },
 ]
@@ -903,8 +907,8 @@ name = "httpcore2"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/83/a896fc59940fc5a6e2aff3a4be1d92fa890112936803b331cae75a993c34/httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc", size = 67427, upload-time = "2026-08-09T09:11:32.123Z" }
 wheels = [

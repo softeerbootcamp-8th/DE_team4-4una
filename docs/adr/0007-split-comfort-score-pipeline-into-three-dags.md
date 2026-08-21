@@ -30,7 +30,7 @@ Asset으로 두 producer가 그 DAG를 트리거하게 한다. 3개 DAG로 재�
 
 | DAG | 소유 테이블 | 스케줄 | 책임 |
 | --- | --- | --- | --- |
-| `standard_score_pipeline` (구 `hourly_pipeline`) | `standard_segment_comfort_score` | `0 * * * *` | sensor_processing → scoring → publish → standard_score. `standard_score` 태스크에 `outlets=[STANDARD_SCORE_ASSET]`. **current 쓰기 태스크 제거.** |
+| `standard_score_pipeline` (구 `hourly_pipeline`) | `standard_segment_comfort_score` | `0 * * * *` | sensor_processing → scoring → publish → standard_score. `standard_score` 태스크에 `outlets=[STANDARD_SCORE_ASSET]`(**#249에서 `validate_standard_score`로 이동 — 아래 결과 섹션 참고**). **current 쓰기 태스크 제거.** |
 | `zone_weather_pipeline` (구 `weather_pipeline`) | `latest_zone_weather` | `*/15 * * * *` | 날씨 수집 + 변경 zone 감지. `jobs/current_score.py`의 기존 `find_changed_zones()`를 재사용하는 ShortCircuitOperator로 게이팅하고, 변경 zone이 있을 때만 `outlets=[ZONE_WEATHER_ASSET]` 발행. **current 재계산 태스크 제거.** |
 | `current_score_pipeline` (신규) | `current_segment_comfort_score` | `schedule=AssetAny(STANDARD_SCORE_ASSET, ZONE_WEATHER_ASSET)`, `max_active_runs=1` | `current`의 유일한 writer. `context["triggering_asset_events"]`로 트리거한 Asset을 보고 `changed_zones_only`를 결정(STANDARD_SCORE → 전량, ZONE_WEATHER만 → 변경 zone만). `jobs/current_score.run_current_score_job`을 그대로 재사용 — job 코드 변경 없음. |
 
@@ -61,6 +61,15 @@ Asset으로 두 producer가 그 DAG를 트리거하게 한다. 3개 DAG로 재�
 확인해야 한다. 기존 `pg_advisory_lock`(`LOCK_KEY=1004`)은 정상 경로에서는
 불필요해지지만, 수동 트리거·백필 등 `max_active_runs=1`이 보장 못하는
 경우를 대비해 제거하지 않고 유지한다.
+
+## 수정 노트 (#249)
+
+`standard_score` TaskGroup에 GX in-flight 검증(`validate_standard_score`)이
+추가되면서(ADR-0004), `outlets=[STANDARD_SCORE_ASSET]`을 `run_standard_score`가
+아니라 `validate_standard_score`로 옮겼다 — 검증을 통과한 데이터만
+`current_score_pipeline`을 깨우게 해, 이 ADR이 없애려던 stale-overwrite류
+문제를 검증 실패 데이터로부터도 동일하게 방지한다. 표의 원래 기술은
+#249 이전 상태의 기록으로 남겨두고 여기 갱신한다.
 
 ## 번복 조건
 

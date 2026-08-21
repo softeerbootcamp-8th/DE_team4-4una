@@ -102,11 +102,47 @@ conservation invariant is reframed around those two:
 - A correction rebuilt for the same `(segment_id, reference_date)` updates
   `updated_at`. The source and ETL run must remain traceable.
 
+## Hourly comfort score quality (Silver3)
+
+`hourly_comfort_score` is the `run_hourly_scoring` output: a full recompute of
+every historical hour from `hourly_segment_features`, overwritten in place on
+each run (no hour partitioning, unlike `hourly_segment_features`). Validation
+therefore checks the current output in full rather than a single-hour slice.
+
+- **Directional score ranges**: `vertical_score`, `longitudinal_score`, and
+  `lateral_score` must fall between 0 and 100 inclusive. Implemented as a GX
+  Expectation Suite (`resources/expectations/hourly_comfort_score_suite.json`).
+- **`scoring_version` format**: must be SemVer (`MAJOR.MINOR.PATCH`), matching
+  `resources/hourly_comfort.yaml`'s documented constraint that
+  `comfort_score/loader.py::_select_latest_scoring_version` compares versions as
+  a dot-separated integer array. Same suite as above.
+- **Zero-sample rate**: the fraction of rows with `sample_count = 0` must stay
+  at or below 5% (provisional threshold, mirrors the `sensor_processing`
+  quarantine-rate precedent — revisit once a real distribution is observed).
+  Implemented as a GX Expectation on a one-row `zero_sample_rate` DataFrame
+  (`resources/expectations/hourly_comfort_score_zero_sample_rate_suite.json`).
+- All of the above run in `batch_jobs.hourly_scoring_validation` (issue #249,
+  ADR-0004), as the `validate_hourly_scoring` task right after
+  `run_hourly_scoring`. Schema and required-column invariants remain hard
+  invariants enforced by `HOURLY_COMFORT_SCORE_SCHEMA` at write time (ADR-0004:
+  hard invariants stay in code, not GX).
+
 ## Gold quality
 
-- Enforce `0 <= comfort_score <= 100`.
+- Enforce `0 <= comfort_score <= 100`. Implemented as a GX Expectation on
+  `comfort_score`, `vertical_score`, `longitudinal_score`, and
+  `lateral_score` (all 0–100), plus a `score_version` SemVer format check
+  (`resources/expectations/standard_segment_comfort_score_suite.json`), run by
+  `batch_jobs.standard_score_validation` (issue #249, ADR-0004) via
+  `SqlAlchemyExecutionEngine` against Postgres directly (ADR-0004: Gold is the
+  SqlAlchemy path, not Spark). Scoped to the current run's `score_as_of = as_of`
+  rows only (in-flight, not the full table) as the `validate_standard_score`
+  task right after `run_standard_score`.
 - Persist `score_version`, the exact driving-data period, the reference date,
   `sample_count`, and `confidence_score` with every result.
-- Component score ranges and confidence-score semantics need explicit contracts.
+- Component score ranges and confidence-score semantics need explicit contracts
+  beyond the 0–100 bound above.
 - A result that fails the accepted minimum coverage rule must not appear as an
-  ordinary high-confidence score.
+  ordinary high-confidence score. **Open**: the exact coverage rule (a
+  `confidence_score` or `sample_count` threshold) is not yet defined, so it is
+  not yet implemented as a GX Expectation.
