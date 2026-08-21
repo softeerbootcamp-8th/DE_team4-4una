@@ -145,7 +145,7 @@ def fetch_hvfhv_rows(
 
 def load_trips(path: Path) -> list[TripRecord]:
     values = json.loads(path.read_text())
-    return [
+    trips = [
         TripRecord(
             trip_id=item["trip_id"],
             request_datetime=parse_nyc_datetime(item["request_datetime"]),
@@ -157,6 +157,7 @@ def load_trips(path: Path) -> list[TripRecord]:
         )
         for item in values
     ]
+    return sorted(trips, key=lambda trip: (trip.request_datetime, trip.trip_id))
 
 
 def parse_nyc_datetime(value: str) -> datetime:
