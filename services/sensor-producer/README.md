@@ -113,6 +113,26 @@ the replay if its skipped-trip ratio is too high. The option is disabled by
 default. The producer still flushes published events and writes the run summary
 before enforcing the threshold.
 
+## S3 road environment
+
+On EC2, the producer can follow the monthly batch job's active environment pointer
+or pin one immutable manifest. Attach an instance role with read access to the
+pointer, manifest, and referenced artifacts; never put AWS keys in the image.
+
+```bash
+docker build -f services/sensor-producer/Dockerfile -t de4-sensor-producer .
+docker run --rm -v "$PWD/data/nyc-sensor:/data:ro" \
+  -e AWS_REGION=us-east-1 \
+  -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
+  -e SENSOR_ENVIRONMENT_POINTER_URI=s3://de4-lake/prepared/simulation_environment/active.json \
+  de4-sensor-producer run --trips-path /data/trips.json --publisher kafka
+```
+
+The producer verifies the manifest and both runtime Parquet checksums before routing,
+then caches them under `SENSOR_CACHE_DIR`. Use `--environment-manifest-uri` to pin a
+specific build. Reading the full TLC Parquet dataset from S3 is a separate step; this
+command still receives a bounded local `trips.json`.
+
 ## Timing and delivery contracts
 
 - Dispatch actions are ordered by `request_datetime`; route planning happens in

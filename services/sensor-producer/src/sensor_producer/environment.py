@@ -74,6 +74,68 @@ class RoadEnvironment:
         attach_speed_humps(segments, hump_path)
         return cls(segments, load_taxi_zones(taxi_zone_zip), snapshot_date)
 
+    @classmethod
+    def from_parquet(cls, road_path: Path, taxi_zone_path: Path) -> RoadEnvironment:
+        """Load the runtime artifacts published by ``batch-jobs``."""
+        road_rows = pq.read_table(road_path).to_pylist()
+        zone_rows = pq.read_table(taxi_zone_path).to_pylist()
+        if not zone_rows:
+            raise ValueError("taxi-zone parquet must contain at least one row")
+
+        snapshot_dates = {row["road_snapshot_date"] for row in road_rows}
+        if len(snapshot_dates) != 1:
+            raise ValueError(
+                "road-environment parquet must contain one road_snapshot_date"
+            )
+
+        segments = [road_segment_from_runtime_row(row) for row in road_rows]
+        if len({segment.segment_id for segment in segments}) != len(segments):
+            raise ValueError("road-environment parquet contains duplicate segment_id values")
+
+        zone_ids = [int(row["location_id"]) for row in zone_rows]
+        if len(set(zone_ids)) != len(zone_ids):
+            raise ValueError("taxi-zone parquet contains duplicate location_id values")
+        taxi_zones = {
+            location_id: shapely.from_wkt(str(row["geometry_wkt"]))
+            for location_id, row in zip(zone_ids, zone_rows, strict=True)
+        }
+        return cls(segments, taxi_zones, next(iter(snapshot_dates)))
+
+
+def road_segment_from_runtime_row(row: dict[str, object]) -> RoadSegment:
+    fractions = json.loads(str(row["hump_fractions_json"]))
+    if not isinstance(fractions, list) or any(
+        not isinstance(value, int | float) or not 0 <= value <= 1
+        for value in fractions
+    ):
+        raise ValueError("hump_fractions_json must be a list of values in [0, 1]")
+
+    return RoadSegment(
+        segment_id=str(row["segment_id"]),
+        from_node_id=str(row["from_node_id"]),
+        to_node_id=str(row["to_node_id"]),
+        traffic_direction=str(row["traffic_direction"]),
+        street_name=str(row["street_name"]),
+        geometry=as_line(shapely.from_wkt(str(row["geometry_wkt"]))),
+        length_m=float(row["length_m"]),
+        posted_speed_mph=(
+            float(row["posted_speed_mph"])
+            if row["posted_speed_mph"] is not None
+            else None
+        ),
+        curve_radius_m=(
+            float(row["curve_radius_m"])
+            if row["curve_radius_m"] is not None
+            else None
+        ),
+        pavement_rating=(
+            float(row["pavement_rating"])
+            if row["pavement_rating"] is not None
+            else None
+        ),
+        hump_fractions=[float(value) for value in fractions],
+    )
+
 
 # batch-jobs build-road-environment가 만든 canonical road_segment(단일 snapshot_date 파일)를 읽는다.
 def load_road_segments(road_segment_path: Path) -> tuple[list[RoadSegment], date]:
