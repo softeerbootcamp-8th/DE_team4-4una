@@ -152,13 +152,22 @@ class ObjectStore:
             _, bucket, path = parse_uri(uri)
             require_s3_key(path)
             by_bucket.setdefault(bucket, []).append(path)
+        all_errors: list[tuple[str, str]] = []
         for bucket, keys in by_bucket.items():
             for start in range(0, len(keys), 1000):  # S3 delete_objects의 배치 상한
                 chunk = keys[start : start + 1000]
-                self._s3().delete_objects(
+                response = self._s3().delete_objects(
                     Bucket=bucket,
                     Delete={"Objects": [{"Key": key} for key in chunk]},
                 )
+                errors = response.get("Errors", [])  # type: ignore[union-attr]
+                for error in errors:  # type: ignore[union-attr]
+                    all_errors.append((bucket, error.get("Key")))  # type: ignore[index]
+        if all_errors:
+            failed = [f"s3://{bucket}/{key}" for bucket, key in all_errors]
+            raise RuntimeError(
+                f"Failed to delete {len(all_errors)} object(s): {failed}"
+            )
 
     def _s3(self) -> S3Client:
         if self._s3_client is None:

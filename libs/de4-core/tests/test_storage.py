@@ -55,6 +55,7 @@ def test_delete_objects_is_a_no_op_for_an_empty_list(tmp_path) -> None:
 class FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
+        self.fail_delete_keys: set[str] = set()
 
     def put_object(self, **kwargs: object) -> None:
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
@@ -79,10 +80,16 @@ class FakeS3Client:
         ]
         return {"Contents": contents, "IsTruncated": False}
 
-    def delete_objects(self, **kwargs: object) -> None:
+    def delete_objects(self, **kwargs: object) -> dict[str, object]:
         bucket = str(kwargs["Bucket"])
+        errors = []
         for entry in kwargs["Delete"]["Objects"]:  # type: ignore[index]
-            self.objects.pop((bucket, entry["Key"]), None)
+            key = entry["Key"]
+            if key in self.fail_delete_keys:
+                errors.append({"Key": key, "Code": "AccessDenied", "Message": "Access Denied"})
+            else:
+                self.objects.pop((bucket, key), None)
+        return {"Errors": errors} if errors else {}
 
 
 def test_list_objects_reads_from_s3_via_list_objects_v2() -> None:
@@ -110,3 +117,33 @@ def test_delete_objects_removes_from_s3_via_delete_objects() -> None:
 
     assert not store.exists("s3://test-bucket/a.parquet")
     assert store.exists("s3://test-bucket/b.parquet")
+
+
+def test_delete_objects_raises_on_partial_s3_failure() -> None:
+    client = FakeS3Client()
+    store = ObjectStore(client)  # type: ignore[arg-type]
+    store.write_bytes("s3://test-bucket/a.parquet", b"aaa")
+    store.write_bytes("s3://test-bucket/b.parquet", b"bbb")
+    store.write_bytes("s3://test-bucket/c.parquet", b"ccc")
+    # Simulate a deletion permission error on b.parquet
+    client.fail_delete_keys.add("b.parquet")
+
+    try:
+        store.delete_objects(
+            [
+                "s3://test-bucket/a.parquet",
+                "s3://test-bucket/b.parquet",
+                "s3://test-bucket/c.parquet",
+            ]
+        )
+        assert False, "Expected RuntimeError for partial deletion failure"
+    except RuntimeError as e:
+        assert "Failed to delete" in str(e)
+        assert "b.parquet" in str(e)
+
+    # Verify a.parquet was deleted despite the error
+    assert not store.exists("s3://test-bucket/a.parquet")
+    # b.parquet should still exist (deletion failed)
+    assert store.exists("s3://test-bucket/b.parquet")
+    # c.parquet should be deleted
+    assert not store.exists("s3://test-bucket/c.parquet")
