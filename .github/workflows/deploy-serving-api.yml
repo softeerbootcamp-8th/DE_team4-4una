@@ -3,12 +3,12 @@
 # ci.yml이 CI 통과 후 호출하는 reusable workflow다. 직접 트리거되지 않으며,
 # main push 여부 판정은 호출하는 쪽에서 한다.
 #
-# 순서: 이미지 빌드 -> ECR push -> SSM으로 EC2에 배포 스크립트 전송 -> 결과 확인.
+# 순서: 이미지 빌드 -> ECR push -> SSH로 EC2에 배포 스크립트 전송 -> 결과 확인.
 # 컨테이너 교체와 health 확인, 실패 시 되돌리기는 인스턴스에서 실행되는
 # services/serving-api/deploy/deploy_on_instance.sh가 담당한다.
 #
-# AWS 식별자(Role, ECR, 인스턴스 ID)는 repository variables에 둔다. 아직 AWS 리소스가
-# 없어서 값이 비어 있고, 그 경우 첫 스텝이 어떤 값이 없는지 알려주고 멈춘다.
+# AWS 식별자와 EC2 주소는 repository variables에, SSH 개인키는 secret에 둔다.
+# 하나라도 비어 있으면 첫 스텝이 어떤 값이 없는지 알려주고 멈춘다.
 # 필요한 값과 사전 조건은 docs/deploy-serving-api.md에 정리한다.
 name: Deploy Serving API
 
@@ -36,6 +36,8 @@ jobs:
       # 배포할 커밋. 호출자의 컨텍스트를 이어받으므로 CI가 검사한 커밋과 같다.
       REVISION: ${{ github.sha }}
       CONTAINER: ${{ vars.SERVING_API_CONTAINER_NAME || 'serving-api' }}
+      # Amazon Linux 2023의 기본 계정이다.
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
       HOST_PORT: ${{ vars.SERVING_API_PORT || '8000' }}
       ENV_FILE: ${{ vars.SERVING_API_ENV_FILE || '/etc/serving-api/serving-api.env' }}
       HEALTH_PATH: /health
@@ -47,10 +49,12 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
         run: |
           missing=""
-          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_INSTANCE_ID; do
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST \
+                      EC2_SSH_PRIVATE_KEY; do
             eval "value=\${$name}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -97,58 +101,49 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy to EC2 via SSM
-        id: ssm
+      - name: Configure SSH
         env:
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          # 비대화식이라 호스트 키를 미리 받아둔다. 없으면 확인 프롬프트에서 멈춘다.
+          # 인스턴스를 재생성해도 자동으로 새 키를 받지만, 그만큼 첫 접속 MITM에 열려 있다.
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
           IMAGE: ${{ steps.image.outputs.image }}
           REGISTRY: ${{ steps.image.outputs.registry }}
         run: |
           set -euo pipefail
 
-          # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 보낸다.
-          # printf %q가 값을 따옴표로 감싸주므로, 경로에 공백이 있어도 깨지지 않는다.
+          # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 stdin으로
+          # 넘긴다. printf %q가 값을 따옴표로 감싸므로 경로에 공백이 있어도 깨지지 않는다.
+          # AWS_REGION은 configure-aws-credentials가 job 환경에 내보낸 값을 쓴다.
           prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nHOST_PORT=%q\nENV_FILE=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\n' \
             "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$HOST_PORT" \
             "$ENV_FILE" "$REVISION" "$HEALTH_PATH" "$HEALTH_TIMEOUT")
-          script="${prelude}$(cat services/serving-api/deploy/deploy_on_instance.sh)"
 
-          command_id=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "deploy serving-api ${REVISION:0:7}" \
-            --parameters "$(jq -n --arg s "$script" \
-              '{commands: [$s], executionTimeout: ["900"]}')" \
-            --query Command.CommandId \
-            --output text)
-          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
-          echo "SSM command: $command_id"
-
-          # 배포가 실패하면 아래 wait이 에러로 끝난다. 여기서 바로 죽으면 인스턴스가
-          # 남긴 로그를 못 보므로, 결과를 담아두고 로그를 찍은 뒤에 실패 처리한다.
-          wait_status=0
-          aws ssm wait command-executed \
-            --command-id "$command_id" \
-            --instance-id "$EC2_INSTANCE_ID" || wait_status=$?
-
-          aws ssm get-command-invocation \
-            --command-id "$command_id" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query '{status: Status, stdout: StandardOutputContent, stderr: StandardErrorContent}' \
-            --output text
-
-          if [ "$wait_status" -ne 0 ]; then
-            echo "::error::EC2 배포가 실패했습니다. 위 로그와 SSM command $command_id를 확인하세요."
-            exit 1
-          fi
+          # ssh는 원격 명령의 종료 코드를 그대로 돌려준다. 스크립트가 rollback 후 1로
+          # 끝나면 이 스텝도 실패한다.
+          {
+            printf '%s\n' "$prelude"
+            cat services/serving-api/deploy/deploy_on_instance.sh
+          } | ssh "${EC2_USER}@${EC2_HOST}" 'bash -s'
 
       # 어떤 커밋이 어떤 이미지로 어디에 배포됐는지 실행 화면에 남긴다.
       - name: Job summary
         if: always()
         env:
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
           IMAGE: ${{ steps.image.outputs.image }}
-          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
           JOB_STATUS: ${{ job.status }}
         run: |
           {
@@ -159,7 +154,6 @@ jobs:
             echo "| 결과 | $JOB_STATUS |"
             echo "| commit | \`$REVISION\` |"
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
-            echo "| instance | \`${EC2_INSTANCE_ID:-(미설정)}\` |"
-            echo "| SSM command | \`${COMMAND_ID:-(전송 전 중단)}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
             echo "| container label | \`org.opencontainers.image.revision=$REVISION\` |"
           } >> "$GITHUB_STEP_SUMMARY"

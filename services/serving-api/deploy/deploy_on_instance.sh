@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# EC2에서 SSM(AWS-RunShellScript)으로 실행되는 배포 스크립트.
-# 워크플로가 아래 변수 대입문을 앞에 붙여 이 파일과 함께 하나의 스크립트로 보낸다.
+# EC2에서 실행되는 배포 스크립트. 워크플로가 SSH로 접속해, 아래 변수 대입문을 앞에
+# 붙인 이 파일 내용을 stdin으로 넘긴다.
 #
 #   IMAGE REGISTRY AWS_REGION CONTAINER HOST_PORT ENV_FILE REVISION
 #   HEALTH_PATH HEALTH_TIMEOUT
