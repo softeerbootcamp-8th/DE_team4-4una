@@ -72,3 +72,4 @@ data/
 
 # --- Superpowers subagent-driven-development scratch workspace ---
 .superpowers/
+.worktrees/
