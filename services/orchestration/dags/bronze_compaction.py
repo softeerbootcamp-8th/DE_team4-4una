@@ -55,7 +55,7 @@ with DAG(
     dag_id="bronze_compaction",
     description="Bronze(sensor-events/zone_weather_snapshot) 소파일 정리 — 매일 1회, soft fail",
     schedule="0 4 * * *",
-    start_date=datetime.datetime(2026, 8, 22, tzinfo=datetime.UTC),
+    start_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),
     catchup=False,
     default_args={
         "retries": 1,
