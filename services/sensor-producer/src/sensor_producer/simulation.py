@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -342,12 +342,29 @@ class ReplayCoordinator:
         self.simulator = simulator or MotionSimulator()
         self.clock = clock or ReplayClock(config.time_scale)
 
-    def replay(self, trips: list[TripRecord]) -> ReplayResult:
+    def replay(self, trips: Iterable[TripRecord]) -> ReplayResult:
         queue: list[tuple[datetime, int, str, object]] = []
+        trip_iterator = iter(trips)
         counter = 0
-        for trip in sorted(trips, key=lambda value: (value.request_datetime, value.trip_id)):
+        previous_request_time: datetime | None = None
+
+        def enqueue_next_dispatch() -> None:
+            nonlocal counter, previous_request_time
+            try:
+                trip = next(trip_iterator)
+            except StopIteration:
+                return
+            if (
+                previous_request_time is not None
+                and trip.request_datetime < previous_request_time
+            ):
+                raise ValueError("trips must be ordered by request_datetime")
+            previous_request_time = trip.request_datetime
             heapq.heappush(queue, (trip.request_datetime, counter, "dispatch", trip))
             counter += 1
+
+        # 아직 배차되지 않은 Trip은 다음 한 건만 유지해 입력 크기만큼 메모리가 늘지 않게 한다
+        enqueue_next_dispatch()
 
         trips_planned = 0
         trips_attempted = 0
@@ -364,6 +381,7 @@ class ReplayCoordinator:
             if action == "dispatch":
                 trip = value
                 assert isinstance(trip, TripRecord)
+                enqueue_next_dispatch()
                 trips_attempted += 1
                 try:
                     pickup_zone = self._taxi_zone(

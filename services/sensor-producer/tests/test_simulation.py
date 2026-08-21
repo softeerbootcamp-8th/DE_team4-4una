@@ -21,8 +21,11 @@ def trip(
     trip_id: str = "trip-1",
     pu_location_id: int = 181,
     do_location_id: int = 181,
+    start_offset_seconds: int = 0,
 ) -> TripRecord:
-    pickup = datetime(2024, 2, 1, 10, 5, tzinfo=UTC)
+    pickup = datetime(2024, 2, 1, 10, 5, tzinfo=UTC) + timedelta(
+        seconds=start_offset_seconds
+    )
     return TripRecord(
         trip_id=trip_id,
         request_datetime=pickup - timedelta(minutes=5),
@@ -322,6 +325,106 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
     ]
     assert [event.event_time for event in publisher.events] == clock.times[1:]
     assert result.events_published == 3
+
+
+def test_replay_consumes_only_the_next_pending_dispatch() -> None:
+    class StaticRouter:
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            return route(8.0, length_m=10.0)
+
+    publisher = MemoryPublisher()
+
+    def trip_stream():
+        yield trip(trip_id="trip-1")
+        yield trip(trip_id="trip-2", start_offset_seconds=600)
+        # 세 번째 Trip을 요구할 때는 첫 번째 차량의 이벤트가 이미 발행되어야 한다
+        assert publisher.events
+        yield trip(trip_id="trip-3", start_offset_seconds=1200)
+
+    coordinator = ReplayCoordinator(
+        StaticRouter(),  # type: ignore[arg-type]
+        {181: object()},
+        publisher,
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    result = coordinator.replay(trip_stream())
+
+    assert result.trips_attempted == 3
+    assert {event.trip_id for event in publisher.events} == {
+        "trip-1",
+        "trip-2",
+        "trip-3",
+    }
+
+
+def test_replay_rejects_decreasing_request_time() -> None:
+    coordinator = ReplayCoordinator(
+        object(),  # type: ignore[arg-type]
+        {181: object()},
+        MemoryPublisher(),
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+    trips = iter(
+        [
+            trip(trip_id="trip-later", start_offset_seconds=60),
+            trip(trip_id="trip-earlier"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="ordered by request_datetime"):
+        coordinator.replay(trips)
+
+
+def test_replay_interleaves_overlapping_trips() -> None:
+    class StaticRouter:
+        def plan_for_zones(
+            self,
+            trip_id: str,
+            planned_at: datetime,
+            pickup_zone: object,
+            dropoff_zone: object,
+            target_distance_m: float | None = None,
+        ) -> RoutePlan:
+            return route(8.0, length_m=10.0)
+
+    publisher = MemoryPublisher()
+    coordinator = ReplayCoordinator(
+        StaticRouter(),  # type: ignore[arg-type]
+        {181: object()},
+        publisher,
+        SimulationConfig("test-run", sample_hz=1, time_scale=0),
+    )
+
+    coordinator.replay(
+        iter(
+            [
+                trip(trip_id="trip-a"),
+                trip(trip_id="trip-b", start_offset_seconds=1),
+            ]
+        )
+    )
+
+    assert [event.event_time for event in publisher.events] == sorted(
+        event.event_time for event in publisher.events
+    )
+    assert [event.trip_seq for event in publisher.events if event.trip_id == "trip-a"] == [
+        0,
+        1,
+        2,
+    ]
+    assert [event.trip_seq for event in publisher.events if event.trip_id == "trip-b"] == [
+        0,
+        1,
+        2,
+    ]
 
 
 def test_replay_skips_infeasible_trip_and_continues(caplog) -> None:

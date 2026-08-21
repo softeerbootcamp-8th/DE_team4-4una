@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from de4_core import DataArtifact, ObjectStore, RoadEnvironmentManifest
 
 from sensor_producer.environment import RoadEnvironment
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +62,20 @@ class RoadEnvironmentLoader:
             raise ValueError(f"unsupported runtime artifact media type: {artifact.media_type}")
         destination = environment_dir / f"{artifact.role}.parquet"
         if destination.is_file() and file_matches(destination, artifact):
+            logger.info(
+                "road environment cache hit: role=%s path=%s",
+                artifact.role,
+                destination,
+            )
             return destination
 
         temporary = destination.with_suffix(".parquet.part")
         temporary.unlink(missing_ok=True)
+        logger.info(
+            "road environment cache miss; downloading artifact: role=%s uri=%s",
+            artifact.role,
+            artifact.uri,
+        )
         self.store.download_file(artifact.uri, temporary)
         try:
             if not file_matches(temporary, artifact):
@@ -81,18 +94,20 @@ def parse_active_pointer(value: bytes) -> dict[str, str]:
     if not isinstance(document, dict):
         raise TypeError("active environment pointer must be a JSON object")
     required = ("environment_id", "manifest_uri", "manifest_sha256")
-    result = {key: document.get(key) for key in required}
-    if any(not isinstance(item, str) or not item for item in result.values()):
-        raise ValueError("active environment pointer has missing or invalid fields")
+    result: dict[str, str] = {}
+    for key in required:
+        item = document.get(key)
+        if not isinstance(item, str) or not item:
+            raise ValueError("active environment pointer has missing or invalid fields")
+        result[key] = item
     checksum = result["manifest_sha256"]
-    assert isinstance(checksum, str)
     try:
         int(checksum, 16)
     except ValueError as error:
         raise ValueError("active pointer manifest_sha256 must be hexadecimal") from error
     if len(checksum) != 64:
         raise ValueError("active pointer manifest_sha256 must contain 64 characters")
-    return result  # type: ignore[return-value]
+    return result
 
 
 def verify_bytes(value: bytes, expected_sha256: str, label: str) -> None:

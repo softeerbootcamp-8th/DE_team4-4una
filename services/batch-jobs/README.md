@@ -59,6 +59,16 @@ credential chain. Local execution does not initialize an AWS client.
 
 ## Published datasets
 
+The monthly input bundle uses these fixed local names so acquisition and build
+steps share one explicit contract:
+
+| Dataset | Local filename | Format |
+| --- | --- | --- |
+| NYC LION | `lion.geojson` | GeoJSON |
+| NYC Street Pavement Ratings | `pavement.geojson` | GeoJSON |
+| NYC Speed Humps | `speed_humps.geojson` | GeoJSON |
+| TLC Taxi Zones | `taxi_zones.zip` | ZIP containing an ESRI Shapefile |
+
 Each build retains:
 
 - the unmodified LION, pavement, hump, and taxi-zone source objects;

@@ -128,9 +128,10 @@ practical, the implementation may expose an injectable clock or faster test mode
 but production demonstration defaults must preserve the confirmed scale.
 
 The coordinator interleaves overlapping trips in one time-ordered priority queue
-and preserves idle gaps. It lazily keeps only the next sample from each active
-trip in memory. `time_scale = 0` is an explicit no-wait verification mode; no
-implicit idle-gap cap is applied.
+and preserves idle gaps. It consumes input in non-decreasing `request_datetime`
+order and keeps only the next pending dispatch plus the next sample from each
+active trip in memory. `time_scale = 0` is an explicit no-wait verification
+mode; no implicit idle-gap cap is applied.
 
 ## Prototype signal model
 

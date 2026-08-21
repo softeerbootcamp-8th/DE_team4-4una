@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+from collections.abc import Iterable
 from datetime import date
+from itertools import islice
 from pathlib import Path
 
-from sensor_producer.domain import VEHICLE_MIXES, VEHICLE_PROFILES, SimulationConfig
+from sensor_producer.domain import (
+    VEHICLE_MIXES,
+    VEHICLE_PROFILES,
+    SimulationConfig,
+    TripRecord,
+)
 from sensor_producer.environment import RoadEnvironment
 from sensor_producer.nyc_data import DEFAULT_HVFHV_URL, fetch_nyc_sample, load_trips
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
@@ -22,6 +30,12 @@ def ratio(value: str) -> float:
     if not 0 <= parsed <= 1:
         raise argparse.ArgumentTypeError("ratio must be between 0 and 1")
     return parsed
+
+
+def limit_trips(
+    trips: Iterable[TripRecord], maximum: int | None
+) -> Iterable[TripRecord]:
+    return trips if maximum is None else islice(trips, maximum)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     arguments = build_parser().parse_args(argv)
     if arguments.command == "fetch-nyc-sample":
         manifest = fetch_nyc_sample(
@@ -89,9 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     trips_path = arguments.trips_path or (input_dir / "trips.json" if input_dir else None)
     if trips_path is None:
         raise SystemExit("--trips-path or --input-dir is required")
-    trips = load_trips(trips_path)
-    if arguments.max_trips is not None:
-        trips = trips[: arguments.max_trips]
+    trips = limit_trips(load_trips(trips_path), arguments.max_trips)
     use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,

@@ -1,7 +1,7 @@
 import argparse
 
 import pytest
-from sensor_producer.cli import enforce_trip_skip_ratio, ratio
+from sensor_producer.cli import enforce_trip_skip_ratio, limit_trips, ratio
 from sensor_producer.simulation import ReplayResult
 
 
@@ -32,3 +32,17 @@ def test_trip_skip_threshold_exits_when_ratio_is_exceeded() -> None:
 def test_ratio_rejects_values_outside_unit_interval(value: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         ratio(value)
+
+
+def test_limit_trips_does_not_consume_beyond_maximum() -> None:
+    consumed: list[object] = []
+
+    def source():
+        for value in (object(), object(), object()):
+            consumed.append(value)
+            yield value
+
+    selected = list(limit_trips(source(), 2))  # type: ignore[arg-type]
+
+    assert selected == consumed
+    assert len(consumed) == 2
