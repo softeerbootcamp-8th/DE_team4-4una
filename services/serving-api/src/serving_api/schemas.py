@@ -42,6 +42,14 @@ class ComfortScore(BaseModel):
     source: Literal["current", "standard"]
 
 
+class ComfortScoreResponse(ComfortScore):
+    """단건 조회 응답 — 점수에 어떤 차량 프로필로 조회했는지를 함께 담는다."""
+
+    requested_vehicle_profile_id: int
+    effective_vehicle_profile_id: int
+    vehicle_profile_fallback: bool
+
+
 class ComfortScoreBatchRequest(BaseModel):
     """경로 조회는 차량 하나를 기준으로 하므로 프로필은 요청당 하나만 받는다."""
 
@@ -56,6 +64,9 @@ class ComfortScoreBatchResponse(BaseModel):
     구간은 애초에 점수가 계산된 적이 없다.
     """
 
+    requested_vehicle_profile_id: int
+    effective_vehicle_profile_id: int
+    vehicle_profile_fallback: bool
     scores: list[ComfortScore]
     not_found_segment_ids: list[str]
 
@@ -117,7 +128,14 @@ class RouteEvaluationResponse(BaseModel):
 
     순위 필드는 두지 않는다 — 배열 순서와 같은 말이라 서로 어긋날 여지만 생긴다.
     점수가 같으면 요청에 실려 온 순서를 유지한다.
+
+    요청한 차량 프로필이 활성이 아니면 차량 무관 sentinel로 내려가 응답하므로
+    (#272), 어느 프로필로 계산한 점수인지를 함께 싣는다. 이것이 없으면 호출자는
+    다른 차량의 점수를 자기 차량 점수로 오해한다.
     """
 
+    requested_vehicle_profile_id: int
+    effective_vehicle_profile_id: int
+    vehicle_profile_fallback: bool
     recommended_route_id: str
     routes: list[RouteComfortScore]
