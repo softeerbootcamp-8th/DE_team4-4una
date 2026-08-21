@@ -40,7 +40,11 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    # 경로 평가 정책값을 핸들러에서 읽어야 한다. 풀과 달리 기동 전에도 값이
+    # 정해져 있으므로 lifespan을 기다리지 않고 여기서 붙인다.
+    app.state.config = resolved_config
     register_error_handlers(app)
     app.include_router(routes.health_router)
     app.include_router(routes.comfort_score_router)
+    app.include_router(routes.route_router)
     return app
