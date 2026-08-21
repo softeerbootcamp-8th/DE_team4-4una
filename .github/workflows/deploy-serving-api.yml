@@ -1,5 +1,8 @@
 # main에 들어간 커밋을 serving-api 컨테이너로 배포한다.
 #
+# ci.yml이 CI 통과 후 호출하는 reusable workflow다. 직접 트리거되지 않으며,
+# main push 여부 판정은 호출하는 쪽에서 한다.
+#
 # 순서: 이미지 빌드 -> ECR push -> SSM으로 EC2에 배포 스크립트 전송 -> 결과 확인.
 # 컨테이너 교체와 health 확인, 실패 시 되돌리기는 인스턴스에서 실행되는
 # services/serving-api/deploy/deploy_on_instance.sh가 담당한다.
@@ -10,10 +13,9 @@
 name: Deploy Serving API
 
 on:
-  # CI가 끝나면 시작한다. push에 직접 걸면 CI 결과를 모르는 채로 배포가 나간다.
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  # ci.yml에서 호출된다. workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가 되어,
+  # main으로 제한한 OIDC trust policy와 어긋난다.
+  workflow_call:
 
 permissions:
   contents: read
@@ -28,22 +30,11 @@ concurrency:
 jobs:
   deploy:
     name: Deploy
-    # 세 가지를 모두 확인한다.
-    #   conclusion   CI가 성공했나
-    #   event        PR이 아니라 실제로 main에 들어간 커밋인가
-    #   head_branch  main 브랜치인가
-    # event를 빼면 main으로 보내는 PR이 CI만 통과해도 배포가 나가버린다.
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
     # 배포 대상이 arm64(t4g) 인스턴스라 arm 러너에서 빌드한다.
     runs-on: ubuntu-24.04-arm
     env:
-      # 배포할 커밋. CI가 검사한 바로 그 커밋이어야 한다.
-      # github.sha를 쓰면 안 된다 — 이 워크플로에서 그 값은 main의 최신 커밋을 가리켜서,
-      # 그 사이 다른 커밋이 들어오면 검사되지 않은 코드가 배포된다.
-      REVISION: ${{ github.event.workflow_run.head_sha }}
+      # 배포할 커밋. 호출자의 컨텍스트를 이어받으므로 CI가 검사한 커밋과 같다.
+      REVISION: ${{ github.sha }}
       CONTAINER: ${{ vars.SERVING_API_CONTAINER_NAME || 'serving-api' }}
       HOST_PORT: ${{ vars.SERVING_API_PORT || '8000' }}
       ENV_FILE: ${{ vars.SERVING_API_ENV_FILE || '/etc/serving-api/serving-api.env' }}
