@@ -78,6 +78,89 @@ def compute_identity_diff(row: dict, rule_config: WeatherRuleConfig) -> float:
     return abs(expected - row["comfort_score"])
 
 
+def split_batch(
+    rows: list[dict],
+    rule_config: WeatherRuleConfig,
+    suite: gx.ExpectationSuite,
+) -> QuarantineSplit:
+    """배치를 GX로 검증해 정상/격리로 나눈다. UPSERT 이전에 in-memory로 수행한다.
+
+    이미 나쁜 값으로 기존 정상 값을 덮어쓴 뒤 사후 검증하지 않는 이유는
+    ADR-0008 참고 — current_segment_comfort_score는 키당 단일 최신 행만
+    가져 되돌릴 이전 값이 없다.
+    """
+    if not rows:
+        return QuarantineSplit([], [])
+
+    frame = pd.DataFrame(rows)
+    frame["identity_diff"] = [compute_identity_diff(row, rule_config) for row in rows]
+
+    context = gx.get_context(mode="ephemeral")
+    datasource = context.data_sources.add_pandas(name="current_score_batch_datasource")
+    asset = datasource.add_dataframe_asset(name="current_score_batch")
+    batch_definition = asset.add_batch_definition_whole_dataframe(
+        "current_score_batch_definition"
+    )
+    batch = batch_definition.get_batch(batch_parameters={"dataframe": frame})
+    result = batch.validate(suite, result_format="COMPLETE")
+
+    violations_by_index: dict[int, list[dict]] = {}
+    for expectation_result in result.results:
+        unexpected_indexes = expectation_result.result.get("unexpected_index_list") or []
+        unexpected_values = expectation_result.result.get("unexpected_list") or []
+        for index, value in zip(unexpected_indexes, unexpected_values, strict=True):
+            violations_by_index.setdefault(index, []).append(
+                {
+                    "expectation_type": expectation_result.expectation_config.type,
+                    "column": expectation_result.expectation_config.kwargs.get("column"),
+                    "observed_value": value,
+                }
+            )
+
+    normal_rows: list[dict] = []
+    quarantined_records: list[dict] = []
+    for index, row in enumerate(rows):
+        violations = violations_by_index.get(index)
+        if violations is None:
+            normal_rows.append(row)
+            continue
+        quarantined_records.append(
+            {
+                "segment_id": row["segment_id"],
+                "vehicle_profile_id": row["vehicle_profile_id"],
+                "calculated_at": row["calculated_at"],
+                "reject_reason": ",".join(sorted({v["column"] for v in violations})),
+                "reject_detail": violations,
+                "raw_row": row,
+            }
+        )
+    return QuarantineSplit(normal_rows=normal_rows, quarantined_records=quarantined_records)
+
+
+def _json_dumps(value: object) -> str:
+    return json.dumps(value, default=str)
+
+
+def insert_quarantined_rows(cursor, records: list[dict]) -> None:
+    if not records:
+        return
+    execute_values(
+        cursor,
+        _INSERT_QUARANTINE_SQL,
+        [
+            (
+                record["segment_id"],
+                record["vehicle_profile_id"],
+                record["calculated_at"],
+                record["reject_reason"],
+                Json(record["reject_detail"], dumps=_json_dumps),
+                Json(record["raw_row"], dumps=_json_dumps),
+            )
+            for record in records
+        ],
+    )
+
+
 def check_circuit_breaker(
     *,
     upserted_count: int,
