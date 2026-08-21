@@ -1,0 +1,174 @@
+# main에 들어간 커밋을 serving-api 컨테이너로 배포한다.
+#
+# 순서: 이미지 빌드 -> ECR push -> SSM으로 EC2에 배포 스크립트 전송 -> 결과 확인.
+# 컨테이너 교체와 health 확인, 실패 시 되돌리기는 인스턴스에서 실행되는
+# services/serving-api/deploy/deploy_on_instance.sh가 담당한다.
+#
+# AWS 식별자(Role, ECR, 인스턴스 ID)는 repository variables에 둔다. 아직 AWS 리소스가
+# 없어서 값이 비어 있고, 그 경우 첫 스텝이 어떤 값이 없는지 알려주고 멈춘다.
+# 필요한 값과 사전 조건은 docs/deploy-serving-api.md에 정리한다.
+name: Deploy Serving API
+
+on:
+  # CI가 끝나면 시작한다. push에 직접 걸면 CI 결과를 모르는 채로 배포가 나간다.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  # OIDC 인증에 필요하다. 이 줄이 없으면 AWS 자격증명을 받지 못한다.
+  id-token: write
+
+# 배포 두 개가 동시에 돌면 컨테이너가 섞인다. 취소하지 않고 앞 배포를 기다린다.
+concurrency:
+  group: deploy-serving-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    # 세 가지를 모두 확인한다.
+    #   conclusion   CI가 성공했나
+    #   event        PR이 아니라 실제로 main에 들어간 커밋인가
+    #   head_branch  main 브랜치인가
+    # event를 빼면 main으로 보내는 PR이 CI만 통과해도 배포가 나가버린다.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    # 배포 대상이 arm64(t4g) 인스턴스라 arm 러너에서 빌드한다.
+    runs-on: ubuntu-24.04-arm
+    env:
+      # 배포할 커밋. CI가 검사한 바로 그 커밋이어야 한다.
+      # github.sha를 쓰면 안 된다 — 이 워크플로에서 그 값은 main의 최신 커밋을 가리켜서,
+      # 그 사이 다른 커밋이 들어오면 검사되지 않은 코드가 배포된다.
+      REVISION: ${{ github.event.workflow_run.head_sha }}
+      CONTAINER: ${{ vars.SERVING_API_CONTAINER_NAME || 'serving-api' }}
+      HOST_PORT: ${{ vars.SERVING_API_PORT || '8000' }}
+      ENV_FILE: ${{ vars.SERVING_API_ENV_FILE || '/etc/serving-api/serving-api.env' }}
+      HEALTH_PATH: /health
+      HEALTH_TIMEOUT: "90"
+    steps:
+      # 값이 없으면 나중에 aws 명령이 알아보기 힘든 에러를 낸다. 여기서 먼저 잡는다.
+      - name: Check required variables
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          missing=""
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_INSTANCE_ID; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::repository variables가 비어 있습니다:$missing"
+            echo "Settings > Secrets and variables > Actions > Variables 에서 설정하세요."
+            echo "필요한 값은 docs/deploy-serving-api.md에 정리되어 있습니다."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          # 안 적으면 main 최신을 가져온다. 배포할 커밋을 직접 지정한다.
+          ref: ${{ env.REVISION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${REPOSITORY}:${REVISION}"
+
+          # Dockerfile이 uv.lock과 libs/de4-core까지 COPY하므로 빌드 컨텍스트는
+          # 저장소 루트다. 뭘 뺄지는 .dockerignore가 정한다.
+          docker build \
+            --tag "$image" \
+            --file services/serving-api/Dockerfile \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            .
+          docker push "$image"
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to EC2 via SSM
+        id: ssm
+        env:
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: |
+          set -euo pipefail
+
+          # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 보낸다.
+          # printf %q가 값을 따옴표로 감싸주므로, 경로에 공백이 있어도 깨지지 않는다.
+          prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nHOST_PORT=%q\nENV_FILE=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\n' \
+            "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$HOST_PORT" \
+            "$ENV_FILE" "$REVISION" "$HEALTH_PATH" "$HEALTH_TIMEOUT")
+          script="${prelude}$(cat services/serving-api/deploy/deploy_on_instance.sh)"
+
+          command_id=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy serving-api ${REVISION:0:7}" \
+            --parameters "$(jq -n --arg s "$script" \
+              '{commands: [$s], executionTimeout: ["900"]}')" \
+            --query Command.CommandId \
+            --output text)
+          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+          echo "SSM command: $command_id"
+
+          # 배포가 실패하면 아래 wait이 에러로 끝난다. 여기서 바로 죽으면 인스턴스가
+          # 남긴 로그를 못 보므로, 결과를 담아두고 로그를 찍은 뒤에 실패 처리한다.
+          wait_status=0
+          aws ssm wait command-executed \
+            --command-id "$command_id" \
+            --instance-id "$EC2_INSTANCE_ID" || wait_status=$?
+
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query '{status: Status, stdout: StandardOutputContent, stderr: StandardErrorContent}' \
+            --output text
+
+          if [ "$wait_status" -ne 0 ]; then
+            echo "::error::EC2 배포가 실패했습니다. 위 로그와 SSM command $command_id를 확인하세요."
+            exit 1
+          fi
+
+      # 어떤 커밋이 어떤 이미지로 어디에 배포됐는지 실행 화면에 남긴다.
+      - name: Job summary
+        if: always()
+        env:
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Serving API 배포"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`$REVISION\` |"
+            echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
+            echo "| instance | \`${EC2_INSTANCE_ID:-(미설정)}\` |"
+            echo "| SSM command | \`${COMMAND_ID:-(전송 전 중단)}\` |"
+            echo "| container label | \`org.opencontainers.image.revision=$REVISION\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

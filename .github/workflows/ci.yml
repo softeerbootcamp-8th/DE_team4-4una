@@ -39,6 +39,8 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # 아래 python 필터가 어떤 파일에 걸렸는지 알아야 매핑 누락을 판정할 수 있다.
+          list-files: shell
           filters: |
             shared: &shared
               - 'libs/de4-core/**'
@@ -72,20 +74,12 @@ jobs:
               - 'services/dashboard/**'
               - 'services/gold-loader/**'
               - 'tests/**'
-            # 위 필터 어디에도 매핑되지 않은 Python 경로. 새 서비스를 추가하고 필터를
-            # 빠뜨렸을 때 그 테스트가 조용히 스킵되는 것을 막는다. 서비스를 추가하면
-            # 위에 필터를 만들고 이 제외 목록에도 함께 넣어야 한다.
-            unmapped:
+            # 바뀐 Python 파일 목록을 받기 위한 필터다. 이 목록 중 위 필터가 담당하지
+            # 않는 경로가 있으면 아래 스텝이 전체 대상으로 승격한다. 여기서 '!' 제외
+            # 패턴을 쓰면 안 된다 — paths-filter는 기본 설정에서 negation을 무시하므로
+            # 모든 Python 변경이 승격되어 버린다.
+            python:
               - '**/*.py'
-              - '!libs/de4-core/**'
-              - '!services/batch-jobs/**'
-              - '!services/dashboard/**'
-              - '!services/gold-loader/**'
-              - '!services/orchestration/**'
-              - '!services/sensor-producer/**'
-              - '!services/serving-api/**'
-              - '!services/stream-processor/**'
-              - '!tests/**'
 
       # 필터 이름을 (uv 패키지, pytest 경로) 쌍으로 바꾼다.
       #
@@ -97,8 +91,12 @@ jobs:
         id: select
         env:
           MATCHED: ${{ steps.filter.outputs.changes }}
+          # 값을 run 스크립트에 직접 보간하지 않고 환경변수로 받는다 (파일명에 셸
+          # 특수문자가 있을 수 있다).
+          PYTHON_FILES: ${{ steps.filter.outputs.python_files }}
         run: |
           set -euo pipefail
+          echo "걸린 필터: $MATCHED"
           bj=services/batch-jobs/tests
           map=$(jq -cn --arg bj "$bj" '{
             "de4-core":                   {pkg: "de4-core",         paths: "libs/de4-core/tests"},
@@ -111,14 +109,28 @@ jobs:
             "batch-jobs-rest":            {pkg: "batch-jobs",       paths: ($bj + " --ignore=" + $bj + "/test_sensor_features.py --ignore=" + $bj + "/cleansing")}
           }')
 
-          if jq -e 'index("unmapped")' <<<"$MATCHED" >/dev/null; then
-            echo "::notice::필터에 매핑되지 않은 Python 경로가 바뀌어 전체 대상으로 승격합니다."
+          # 바뀐 Python 파일 중 위 필터가 담당하지 않는 경로를 찾는다. 새 서비스를
+          # 추가하고 필터를 빠뜨렸을 때 그 테스트가 조용히 스킵되는 것을 막는다.
+          # 서비스를 추가하면 위에 필터를 만들고 아래 목록에도 함께 넣는다.
+          unmapped=""
+          for path in $PYTHON_FILES; do
+            case "$path" in
+              libs/de4-core/* | tests/* | \
+              services/batch-jobs/* | services/dashboard/* | services/gold-loader/* | \
+              services/orchestration/* | services/sensor-producer/* | \
+              services/serving-api/* | services/stream-processor/*) ;;
+              *) unmapped="$unmapped $path" ;;
+            esac
+          done
+
+          if [ -n "$unmapped" ]; then
+            echo "::notice::필터가 담당하지 않는 Python 경로가 바뀌어 전체 대상으로 승격합니다:$unmapped"
             selected=$(jq -c 'keys' <<<"$map")
           else
             selected="$MATCHED"
           fi
 
-          # map에 없는 필터 이름(shared, batchjobs, workspace, unmapped)은 떨어뜨린다.
+          # map에 없는 필터 이름(shared, batchjobs, workspace, python)은 떨어뜨린다.
           targets=$(jq -c --argjson m "$map" \
             '[ .[] | select(in($m)) | {name: ., pkg: $m[.].pkg, paths: $m[.].paths} ]' \
             <<<"$selected")
