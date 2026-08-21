@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-18
+last_reviewed: 2026-08-21
 ---
 
 # Project Definition
@@ -101,6 +101,20 @@ stale or unavailable data.
 
 The endpoint path, score scale, database, and behavior for missing combinations
 remain open.
+
+### Candidate-route evaluation
+
+Because the intended consumer is a route-recommendation developer, the point
+lookup alone leaves the comparison work to the caller. `services/serving-api`
+therefore also accepts several already-planned candidate routes and ranks them
+by the comfort of the segments they traverse (issue #269,
+`POST /api/v1/routes/evaluate`). The service does not plan routes, and it does
+not consider distance or duration — the caller weighs those against the comfort
+score itself.
+
+The aggregation from segment scores to one route score, and its provisional
+parameters, are documented in `context/comfort-score.md` ("Route comfort
+score"); the request and response grain is in `context/data/contracts.md`.
 
 ## Scope boundaries
 
