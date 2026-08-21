@@ -76,7 +76,7 @@ def run_cleansing_job(
 
     bronze = read_bronze_sensor_events(spark, cleansing_config.bronze_input_path)
     rules = load_cleansing_config(cleansing_config.rules_config_path)
-    window_start, window_end = feature_input_window(feature_config, target_hour)
+    window_start, window_end = feature_input_window(target_hour)
     processed_frames: list[DataFrame] = []
     cached_bronze_frames: list[DataFrame] = []
     target_processed: DataFrame | None = None

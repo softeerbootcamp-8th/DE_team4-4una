@@ -113,7 +113,7 @@ def run_hourly_segment_feature_job(
     steering_config = load_steering_feature_config(config.steering_feature_config_path)
     matching_config = load_map_matching_config(config.map_matching_config_path)
 
-    window_start, window_end = feature_input_window(config, target_hour)
+    window_start, window_end = feature_input_window(target_hour)
     target_hour_end = target_hour + timedelta(hours=1)
     sensor_df = sensor_df.filter(
         (F.col("event_time") >= window_start) & (F.col("event_time") < window_end)
@@ -163,7 +163,7 @@ def run_hourly_segment_feature_job(
         event_config.max_gap_seconds.value,
     )
 
-    # 이벤트 탐지가 끝난 뒤에야 대상 시간만 남긴다. 재계산 방지를 위해 persist한다.
+    # 입력이 이미 대상 시간뿐이라 이 필터는 안전장치다. 재계산 방지를 위해 persist한다.
     target_df = event_df.filter(
         (F.col("event_time") >= target_hour) & (F.col("event_time") < target_hour_end)
     ).persist(StorageLevel.MEMORY_AND_DISK)
@@ -189,18 +189,13 @@ def run_hourly_segment_feature_job(
         target_df.unpersist()
 
 
-def feature_input_window(
-    config: HourlySegmentFeatureJobConfig,
-    target_hour: datetime,
-) -> tuple[datetime, datetime]:
-    """Return the exact event-time interval T2 needs around one target hour."""
-    event_config = load_event_feature_config(config.event_feature_config_path)
-    steering_config = load_steering_feature_config(config.steering_feature_config_path)
-    lookback = timedelta(
-        seconds=max(event_config.max_gap_seconds.value, steering_config.max_gap_seconds.value)
-    )
-    lookahead = timedelta(seconds=event_config.lookahead_seconds.value)
-    return target_hour - lookback, target_hour + timedelta(hours=1) + lookahead
+def feature_input_window(target_hour: datetime) -> tuple[datetime, datetime]:
+    """Return the event-time interval T2 reads for one target hour."""
+    # 대상 시간만 읽는다. 앞뒤로 여유 구간을 두면 입력 구간이 이웃 시간까지 걸치고,
+    # 그 시간마다 Bronze를 통째로 다시 읽게 된다. 뒤쪽 여유는 애초에 얻을 수도 없다 —
+    # 13시 잡은 14시에 도는데 그 시점엔 14시 데이터가 아직 없다.
+    # 시간 경계에 걸친 episode는 길이가 짧게 잡혀 min_event_duration_seconds에서 걸러진다.
+    return target_hour, target_hour + timedelta(hours=1)
 
 
 def _validate_job_arguments(
