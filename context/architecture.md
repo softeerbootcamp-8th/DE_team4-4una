@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-20
+last_reviewed: 2026-08-22
 ---
 
 # Target Architecture
@@ -98,6 +98,10 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 The producer reads the pinned trip sample and road environment, chooses or loads
 a vehicle profile, computes a route, and emits time-ordered observations. It must
 be restartable without producing logically different events.
+
+The EC2 runtime can resolve the active S3 environment pointer or an immutable
+manifest and verifies its prepared road and taxi-zone artifacts before routing.
+The bounded TLC input remains local until the separate S3 trip-reader work lands.
 
 ### Stream collection
 

@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-18
+last_reviewed: 2026-08-22
 ---
 
 # Deterministic Trip Simulation
@@ -36,6 +36,10 @@ timestamps may differ between runs, so events should also carry deterministic
 simulation offsets.
 
 ## Implemented prototype pipeline
+
+At startup, the producer can follow a published `active.json` pointer or pin an
+immutable environment manifest through `file://` or `s3://`. Runtime Parquet
+artifacts are cached only after their size and SHA-256 checksum are verified.
 
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.

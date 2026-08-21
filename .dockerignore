@@ -1,5 +1,7 @@
 .git
 .github
+.agents
+.local
 .venv
 **/__pycache__
 **/*.py[cod]
@@ -7,8 +9,11 @@
 **/.ruff_cache
 **/tests
 dist
+context
+data
 docs
 infra
+notebooks
 terraform
 .env
 .env.*
