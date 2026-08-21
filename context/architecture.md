@@ -176,3 +176,12 @@ acceleration, and discomfort flags first appear here with `scoring_version`.
 A Spark job derives stable features and a versioned score. Publication must be
 atomic at the score-period level so the API never serves a partially loaded
 monthly result.
+
+### Bronze compaction
+
+Bronze `sensor-events` and `zone_weather_snapshot` accumulate small files from their
+respective high-frequency writers. An independent, low-frequency `bronze_compaction`
+DAG (no outlets, does not block or gate other DAGs) merges same-partition objects once
+they are old enough that no further writes are expected, verifying row counts before
+discarding the originals. See
+[ADR-0009](../docs/adr/0009-bronze-compaction-dag.md).
