@@ -18,7 +18,13 @@ from sensor_producer.domain import (
     TripRecord,
 )
 from sensor_producer.environment import RoadEnvironment
-from sensor_producer.nyc_data import DEFAULT_HVFHV_URL, fetch_nyc_sample, load_trips
+from sensor_producer.nyc_data import (
+    DEFAULT_HVFHV_URL,
+    fetch_nyc_sample,
+    iter_hvfhv_parquet_trips,
+    load_trips,
+    materialize_trip_parquet,
+)
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
 from sensor_producer.runtime_environment import RoadEnvironmentLoader
@@ -29,6 +35,13 @@ def ratio(value: str) -> float:
     parsed = float(value)
     if not 0 <= parsed <= 1:
         raise argparse.ArgumentTypeError("ratio must be between 0 and 1")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
 
@@ -51,7 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--input-dir", type=Path)
-    run_parser.add_argument("--trips-path", type=Path)
+    trip_input = run_parser.add_mutually_exclusive_group()
+    trip_input.add_argument("--trips-path", type=Path)
+    trip_input.add_argument("--trips-uri")
+    run_parser.add_argument("--source-date", type=date.fromisoformat)
     run_parser.add_argument(
         "--road-segment-path",
         type=Path,
@@ -80,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     assignment = run_parser.add_mutually_exclusive_group()
     assignment.add_argument("--vehicle-profile-id", type=int)
     assignment.add_argument("--vehicle-mix", choices=sorted(VEHICLE_MIXES))
-    run_parser.add_argument("--max-trips", type=int)
+    run_parser.add_argument("--max-trips", type=positive_int)
     run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
     return parser
 
@@ -101,10 +117,7 @@ def main(argv: list[str] | None = None) -> None:
 
     input_dir: Path | None = arguments.input_dir
     environment, sources, environment_summary = resolve_environment(arguments)
-    trips_path = arguments.trips_path or (input_dir / "trips.json" if input_dir else None)
-    if trips_path is None:
-        raise SystemExit("--trips-path or --input-dir is required")
-    trips = limit_trips(load_trips(trips_path), arguments.max_trips)
+    trips, trip_source_summary = resolve_trips(arguments, input_dir)
     use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,
@@ -143,6 +156,7 @@ def main(argv: list[str] | None = None) -> None:
         "unique_segments": result.unique_segments,
         "rated_samples": result.rated_samples,
         "hump_samples": result.hump_samples,
+        "trip_source": trip_source_summary,
         "sources": sources,
         **environment_summary,
     }
@@ -153,6 +167,39 @@ def main(argv: list[str] | None = None) -> None:
     summary_output.write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, indent=2, sort_keys=True))
     enforce_trip_skip_ratio(result, arguments.max_trip_skip_ratio)
+
+
+def resolve_trips(
+    arguments: argparse.Namespace,
+    input_dir: Path | None,
+) -> tuple[Iterable[TripRecord], dict[str, object]]:
+    if arguments.trips_uri:
+        if arguments.source_date is None:
+            raise SystemExit("--source-date is required with --trips-uri")
+        parquet_path = materialize_trip_parquet(
+            arguments.trips_uri,
+            arguments.cache_dir,
+        )
+        return (
+            iter_hvfhv_parquet_trips(
+                parquet_path,
+                arguments.source_date,
+                arguments.max_trips,
+            ),
+            {
+                "format": "parquet",
+                "uri": arguments.trips_uri,
+                "source_date": arguments.source_date.isoformat(),
+            },
+        )
+
+    trips_path = arguments.trips_path or (input_dir / "trips.json" if input_dir else None)
+    if trips_path is None:
+        raise SystemExit("--trips-uri, --trips-path, or --input-dir is required")
+    return (
+        limit_trips(load_trips(trips_path), arguments.max_trips),
+        {"format": "json", "path": str(trips_path)},
+    )
 
 
 def resolve_environment(

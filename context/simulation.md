@@ -40,11 +40,20 @@ simulation offsets.
 At startup, the producer can follow a published `active.json` pointer or pin an
 immutable environment manifest through `file://` or `s3://`. Runtime Parquet
 artifacts are cached only after their size and SHA-256 checksum are verified.
+The trip reader accepts one exact monthly HVFHV Parquet object through `file://`
+or `s3://`; S3 objects are materialized in the EC2-local cache through the
+instance IAM role. It selects one `source_date`, filters invalid rows, applies
+`max_trips` in DuckDB, and yields `TripRecord` objects in bounded batches rather
+than building a Python list.
 
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.
-2. Sort using a documented stable ordering and select approximately 1,000 rows
-   with a seeded deterministic procedure.
+2. Sort using a documented stable ordering and optionally select the first
+   `max_trips` rows. The implemented Parquet reader orders by request, pickup, and
+   drop-off timestamps, then the immutable object's physical Parquet row number.
+   That row number also participates in the generated `trip_id`, so rewriting an
+   object in place is outside the reproducibility contract. A seeded representative
+   sampling policy remains open.
 3. Use the source request time as the dispatch time and use pickup time as the
    beginning of passenger motion. If the selected source schema does not provide
    request time, require an accepted fallback policy rather than silently

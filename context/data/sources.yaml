@@ -1,4 +1,4 @@
-version: 0.2.1
+version: 0.2.2
 last_reviewed: 2026-08-22
 status: draft
 
@@ -91,7 +91,7 @@ sources:
       - Deterministic sampling of approximately 1000 trips
     open_items:
       - Eligible-row filters
-      - Stable row identity when no unique trip ID is supplied
+      - Acceptance of the implemented physical Parquet row-number tie-breaker as the long-term stable row identity
       - Sampling and vehicle-assignment algorithms
       - Treatment of overlapping trips and long dispatch gaps
 
