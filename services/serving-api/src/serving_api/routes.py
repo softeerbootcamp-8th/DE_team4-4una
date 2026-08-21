@@ -59,7 +59,7 @@ def read_health(
     response_model=ComfortScore,
     summary="구간 승차감 점수 단건 조회",
     description=(
-        "구간 하나의 최신 점수를 돌려준다 — `current`에 행이 없으면 최신"
+        "구간 하나의 최신 점수를 돌려준다\n\n— `current`에 행이 없으면 최신"
         " `standard` 점수로 대신 응답하고, 어느 쪽인지는 `source`로 알린다."
     ),
 )
@@ -85,7 +85,7 @@ def read_comfort_score(
     response_model=ComfortScoreBatchResponse,
     summary="구간 승차감 점수 일괄(다건) 조회",
     description=(
-        "여러 구간의 점수를 요청 순서 그대로 돌려준다 — 점수가 없는 구간은"
+        "여러 구간의 점수를 요청 순서 그대로 돌려준다 \n\n— 점수가 없는 구간은"
         " 오류가 아니라 `not_found_segment_ids`로 따로 담는다."
     ),
 )
@@ -123,9 +123,9 @@ def read_comfort_scores(
     response_model=RouteEvaluationResponse,
     summary="후보 경로 승차감 평가",
     description=(
-        "후보 경로 목록을 받아 경로별 승차감 점수를 매긴다 — 점수 내림차순으로"
-        " 정렬되며, 맨 앞 경로가 `recommended_route_id`다. 요청한 차량 프로필이"
-        " 활성이 아니면 차량 무관 프로필로 계산하고"
+        "후보 경로 목록을 받아 경로별 승차감 점수를 매긴다.\n\n"
+        "점수 내림차순으로 정렬되며, 맨 앞 경로가 `recommended_route_id`다.\n\n"
+        "요청한 차량 프로필이 활성이 아니면 차량 무관 프로필로 계산하고"
         " `vehicle_profile_fallback`으로 알린다."
     ),
 )
