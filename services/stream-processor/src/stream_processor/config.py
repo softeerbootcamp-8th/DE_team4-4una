@@ -17,6 +17,9 @@ class StreamConfig:
     bronze_output_path: str
     bronze_checkpoint_location: str
     starting_offsets: str
+    min_offsets_per_trigger: int
+    max_trigger_delay: str
+    bronze_output_partitions: int
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> StreamConfig:
@@ -39,4 +42,17 @@ class StreamConfig:
             # 체크포인트가 없을 때만 적용되며, 체크포인트가 있으면 이 값과 무관하게
             # Spark가 체크포인트 기준으로 재개한다 (재시작 시 재개 조건 충족).
             starting_offsets=source.get("KAFKA_STARTING_OFFSETS", "earliest"),
+            # Kafka에 이만큼 쌓일 때까지 micro-batch를 미룬다(partition별이 아니라 전체 합계).
+            # 기본 600,000건은 parquet 약 128MB다 — 우리 Bronze 실측으로 디스크에서
+            # 행당 223B. 데이터가 적은 로컬 스모크에서는 0으로 꺼야 max_trigger_delay를
+            # 기다리지 않는다.
+            min_offsets_per_trigger=int(
+                source.get("STREAM_MIN_OFFSETS_PER_TRIGGER", "600000")
+            ),
+            # min_offsets_per_trigger만 걸면 트래픽이 적을 때 스트림이 아무것도 쓰지 않는다.
+            # 양이 모자라도 이 시간이 지나면 배치를 실행시키는 상한이다.
+            max_trigger_delay=source.get("STREAM_MAX_TRIGGER_DELAY", "5m"),
+            # 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
+            # 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
+            bronze_output_partitions=int(source.get("STREAM_BRONZE_OUTPUT_PARTITIONS", "1")),
         )

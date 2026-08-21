@@ -1,7 +1,34 @@
 from datetime import UTC, datetime
 
 from pyspark.sql import Row
-from stream_processor.kafka_source import select_sensor_columns
+from stream_processor.config import StreamConfig
+from stream_processor.kafka_source import kafka_read_options, select_sensor_columns
+
+
+def stream_config(**overrides: str) -> StreamConfig:
+    return StreamConfig.from_env(
+        {"KAFKA_BOOTSTRAP_SERVERS": "broker:9092", "KAFKA_SENSOR_TOPIC": "sensor-events"}
+        | overrides
+    )
+
+
+def test_kafka_read_options_batches_by_default() -> None:
+    options = kafka_read_options(stream_config())
+
+    # 둘은 반드시 함께 걸려야 한다. minOffsetsPerTrigger만 있으면 한산할 때 배치가 멈춘다.
+    assert options["minOffsetsPerTrigger"] == "600000"
+    assert options["maxTriggerDelay"] == "5m"
+
+
+def test_kafka_read_options_omits_batching_when_turned_off() -> None:
+    options = kafka_read_options(stream_config(STREAM_MIN_OFFSETS_PER_TRIGGER="0"))
+
+    # 0으로 끄면 두 옵션 모두 빠져서 trigger 주기마다 바로 쓴다.
+    assert options == {
+        "kafka.bootstrap.servers": "broker:9092",
+        "subscribe": "sensor-events",
+        "startingOffsets": "earliest",
+    }
 
 
 def raw_kafka_row() -> Row:

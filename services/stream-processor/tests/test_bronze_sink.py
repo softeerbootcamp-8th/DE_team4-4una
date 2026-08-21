@@ -63,6 +63,9 @@ def stream_config(output_path: str, checkpoint_path: str) -> StreamConfig:
         bronze_output_path=output_path,
         bronze_checkpoint_location=checkpoint_path,
         starting_offsets="earliest",
+        min_offsets_per_trigger=0,
+        max_trigger_delay="5m",
+        bronze_output_partitions=1,
     )
 
 
@@ -140,3 +143,45 @@ def test_parquet_sink_resumes_from_checkpoint_without_rewriting_input(spark, tmp
         "offset",
         "timestamp",
     ]
+
+
+def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -> None:
+    input_path = tmp_path / "input"
+    output_path = tmp_path / "bronze"
+    input_path.mkdir()
+    config = stream_config(str(output_path), str(tmp_path / "checkpoint"))
+
+    for offset in range(1, 6):
+        record = {
+            "key": "trip-1",
+            "value": json.dumps(SENSOR_VALUE | {"event_id": f"event-{offset}"}),
+            "topic": "sensor-events",
+            "partition": offset,
+            "offset": offset,
+            "timestamp": "2026-08-14T05:00:00Z",
+        }
+        (input_path / f"batch-{offset}.json").write_text(json.dumps(record))
+
+    # 작은 파일은 기본 설정에서 한 partition으로 묶여버려서 coalesce가 있으나 없으나
+    # 결과가 같아진다. 파일 하나가 partition 하나가 되도록 강제해야 검증이 성립한다.
+    # 가장 큰 파일보다 1바이트 큰 값이면 파일 하나는 담기고 둘은 안 담긴다.
+    largest_input = max(path.stat().st_size for path in input_path.glob("*.json"))
+    previous_max_bytes = spark.conf.get("spark.sql.files.maxPartitionBytes")
+    spark.conf.set("spark.sql.files.maxPartitionBytes", str(largest_input + 1))
+    spark.conf.set("spark.sql.files.openCostInBytes", "0")
+    try:
+        source = spark.read.schema(KAFKA_RECORD_SCHEMA).json(str(input_path))
+        # coalesce가 없으면 이 partition 수만큼(=5개) 파일이 쏟아진다는 뜻이다.
+        assert source.rdd.getNumPartitions() == 5
+
+        records = spark.readStream.schema(KAFKA_RECORD_SCHEMA).json(str(input_path))
+        query = write_bronze_stream(records, config)
+        query.processAllAvailable()
+        query.stop()
+    finally:
+        spark.conf.set("spark.sql.files.maxPartitionBytes", previous_max_bytes)
+        spark.conf.unset("spark.sql.files.openCostInBytes")
+
+    assert config.bronze_output_partitions == 1
+    assert len(list(output_path.glob("*.parquet"))) == 1
+    assert spark.read.parquet(str(output_path)).count() == 5

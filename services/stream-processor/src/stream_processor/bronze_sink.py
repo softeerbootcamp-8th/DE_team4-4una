@@ -35,6 +35,9 @@ def add_ingestion_time_to_value(
 def write_bronze_stream(records: DataFrame, config: StreamConfig) -> StreamingQuery:
     """Start the append-only local Parquet sink with a dedicated checkpoint."""
     bronze_records = add_ingestion_time_to_value(records)
+    # Kafka partition마다 task가 하나씩 생겨 그대로 쓰면 배치당 파일이 partition 수만큼
+    # 쏟아진다. trigger를 키워도 이걸 안 하면 파일 크기는 그대로라 쓰기 직전에 합친다.
+    bronze_records = bronze_records.coalesce(config.bronze_output_partitions)
     # checkpoint를 출력과 분리해 재시작 시 마지막 Kafka offset부터 이어간다.
     return (
         bronze_records.writeStream.format("parquet")
