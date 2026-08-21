@@ -46,7 +46,6 @@ start_container() {
 
 # /health는 DB에 못 닿으면 503을 준다. curl --fail 성공만으로 앱과 DB를 함께 본다.
 # database 값을 한 번 더 확인하는 건 200에 degraded 본문을 주는 변경까지 잡기 위함이다.
-# SSM이 어떤 셸로 실행할지 보장되지 않아 bash 전용 문법($SECONDS)은 쓰지 않는다.
 wait_for_health() {
   local interval=3
   local remaining=$((HEALTH_TIMEOUT / interval))
