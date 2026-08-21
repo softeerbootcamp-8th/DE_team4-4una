@@ -70,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate_sensor_processing_parser.add_argument("--output-path")
     validate_sensor_processing_parser.add_argument("--quarantine-output-path")
 
+    validate_hourly_scoring_parser = subparsers.add_parser("validate-hourly-scoring")
+    validate_hourly_scoring_parser.add_argument("--output-path")
+
+    validate_standard_score_parser = subparsers.add_parser("validate-standard-score")
+    validate_standard_score_parser.add_argument("--as-of", required=True)
+
     audit_gold_parser = subparsers.add_parser("audit-gold")
     audit_gold_parser.add_argument(
         "--table",
@@ -352,6 +358,74 @@ def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
         spark.stop()
 
 
+def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
+    from batch_jobs.hourly_scoring_validation import (
+        HourlyScoringValidationConfig,
+        build_spark_session,
+        run_hourly_scoring_validation,
+    )
+
+    defaults = HourlyScoringValidationConfig.from_env()
+    config = HourlyScoringValidationConfig(
+        score_output_path=arguments.output_path or defaults.score_output_path,
+        score_ranges_suite_path=defaults.score_ranges_suite_path,
+        zero_sample_rate_suite_path=defaults.zero_sample_rate_suite_path,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        summary = run_hourly_scoring_validation(spark, config)
+        print(
+            json.dumps(
+                {
+                    "row_count": summary.row_count,
+                    "zero_sample_count": summary.zero_sample_count,
+                    "zero_sample_rate": summary.zero_sample_rate,
+                    "success": summary.success,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        spark.stop()
+
+
+def run_standard_score_validation_cli(arguments: argparse.Namespace) -> None:
+    import psycopg2
+
+    from batch_jobs.standard_score_validation import (
+        StandardScoreValidationConfig,
+        run_standard_score_validation,
+    )
+
+    as_of = datetime.fromisoformat(arguments.as_of)
+    if as_of.utcoffset() is None:
+        raise ValueError(
+            "--as-of must include a UTC offset, e.g. 2026-08-19T00:00:00+00:00"
+        )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = StandardScoreValidationConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_standard_score_validation(config, as_of, connection)
+        print(
+            json.dumps(
+                {"row_count": summary.row_count, "success": summary.success},
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -368,6 +442,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "validate-sensor-processing":
         run_sensor_processing_validation_cli(arguments)
+        return
+    if arguments.command == "validate-hourly-scoring":
+        run_hourly_scoring_validation_cli(arguments)
+        return
+    if arguments.command == "validate-standard-score":
+        run_standard_score_validation_cli(arguments)
         return
     if arguments.command == "audit-gold":
         run_gold_audit_cli(arguments)
