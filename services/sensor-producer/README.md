@@ -67,6 +67,12 @@ The bounded sample uses trips whose pickup and drop-off are both inside the
 selected taxi zone. This keeps the reference-data download and local routing
 graph small while still using real TLC rows.
 
+The local sample bundle uses fixed filenames: `lion.geojson`,
+`pavement.geojson`, `speed_humps.geojson`, `taxi_zones.zip`, `trips.json`, and
+`manifest.json`. The original monthly HVFHV source follows
+`fhvhv_tripdata_YYYY-MM.parquet`; `trips.json` is the bounded replay input derived
+from that Parquet file.
+
 The producer no longer parses `lion.geojson` directly (#225) — it routes over
 the canonical `road_segment` Parquet instead: a single-`snapshot_date`
 Parquet file (`segment_id`, `from_node_id`, `to_node_id`, `traffic_direction`,

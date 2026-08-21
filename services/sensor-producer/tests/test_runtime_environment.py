@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -146,6 +147,24 @@ def test_loader_resolves_verified_environment(tmp_path: Path, scheme: str) -> No
     assert loaded.environment.segments[0].pavement_rating == 7.5
     assert loaded.environment.segments[0].hump_fractions == [0.5]
     assert set(loaded.environment.taxi_zones) == {181}
+
+
+def test_loader_logs_cache_miss_then_hit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ObjectStore()
+    pointer_uri = publish_environment(
+        store, (tmp_path / "lake").as_uri(), tmp_path / "source"
+    )
+    loader = RoadEnvironmentLoader(store)
+    caplog.set_level(logging.INFO, logger="sensor_producer.runtime_environment")
+
+    loader.from_pointer(pointer_uri, tmp_path / "cache")
+    loader.from_pointer(pointer_uri, tmp_path / "cache")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("cache miss" in message for message in messages)
+    assert any("cache hit" in message for message in messages)
 
 
 def test_loader_rejects_artifact_checksum_mismatch(tmp_path: Path) -> None:

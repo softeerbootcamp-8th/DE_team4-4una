@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from collections.abc import Iterable
 from datetime import date
@@ -85,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     arguments = build_parser().parse_args(argv)
     if arguments.command == "fetch-nyc-sample":
         manifest = fetch_nyc_sample(
