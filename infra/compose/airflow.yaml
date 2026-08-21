@@ -78,8 +78,11 @@ services:
       # weather_pipeline이 PythonOperator에서 jobs.weather를 임포트하기 위한 배선.
       # jobs/를 아래 마운트하고 PYTHONPATH에 그 부모를 잡아 `from jobs.weather import ...`가
       # 되게 한다. jobs.weather는 함수 안에서만 임포트되므로(지연 임포트) dag-processor는
-      # 이 값이 없어도 DAG를 정상 파싱한다.
-      PYTHONPATH: ${AIRFLOW_HOME}/orchestration
+      # 이 값이 없어도 DAG를 정상 파싱한다. bronze_compaction(#271)의 jobs.bronze_compaction은
+      # de4_core.ObjectStore를 쓰는 첫 PythonOperator job이라, libs/de4-core도 같은 방식으로
+      # 마운트하고 PYTHONPATH에 추가해야 `import de4_core`가 된다(공식 이미지엔 de4-core가
+      # 설치돼 있지 않음 — batch-jobs 컨테이너와 달리 uv workspace 전체를 설치하지 않는다).
+      PYTHONPATH: ${AIRFLOW_HOME}/orchestration:${AIRFLOW_HOME}/de4-core-src
       ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
       # weather_pipeline(#222)이 15분마다 zone_weather_snapshot Parquet 이력을 쓰는 경로.
       ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
@@ -92,10 +95,14 @@ services:
       # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
       # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
       # great-expectations/pandas는 current_score_quarantine(#251)의 행 단위 GX 검증용.
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0"
+      # boto3는 bronze_compaction(#271)이 s3:// 경로를 다룰 때 de4_core.ObjectStore가 쓴다.
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0"
     volumes:
       - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
       - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
+      # bronze_compaction(#271)의 jobs.bronze_compaction이 임포트하는 de4_core 패키지
+      # 소스 — jobs 마운트와 같은 이유로 필요(공식 이미지에 de4-core 미설치, :ro).
+      - ../../libs/de4-core/src/de4_core:${AIRFLOW_HOME}/de4-core-src/de4_core:ro
       # weather_pipeline의 task가 실제로 실행되는 컨테이너에만 필요 — zone_master.parquet 읽기용(:ro).
       - ../../data/reference:${AIRFLOW_HOME}/data/reference:ro
       # current_score의 road_segment 읽기용(:ro). batch-jobs task가 docker로 마운트하는 것과 같은 경로다.
