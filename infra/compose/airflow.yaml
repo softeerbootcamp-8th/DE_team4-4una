@@ -88,7 +88,8 @@ services:
       CURRENT_SCORE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
       # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
       # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1"
+      # great-expectations/pandas는 current_score_quarantine(#251)의 행 단위 GX 검증용.
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0"
     volumes:
       - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
       - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs

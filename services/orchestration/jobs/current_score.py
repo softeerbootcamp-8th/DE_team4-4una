@@ -15,6 +15,7 @@ import pyarrow.compute as pc
 import pyarrow.dataset as ds
 from psycopg2.extras import execute_values
 
+from . import current_score_quarantine
 from .weather_rules import (
     WEATHER_RULE_VERSION,
     WeatherRuleConfig,
@@ -131,6 +132,7 @@ class CurrentScoreJobSummary:
     upserted_count: int
     # zone이 배정되지 않은 segment. location_id가 NOT NULL이라 행을 만들 수 없다.
     skipped_unzoned_count: int
+    quarantined_count: int
 
 
 # road_segment(Parquet)에서 segment -> zone 매핑을 읽는다. 이 매핑은 Postgres에 없다.
@@ -195,7 +197,7 @@ def run_current_score_job(
         zones = find_changed_zones(connection)
         if not zones:
             logger.info("no zone changed its weather — nothing to recompute")
-            return CurrentScoreJobSummary(0, 0, 0)
+            return CurrentScoreJobSummary(0, 0, 0, 0)
         target_zones: set[int] | None = set(zones)
     else:
         zones = tuple(sorted(set(segment_zones.values())))
@@ -204,6 +206,8 @@ def run_current_score_job(
     calculated_at = datetime.now(UTC)
     upserted = 0
     skipped = 0
+    quarantined = 0
+    suite = current_score_quarantine.load_expectation_suite()
 
     with connection.cursor() as write_cursor:
         # 두 트리거(15분/시간별)가 겹쳐도 같은 행을 서로 덮어쓰지 않게 직렬화한다.
@@ -223,12 +227,24 @@ def run_current_score_job(
                         )
                     )
                 if rows:
-                    execute_values(
-                        write_cursor,
-                        _UPSERT_SQL,
-                        [tuple(row[column] for column in _ROW_COLUMNS) for row in rows],
+                    split = current_score_quarantine.split_batch(rows, rule_config, suite)
+                    if split.normal_rows:
+                        execute_values(
+                            write_cursor,
+                            _UPSERT_SQL,
+                            [
+                                tuple(row[column] for column in _ROW_COLUMNS)
+                                for row in split.normal_rows
+                            ],
+                        )
+                    current_score_quarantine.insert_quarantined_rows(
+                        write_cursor, split.quarantined_records
                     )
-                    upserted += len(rows)
+                    upserted += len(split.normal_rows)
+                    quarantined += len(split.quarantined_records)
+            current_score_quarantine.check_circuit_breaker(
+                upserted_count=upserted, quarantined_count=quarantined
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -237,11 +253,14 @@ def run_current_score_job(
             write_cursor.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 
     logger.info(
-        "current comfort score job finished zones=%d upserted=%d skipped_unzoned=%d",
-        len(zones), upserted, skipped,
+        "current comfort score job finished zones=%d upserted=%d skipped_unzoned=%d quarantined=%d",
+        len(zones), upserted, skipped, quarantined,
     )
     return CurrentScoreJobSummary(
-        zone_count=len(zones), upserted_count=upserted, skipped_unzoned_count=skipped
+        zone_count=len(zones),
+        upserted_count=upserted,
+        skipped_unzoned_count=skipped,
+        quarantined_count=quarantined,
     )
 
 

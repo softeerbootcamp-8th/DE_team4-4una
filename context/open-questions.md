@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-19
+last_reviewed: 2026-08-21
 ---
 
 # Open Questions and Decision Register
@@ -33,6 +33,7 @@ ADR when the choice affects multiple components.
 | OQ-010 | How should endpoints be selected when a taxi zone has no valid canonical road point? | Controls rejects and route coverage | Open |
 | OQ-011 | How are pavement observations and speed humps spatially assigned near ambiguous segment boundaries? | Prototype uses normalized street name plus nearest geometry within approximately 39 m; exact production policy remains open | Prototype accepted 2026-08-10 |
 | OQ-012 | What does the monthly score period represent: trip month, replay month, reference snapshot month, or publication month? | Controls grouping and API freshness | Open |
+| OQ-042 | What is the exact freshness threshold for `current_segment_comfort_score.standard_score_as_of` — how many hours old may it be before the row is no longer considered a valid "current" score? | Bounds how stale a served current score can be before it should be treated as unreliable; the row-level quarantine validation (issue #251, ADR-0008) currently only checks `standard_score_as_of` NOT NULL, not its age | Open |
 
 ## Simulation decisions
 

@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-20
+last_reviewed: 2026-08-21
 ---
 
 # Data Quality and Idempotency Rules
@@ -178,6 +178,44 @@ weather_time <= EXCLUDED.weather_time` clause).
   ordinary high-confidence score. **Open**: the exact coverage rule (a
   `confidence_score` or `sample_count` threshold) is not yet defined, so it is
   not yet implemented as a GX Expectation.
+
+### Row-level in-flight quarantine (current score, implemented, #251)
+
+Unlike the other Gold in-flight checks above, `current_segment_comfort_score`
+is validated in-memory, row by row, immediately before each UPSERT rather than
+as a separate post-step task — the table is UPSERT-only with a single latest
+row per `(segment_id, vehicle_profile_id)`, so a bad value written first would
+have no prior value to roll back to (ADR-0008).
+
+- **Checks**: `comfort_score`, `vertical_score`, `longitudinal_score`, and
+  `lateral_score` each in `[0, 100]`; `confidence_score` in `[0, 1]`;
+  `sample_count >= 0`; the directional weighted-sum identity (`comfort_score`
+  equals the weighted sum of the three directional scores, skipped when
+  `low_visibility` is active, per `current_score_quarantine.compute_identity_diff`);
+  and `standard_score_as_of` NOT NULL (the exact freshness threshold beyond
+  non-null remains open — see `OQ-042`).
+- Implemented as a GX Expectation Suite
+  (`resources/expectations/current_segment_comfort_score_quarantine_suite.json`)
+  run by `orchestration.jobs.current_score_quarantine` (issue #251, ADR-0008)
+  via `PandasExecutionEngine` against the in-memory batch, called from
+  `run_current_score_job` in `jobs/current_score.py` right before the UPSERT
+  (not `SqlAlchemyExecutionEngine` against Postgres like the other Gold checks,
+  since validating a live UPSERT-only table would mean checking a value only
+  after it already overwrote the previous one).
+- **Row-level split**: rows that pass validation are UPSERTed as usual; rows
+  that fail are INSERTed into the new `current_segment_comfort_score_quarantine`
+  table (see `schema-catalog.md`) in the same transaction, so normal rows keep
+  serving even when some rows in the batch are bad.
+- **Circuit breaker**: `current_score_quarantine.check_circuit_breaker` raises
+  `CurrentScoreCircuitBreakerTripped`, hard-failing the Airflow task and rolling
+  back the whole transaction (both the UPSERTs and the quarantine inserts),
+  when a run's normal-row count is 0 while rows were processed, or its
+  quarantine rate exceeds 25% (`DEFAULT_MAX_QUARANTINE_RATE`).
+- The `weather_time`/`weather_rule_version`/`weather_impact_signature`
+  NULL-triplet constraint is deliberately **not** in this suite — it is
+  already a hard invariant enforced twice over, by `_build_row` in code and by
+  DB `CHECK` constraints (migrations `0006`/`0009`), consistent with the
+  ADR-0004 principle that hard invariants stay in code/DB, not GX.
 
 ### Gold at-rest audit (implemented, #253)
 

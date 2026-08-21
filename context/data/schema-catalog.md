@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-20
+last_reviewed: 2026-08-21
 ---
 
 # Table Schema Catalog
@@ -31,6 +31,7 @@ design and must not be invented silently.
 | `latest_zone_weather` | TBD | Silver/Serving (PostgreSQL) | One TLC taxi zone's latest weather observation |
 | `zone_weather_snapshot` | `zone_weather_snapshot` | Bronze (local Parquet, `data/local-lake`) | One TLC taxi zone x 15-minute weather observation |
 | `current_segment_comfort_score` | TBD | Gold/Serving (PostgreSQL) | One segment x vehicle profile's current state |
+| `current_segment_comfort_score_quarantine` | `current_segment_comfort_score_quarantine` | Gold/Serving reject log (PostgreSQL) | One row-level GX validation rejection from a `current_score` run |
 | `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
 | `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
 | `zone_scores` | `zone_scores` | Gold (zone-profile pipeline) | One TLC taxi zone |
@@ -633,6 +634,39 @@ the 15-minute path selects by zone while the primary key is segment-first.
   pointed at — even though this row's score was never recomputed. Keeping
   the reference logical lets `weather_time` stay a frozen record of "what
   weather this score was actually computed from."
+
+## `current_segment_comfort_score_quarantine`
+
+**Status:** implemented (issue #251, ADR-0008 — see
+`docs/adr/0008-current-score-row-level-quarantine-and-circuit-breaker.md`).
+**Layer:** Gold/Serving reject log. **Storage:** PostgreSQL, migration
+`services/batch-jobs/src/batch_jobs/resources/migrations/0011_create_current_score_quarantine.sql`.
+
+**Grain:** one row-level GX validation rejection from a `current_score` run —
+not the serving table's "current state" grain. `run_current_score_job`
+(`jobs/current_score.py`) validates each batch in-memory via
+`orchestration.jobs.current_score_quarantine` right before the
+`current_segment_comfort_score` UPSERT (see `quality-rules.md`, "Row-level
+in-flight quarantine"); rows that fail are INSERTed here instead, in the same
+transaction as the UPSERT.
+
+**Primary key:** `id` (`BIGSERIAL`). Deliberately **append-only** — no unique
+constraint on `(segment_id, vehicle_profile_id)`, since the same key can be
+quarantined again across multiple runs and each rejection is its own record,
+unlike the UPSERT-only main table. Reprocessing/recovery workflows for
+quarantined rows are explicitly out of scope for #251, so this schema covers
+only audit and query needs, not replay.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Quarantine record ID | `id` | BIGSERIAL | N | PK | Auto-incrementing rejection identifier |
+| Road segment | `segment_id` | TEXT | N |  | The rejected row's segment ID (indexed with `vehicle_profile_id`) |
+| Vehicle profile | `vehicle_profile_id` | INTEGER | N |  | The rejected row's vehicle profile ID (indexed with `segment_id`) |
+| Calculated time | `calculated_at` | TIMESTAMPTZ | N |  | Indexed; the rejected row's own `calculated_at` value, for time-range audit queries |
+| Reject reason | `reject_reason` | TEXT | N |  | Comma-joined, sorted set of the column names whose GX expectations the row violated |
+| Reject detail | `reject_detail` | JSONB | N |  | Per-violation detail (expectation type, column, observed value) for every failed expectation on the row; JSONB so new rules don't require a schema migration |
+| Raw row | `raw_row` | JSONB | N |  | The full rejected row as it was about to be UPSERTed, for audit/debugging |
+| Rejected time | `rejected_at` | TIMESTAMPTZ | N |  | Defaults to `now()`; when the quarantine INSERT itself happened |
 
 ## `zone_master`
 
