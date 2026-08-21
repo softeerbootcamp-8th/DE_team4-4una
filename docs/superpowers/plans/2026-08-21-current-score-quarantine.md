@@ -98,10 +98,14 @@ CREATE INDEX current_segment_comfort_score_quarantine_calculated_at_idx
     ON current_segment_comfort_score_quarantine (calculated_at);
 ```
 
-- [ ] **Step 2: 마이그레이션 러너 테스트로 파일이 유효한 SQL인지 확인**
+- [ ] **Step 2: 파일 내용 확인 (실제 SQL 문법 검증은 Task 6에서)**
 
-Run: `uv run --package batch-jobs pytest services/batch-jobs/tests/test_migrate.py -v`
-Expected: PASS (기존 마이그레이션 러너 테스트가 `migrations_dir`의 `*.sql`을 전부 순회하므로, 새 파일이 문법 오류가 있으면 로컬 Postgres에 대해 실행할 때 실패로 드러난다 — 이 테스트 자체는 실제 DB 없이도 실행되는지 `tests/test_migrate.py`를 확인하고, 실제 DB 검증은 Task 6에서 `migrate-database` CLI로 한다).
+`services/batch-jobs/tests/test_migrate.py`는 `FakeCursor`/`FakeConnection`으로 SQL 문자열을 그대로 기록만 할 뿐 실행하지 않고, 임시 디렉터리에 쓴 파일만 대상으로 하므로 이 새 파일의 실제 SQL 문법을 검증해주지 않는다 — 실행하지 않는다. 대신 파일이 의도한 내용을 담고 있는지 grep으로 확인한다.
+
+Run: `grep -c "CREATE TABLE current_segment_comfort_score_quarantine\|CREATE INDEX" services/batch-jobs/src/batch_jobs/resources/migrations/0011_create_current_score_quarantine.sql`
+Expected: `3` (테이블 1개 + 인덱스 2개).
+
+실제 Postgres에 대한 SQL 문법/제약 검증은 이 파일을 직접 실행하지 않고 Task 6에서 `batch-jobs migrate-database`로 한다 — AGENTS.md가 데이터베이스 마이그레이션 실행을 "Ask first" 항목으로 명시하므로, 실행 직전에 반드시 사용자에게 확인을 받는다(Task 6 Step 1 참고).
 
 - [ ] **Step 3: Commit**
 
@@ -982,7 +986,11 @@ git commit -m "docs: sync context with current_score row-level quarantine (#251)
 
 **Interfaces:** 없음 — 이슈 #251의 완료 조건을 실제 환경에서 확인한다.
 
-- [ ] **Step 1: 마이그레이션 적용**
+**실행 주체**: 이 태스크는 구현 서브에이전트에게 위임하지 않는다 — 컨트롤러(나)가 사용자와 함께 직접 진행한다. `POSTGRES_*` 자격 증명은 `.env`에만 있고 AGENTS.md가 `.env` 읽기/수정을 금지하므로, DB 접속이 필요한 명령은 사용자에게 직접 실행을 요청하거나(예: `! make migrate`) 사용자가 이미 내보낸 환경변수가 있는 셸에서만 실행한다. 또한 AGENTS.md는 "데이터베이스 마이그레이션 실행"을 Ask first 항목으로 명시하므로, Step 1을 실행하기 전에 반드시 사용자에게 명시적으로 확인받는다.
+
+- [ ] **Step 1: 마이그레이션 적용 (실행 전 사용자에게 명시적으로 확인받을 것)**
+
+사용자에게 "`0011_create_current_score_quarantine.sql`을 로컬 Postgres에 적용해도 될까요?"라고 확인한 뒤, 승인받으면 사용자가 직접 실행하도록 안내하거나(`! make migrate`) 사용자가 이미 `POSTGRES_*`를 내보낸 셸에서 실행한다:
 
 Run: `uv run --package batch-jobs batch-jobs migrate-database`
 Expected: `0011_create_current_score_quarantine.sql`이 `applied`로 표시됨.
