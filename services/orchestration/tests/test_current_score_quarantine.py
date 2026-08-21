@@ -6,7 +6,9 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import great_expectations as gx
 import pytest
+from great_expectations.expectations import ExpectTableRowCountToEqual
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -145,6 +147,19 @@ class TestSplitBatch:
 
         assert split.normal_rows == []
         assert split.quarantined_records == []
+
+    def test_table_level_failure_without_row_indexes_trips_circuit_breaker(self):
+        # expect_table_row_count_to_equal은 테이블 단위 expectation이라
+        # 실패해도 unexpected_index_list를 만들지 않는다. 이 경우 어떤 행을
+        # 격리해야 하는지 알 수 없으므로 배치 전체를 거부해야 한다.
+        suite = gx.ExpectationSuite(
+            name="adhoc_table_level_suite",
+            expectations=[ExpectTableRowCountToEqual(value=999)],
+        )
+        rows = [_valid_row("1"), _valid_row("2")]
+
+        with pytest.raises(CurrentScoreCircuitBreakerTripped, match="row-level indexes"):
+            split_batch(rows, RULE_CONFIG, suite)
 
 
 class FakeQuarantineCursor:

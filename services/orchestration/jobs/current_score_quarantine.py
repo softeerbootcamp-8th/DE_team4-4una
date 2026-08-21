@@ -107,6 +107,16 @@ def split_batch(
     violations_by_index: dict[int, list[dict]] = {}
     for expectation_result in result.results:
         unexpected_indexes = expectation_result.result.get("unexpected_index_list") or []
+        # 테이블 단위/집계형 expectation(예: expect_table_row_count_to_be_between)은
+        # 실패해도 unexpected_index_list를 생성하지 않는다. 이를 빈 리스트로 취급해
+        # 넘기면 위반이 0건으로 계산되어 품질 게이트를 조용히 통과하게 되므로,
+        # 행 단위로 격리 대상을 특정할 수 없는 실패는 배치 전체를 거부한다.
+        if not expectation_result.success and not unexpected_indexes:
+            raise CurrentScoreCircuitBreakerTripped(
+                f"expectation {expectation_result.expectation_config.type!r} failed without "
+                "producing row-level indexes — cannot safely determine which rows to "
+                "quarantine, refusing to write this batch"
+            )
         unexpected_values = expectation_result.result.get("unexpected_list") or []
         for index, value in zip(unexpected_indexes, unexpected_values, strict=True):
             violations_by_index.setdefault(index, []).append(
