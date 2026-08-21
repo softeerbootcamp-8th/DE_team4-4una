@@ -48,6 +48,7 @@ def _run_current_score(triggering_asset_events) -> None:
             "zone_count": summary.zone_count,
             "upserted_count": summary.upserted_count,
             "skipped_unzoned_count": summary.skipped_unzoned_count,
+            "quarantined_count": summary.quarantined_count,
         }
     )
 
