@@ -155,9 +155,21 @@ compares them itself; this endpoint contributes only comfort.
 
 **Response grain:** one row per requested route, carrying the route score and
 the two intermediate values that produced it (`average_comfort_score`,
-`worst_quartile_comfort_score`), plus `recommended_route_id`.
+`worst_quartile_comfort_score`), plus `recommended_route_id` and the vehicle
+profile the scores were actually computed for.
 
 Rules the implementation fixes:
+
+- A requested `vehicle_profile_id` that is absent from `vehicle_profile` or not
+  `is_active` is resolved to the vehicle-agnostic sentinel `0` rather than
+  failing the request (issue #272), and the response reports
+  `requested_vehicle_profile_id`, `effective_vehicle_profile_id`, and
+  `vehicle_profile_fallback` so the caller cannot mistake an all-vehicle score
+  for their own vehicle's. The substitution is also logged at WARNING, since a
+  200 response would otherwise hide a caller sending a bad id repeatedly. The
+  sentinel itself is not looked up — migration `0003` guarantees the row. This
+  fallback applies only to route evaluation; the point and batch lookups still
+  read the requested profile and report a miss.
 
 - Routes are returned sorted by `comfort_score` descending, and
   `recommended_route_id` is the first of them. There is no `rank` field — it
@@ -165,9 +177,10 @@ Rules the implementation fixes:
   their request order.
 - Segment scores are read through the same current-then-standard fallback as
   the point lookup, for the deduplicated union of every candidate's segments at
-  once. Reads stay at the point lookup's two round trips at most (one per
-  table) no matter how many candidates are compared, and segments shared
-  between candidates are read once.
+  once. Score reads stay at two round trips at most (one per table) no matter
+  how many candidates are compared, and segments shared between candidates are
+  read once. A non-sentinel profile adds one further round trip for the
+  `vehicle_profile` check above.
 - A segment with no score in either table fails the request with `404` (see
   `context/comfort-score.md`, "Route comfort score").
 - Bounds are per request, not per route: at most 10 candidate routes and 300
