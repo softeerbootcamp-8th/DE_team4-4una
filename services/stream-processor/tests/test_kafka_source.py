@@ -12,24 +12,23 @@ def stream_config(**overrides: str) -> StreamConfig:
     )
 
 
-def test_kafka_read_options_omits_batching_when_disabled() -> None:
+def test_kafka_read_options_batches_by_default() -> None:
     options = kafka_read_options(stream_config())
 
+    # 둘은 반드시 함께 걸려야 한다. minOffsetsPerTrigger만 있으면 한산할 때 배치가 멈춘다.
+    assert options["minOffsetsPerTrigger"] == "600000"
+    assert options["maxTriggerDelay"] == "5m"
+
+
+def test_kafka_read_options_omits_batching_when_turned_off() -> None:
+    options = kafka_read_options(stream_config(STREAM_MIN_OFFSETS_PER_TRIGGER="0"))
+
+    # 0으로 끄면 두 옵션 모두 빠져서 trigger 주기마다 바로 쓴다.
     assert options == {
         "kafka.bootstrap.servers": "broker:9092",
         "subscribe": "sensor-events",
         "startingOffsets": "earliest",
     }
-
-
-def test_kafka_read_options_pairs_min_offsets_with_max_trigger_delay() -> None:
-    options = kafka_read_options(
-        stream_config(STREAM_MIN_OFFSETS_PER_TRIGGER="600000", STREAM_MAX_TRIGGER_DELAY="2m")
-    )
-
-    # 둘은 반드시 함께 걸려야 한다. minOffsetsPerTrigger만 있으면 한산할 때 배치가 멈춘다.
-    assert options["minOffsetsPerTrigger"] == "600000"
-    assert options["maxTriggerDelay"] == "2m"
 
 
 def raw_kafka_row() -> Row:
