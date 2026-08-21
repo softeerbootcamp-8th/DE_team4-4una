@@ -69,6 +69,7 @@ def test_dag_has_no_current_score_recompute_task():
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
         "run_weather_collection",
+        "validate_weather_collection",
         "detect_changed_zones",
         "publish_zone_weather_asset",
     }
@@ -78,17 +79,32 @@ def test_dag_collects_then_gates_on_changed_zones():
     module = _load_dag_module()
 
     collection = module.dag.get_task("run_weather_collection")
+    validate = module.dag.get_task("validate_weather_collection")
     detect = module.dag.get_task("detect_changed_zones")
     publish = module.dag.get_task("publish_zone_weather_asset")
 
-    # 수집이 끝난 뒤에 비교해야 새 impact_signature가 이미 저장된 상태가 된다.
-    assert collection.downstream_task_ids == {"detect_changed_zones"}
+    # 검증(#250)은 이상 데이터로 zone이 잘못 "변경됨"으로 오판되는 걸 막기 위해
+    # detect_changed_zones보다 앞에 둔다. 수집이 끝난 뒤에 비교해야 새
+    # impact_signature가 이미 저장된 상태가 된다.
+    assert collection.downstream_task_ids == {"validate_weather_collection"}
+    assert validate.downstream_task_ids == {"detect_changed_zones"}
     assert detect.downstream_task_ids == {"publish_zone_weather_asset"}
 
     assert isinstance(detect, ShortCircuitOperator)
     assert detect.python_callable is module._has_changed_zones
 
     assert isinstance(publish, EmptyOperator)
+
+
+def test_validate_weather_collection_is_a_python_task_calling_the_validator():
+    import inspect
+
+    module = _load_dag_module()
+
+    task = module.dag.get_task("validate_weather_collection")
+    assert isinstance(task, PythonOperator)
+    assert task.python_callable is module._validate_weather_collection
+    assert "data_interval_end" in inspect.signature(module._validate_weather_collection).parameters
 
 
 def test_only_the_gated_publish_task_declares_the_zone_weather_outlet():

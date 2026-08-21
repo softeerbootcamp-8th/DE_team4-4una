@@ -46,6 +46,29 @@ def _collect_latest_zone_weather(data_interval_end) -> None:
     )
 
 
+def _validate_weather_collection(data_interval_end) -> None:
+    # detect_changed_zones보다 앞에 둔다 — 이상 데이터로 zone이 잘못 "변경됨"으로
+    # 오판되는 걸 막는다(#250). GX가 아니라 인라인 Python/SQL로 검증하는 이유는
+    # jobs/weather_validation.py 모듈 docstring 참고(ADR-0004 예외).
+    import psycopg2
+    from jobs.weather import LatestZoneWeatherJobConfig
+    from jobs.weather_validation import run_weather_collection_validation
+
+    config = LatestZoneWeatherJobConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    try:
+        summary = run_weather_collection_validation(connection, data_interval_end)
+    finally:
+        connection.close()
+    print({"row_count": summary.row_count})
+
+
 def _has_changed_zones() -> bool:
     # jobs/current_score.py의 기존 find_changed_zones()를 그대로 재사용한다 — 판정
     # 로직을 여기서 새로 만들지 않는다(#230). 수집 태스크 바로 다음이라, 비교 시점에는
@@ -93,6 +116,11 @@ with DAG(
         python_callable=_collect_latest_zone_weather,
     )
 
+    validate_weather_collection = PythonOperator(
+        task_id="validate_weather_collection",
+        python_callable=_validate_weather_collection,
+    )
+
     detect_changed_zones = ShortCircuitOperator(
         task_id="detect_changed_zones",
         python_callable=_has_changed_zones,
@@ -110,4 +138,5 @@ with DAG(
         outlets=[ZONE_WEATHER_ASSET],
     )
 
-    run_weather_collection >> detect_changed_zones >> publish_zone_weather_asset
+    run_weather_collection >> validate_weather_collection >> detect_changed_zones
+    detect_changed_zones >> publish_zone_weather_asset
