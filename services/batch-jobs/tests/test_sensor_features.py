@@ -93,8 +93,6 @@ class TestEventConfig:
         assert config.sharp_steer_threshold_deg_per_sec.provisional is True
         assert config.sharp_steer_min_duration_seconds.value == 0.3
         assert config.sharp_steer_min_duration_seconds.provisional is True
-        assert config.lookahead_seconds.value == 1.0
-        assert config.lookahead_seconds.provisional is True
 
 
 class TestSteeringConfig:
@@ -1410,11 +1408,13 @@ class TestHourlySegmentFeatureJob:
         assert len(result) == 1
         assert result[0]["hard_brake_count"] == 0  # 시작 행은 09시에 속하므로 10시엔 없어야 함
 
-    def test_lookback_rows_are_excluded_from_the_final_result(self, spark, tmp_path) -> None:
+    def test_rows_before_target_hour_are_excluded_from_the_final_result(
+        self, spark, tmp_path
+    ) -> None:
         rows = [
-            # target_hour 0.2초 전: lookback 범위 안이라 읽히지만 최종 집계에는 포함되면 안 됨
+            # target_hour 0.2초 전: 대상 시간 밖이라 읽지 않고, 집계에도 들어가면 안 됨
             self.sensor_row(
-                self.TARGET_HOUR - timedelta(milliseconds=200), "lookback", trip_id="LOOKBACK"
+                self.TARGET_HOUR - timedelta(milliseconds=200), "before", trip_id="BEFORE"
             ),
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=0), "e1", trip_seq=0),
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=1), "e2", trip_seq=1),
@@ -1422,11 +1422,11 @@ class TestHourlySegmentFeatureJob:
 
         _, result = self.run_job(spark, tmp_path, rows)
 
-        assert len(result) == 1  # lookback 행이 별도의 이전 시간 그룹을 만들지 않는다
+        assert len(result) == 1  # 이전 시간 행이 별도의 시간 그룹을 만들지 않는다
         assert result[0]["data_period_start"] == self.TARGET_HOUR.replace(tzinfo=None)
         assert result[0]["sample_count"] == 2
 
-    def test_episode_spanning_the_hour_boundary_is_counted_via_lookahead(self, spark, tmp_path) -> None:
+    def test_episode_spanning_the_hour_boundary_is_discarded(self, spark, tmp_path) -> None:
         rows = [
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=30), "e0", trip_seq=0, accel_x=0.0),
             # 급제동이 대상 시간 끝나기 0.2초 전에 시작해 다음 시간으로 0.1초 더 이어짐
@@ -1447,8 +1447,10 @@ class TestHourlySegmentFeatureJob:
         _, result = self.run_job(spark, tmp_path, rows)
 
         assert len(result) == 1
-        assert result[0]["hard_brake_count"] == 1
-        # 11시의 e2는 Episode 판단(lookahead)에는 쓰이지만 최종 sample_count에는 들어가면 안 된다.
+        # 다음 시간(11시)은 읽지 않으므로 e2가 없다. episode에 e1 한 행만 남아 길이가
+        # 0초로 잡히고 min_event_duration_seconds(0.3)에 걸려 이벤트로 세지 않는다.
+        # 미래 데이터가 필요한 경계 episode는 이렇게 버리는 것이 의도된 동작이다.
+        assert result[0]["hard_brake_count"] == 0
         assert result[0]["sample_count"] == 2
 
     def test_unmatched_events_are_excluded_from_the_result(self, spark, tmp_path) -> None:
