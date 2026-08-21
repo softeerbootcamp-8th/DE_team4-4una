@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Self
 
 RESOURCE_DIR = (
     Path(__file__).resolve().parents[1]
@@ -191,7 +192,7 @@ class _FakeCursor:
     def __init__(self, row: tuple) -> None:
         self._row = row
 
-    def __enter__(self) -> "_FakeCursor":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
