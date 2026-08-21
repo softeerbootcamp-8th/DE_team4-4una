@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-20
+last_reviewed: 2026-08-21
 ---
 
 # Comfort Score Design
@@ -325,6 +325,51 @@ Two operational rules the implementation fixes:
 - A zone with no `latest_zone_weather` row yet is written **unadjusted**, with
   `weather_time` / `weather_rule_version` / `weather_impact_signature` all null,
   as the table's CHECK constraints require.
+
+## Route comfort score (candidate route)
+
+Everything above scores one segment. Issue #269 adds a second aggregation, one
+level up: reducing the segment scores along a candidate route to a single
+comparable number, so a caller can rank routes it has already planned. This is
+a **read-time** aggregation in `services/serving-api`, not a stored dataset —
+nothing is written, and no new grain enters the Gold contracts.
+
+For a route whose segments carry scores `CS_1 .. CS_N`, in traversal order:
+
+1. `AvgComfort` is the mean of all `N` values. A segment traversed twice
+   contributes twice, because the vehicle drives it twice.
+2. `WorstComfort` is the mean of the lowest `max(1, ceil(N x worst_ratio))`
+   values.
+3. The route score is
+   `average_weight x AvgComfort + worst_quartile_weight x WorstComfort`.
+
+The mean alone cannot separate a uniformly decent route from one carrying a
+short severely uncomfortable stretch; the single worst segment lets one value
+decide the ranking. Averaging the worst tail sits between those two.
+
+**Status: Implemented, with provisional parameters.** The aggregation is
+implemented as a pure function in
+`services/serving-api/src/serving_api/route_comfort.py` and served by
+`POST /api/v1/routes/evaluate` (see `context/data/contracts.md`). The three
+numbers — `average_weight` 0.7, `worst_quartile_weight` 0.3, `worst_ratio`
+0.25 — are an MVP starting point, not a validated weighting, so they follow
+the same rule as the segment-level parameters below: they are configuration
+(`RouteComfortConfig` in `serving_api/config.py`, overridable through
+`SERVING_API_ROUTE_AVERAGE_WEIGHT`, `SERVING_API_ROUTE_WORST_QUARTILE_WEIGHT`,
+and `SERVING_API_ROUTE_WORST_RATIO`), not constants inside the formula, and
+they can be retuned without accepting them as a settled decision.
+
+Two rules the implementation fixes:
+
+- The two weights must sum to 1, checked when the configuration is built, so
+  the route score stays on the same 0-100 scale as the segment score.
+- A requested segment with no score in either `current_segment_comfort_score`
+  or `standard_segment_comfort_score` fails the whole request rather than being
+  dropped from the average. Standard scores are materialized for the full
+  segment x profile universe (see "Handling a vehicle profile that never
+  traversed a segment" above), so a missing score means the caller sent a
+  segment outside the road universe. Averaging what remains would answer for a
+  shorter route than the one asked about.
 
 ## Principles
 

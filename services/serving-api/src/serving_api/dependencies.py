@@ -8,9 +8,15 @@ import psycopg
 from fastapi import Request
 from psycopg_pool import ConnectionPool
 
+from serving_api.config import RouteComfortConfig
+
 
 def get_pool(request: Request) -> ConnectionPool:
     return request.app.state.pool
+
+
+def get_route_comfort_config(request: Request) -> RouteComfortConfig:
+    return request.app.state.config.route_comfort
 
 
 def get_connection(request: Request) -> Iterator[psycopg.Connection]:

@@ -11,6 +11,7 @@ import logging
 
 import psycopg
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -43,11 +44,13 @@ def register_error_handlers(app: FastAPI) -> None:
     async def handle_validation_error(
         request: Request, exception: RequestValidationError
     ) -> JSONResponse:
+        # 모델 검증기가 던진 ValueError는 `ctx`에 예외 객체 그대로 실려 온다.
+        # 직렬화하지 않고 넘기면 응답을 만들다가 500이 난다.
         return error_response(
             422,
             INVALID_REQUEST,
             "request validation failed",
-            details=exception.errors(),
+            details=jsonable_encoder(exception.errors()),
         )
 
     # psycopg_pool.PoolTimeout이 psycopg.Error 하위라, 커넥션 고갈도 이 핸들러가

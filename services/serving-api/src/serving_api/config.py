@@ -18,6 +18,63 @@ DEFAULT_POOL_MAX_SIZE = 8
 # 요청 하나가 커넥션을 오래 점유해 다른 요청까지 대기시킨다.
 MAX_BATCH_ITEMS = 300
 
+# 한 번에 비교할 후보 경로 수 상한. 내비게이션이 제시하는 후보는 보통 서너 개다.
+MAX_ROUTES_PER_REQUEST = 10
+
+# 경로 승차감 점수의 잠정(provisional) 정책값이다 (#269). 검증된 수치가 아니라
+# MVP에서 정한 값이므로 코드에 박지 않고 환경 변수로 덮어쓸 수 있게 둔다.
+DEFAULT_ROUTE_AVERAGE_WEIGHT = 0.7
+DEFAULT_ROUTE_WORST_QUARTILE_WEIGHT = 0.3
+DEFAULT_ROUTE_WORST_RATIO = 0.25
+
+# 가중치 합을 부동소수점으로 비교할 때 쓰는 허용 오차. 0.7 + 0.3처럼 정확히
+# 1이 되지 않는 조합을 설정 오류로 오인하지 않기 위한 값이다.
+_WEIGHT_SUM_TOLERANCE = 1e-9
+
+
+@dataclass(frozen=True, slots=True)
+class RouteComfortConfig:
+    """후보 경로 하나를 점수로 환산할 때 쓰는 정책값.
+
+    최종 점수는 `average_weight x 전체 평균 + worst_quartile_weight x 하위
+    구간 평균`이고, `worst_ratio`는 '하위 구간'으로 볼 비율이다.
+    """
+
+    average_weight: float
+    worst_quartile_weight: float
+    worst_ratio: float
+
+    def __post_init__(self) -> None:
+        # 두 가중치의 합이 1이 아니면 결과가 0~100 밖으로 나간다. 응답을 받은
+        # 뒤에는 알아채기 어려우므로 기동 시점에 막는다.
+        weight_sum = self.average_weight + self.worst_quartile_weight
+        if abs(weight_sum - 1.0) > _WEIGHT_SUM_TOLERANCE:
+            raise ValueError(
+                f"route comfort weights must sum to 1, got {weight_sum}"
+            )
+        if self.average_weight < 0 or self.worst_quartile_weight < 0:
+            raise ValueError("route comfort weights must not be negative")
+        if not 0 < self.worst_ratio <= 1:
+            raise ValueError(
+                f"route comfort worst_ratio must be in (0, 1], got {self.worst_ratio}"
+            )
+
+    @classmethod
+    def from_env(cls, source: Mapping[str, str]) -> RouteComfortConfig:
+        return cls(
+            average_weight=float(
+                source.get("SERVING_API_ROUTE_AVERAGE_WEIGHT")
+                or DEFAULT_ROUTE_AVERAGE_WEIGHT
+            ),
+            worst_quartile_weight=float(
+                source.get("SERVING_API_ROUTE_WORST_QUARTILE_WEIGHT")
+                or DEFAULT_ROUTE_WORST_QUARTILE_WEIGHT
+            ),
+            worst_ratio=float(
+                source.get("SERVING_API_ROUTE_WORST_RATIO") or DEFAULT_ROUTE_WORST_RATIO
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ServingApiConfig:
@@ -30,6 +87,7 @@ class ServingApiConfig:
     port: int
     pool_min_size: int
     pool_max_size: int
+    route_comfort: RouteComfortConfig
 
     @property
     def conninfo(self) -> str:
@@ -65,6 +123,7 @@ class ServingApiConfig:
             pool_max_size=int(
                 source.get("SERVING_API_POOL_MAX_SIZE") or DEFAULT_POOL_MAX_SIZE
             ),
+            route_comfort=RouteComfortConfig.from_env(source),
         )
 
 

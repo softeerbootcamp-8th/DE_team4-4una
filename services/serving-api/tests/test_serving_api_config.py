@@ -9,6 +9,10 @@ from serving_api.config import (
     DEFAULT_POOL_MAX_SIZE,
     DEFAULT_POOL_MIN_SIZE,
     DEFAULT_PORT,
+    DEFAULT_ROUTE_AVERAGE_WEIGHT,
+    DEFAULT_ROUTE_WORST_QUARTILE_WEIGHT,
+    DEFAULT_ROUTE_WORST_RATIO,
+    RouteComfortConfig,
     ServingApiConfig,
 )
 
@@ -73,3 +77,55 @@ def test_conninfo_pins_the_session_timezone_to_utc() -> None:
     config = ServingApiConfig.from_env(REQUIRED_ENV)
 
     assert conninfo_to_dict(config.conninfo)["options"] == "-c timezone=UTC"
+
+
+def test_from_env_applies_the_provisional_route_comfort_policy() -> None:
+    config = ServingApiConfig.from_env(REQUIRED_ENV)
+
+    assert config.route_comfort == RouteComfortConfig(
+        average_weight=DEFAULT_ROUTE_AVERAGE_WEIGHT,
+        worst_quartile_weight=DEFAULT_ROUTE_WORST_QUARTILE_WEIGHT,
+        worst_ratio=DEFAULT_ROUTE_WORST_RATIO,
+    )
+
+
+def test_from_env_reads_the_route_comfort_policy() -> None:
+    # 0.7/0.3/0.25는 검증된 값이 아니라 MVP 잠정값이라 재배포 없이 바꿀 수 있어야 한다.
+    config = ServingApiConfig.from_env(
+        REQUIRED_ENV
+        | {
+            "SERVING_API_ROUTE_AVERAGE_WEIGHT": "0.5",
+            "SERVING_API_ROUTE_WORST_QUARTILE_WEIGHT": "0.5",
+            "SERVING_API_ROUTE_WORST_RATIO": "0.1",
+        }
+    )
+
+    assert config.route_comfort.average_weight == 0.5
+    assert config.route_comfort.worst_quartile_weight == 0.5
+    assert config.route_comfort.worst_ratio == 0.1
+
+
+@pytest.mark.parametrize(
+    ("weights", "match"),
+    [
+        pytest.param({"average_weight": 0.7, "worst_quartile_weight": 0.7}, "sum to 1", id="sum"),
+        pytest.param(
+            {"average_weight": 1.5, "worst_quartile_weight": -0.5}, "negative", id="negative"
+        ),
+    ],
+)
+def test_route_comfort_config_rejects_weights_that_leave_the_0_100_scale(
+    weights: dict[str, float], match: str
+) -> None:
+    # 합이 1이 아니면 0~100을 벗어난 점수가 나오는데, 응답만 봐서는 알기 어렵다.
+    with pytest.raises(ValueError, match=match):
+        RouteComfortConfig(worst_ratio=0.25, **weights)
+
+
+@pytest.mark.parametrize("worst_ratio", [0.0, -0.1, 1.5])
+def test_route_comfort_config_rejects_an_out_of_range_worst_ratio(worst_ratio: float) -> None:
+    # 0이면 하위 구간이 하나도 없고, 1을 넘으면 경로 길이보다 많은 구간을 뜻한다.
+    with pytest.raises(ValueError, match="worst_ratio"):
+        RouteComfortConfig(
+            average_weight=0.7, worst_quartile_weight=0.3, worst_ratio=worst_ratio
+        )

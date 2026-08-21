@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-21
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -137,3 +137,39 @@ Candidate response fields:
 
 The endpoint path, transport schema, error format, and missing-score behavior are
 open. They should be captured in OpenAPI once accepted.
+
+## Route evaluation request and response
+
+**Implemented** by `POST /api/v1/routes/evaluate` in `services/serving-api`
+(issue #269). The executable contract is
+`services/serving-api/src/serving_api/schemas.py`
+(`RouteEvaluationRequest`, `RouteEvaluationResponse`), which is authoritative
+for field names and types; FastAPI publishes it as OpenAPI at `/openapi.json`.
+This section records the grain and the rules that the schema alone does not
+express.
+
+**Request grain:** one `vehicle_profile_id` plus a list of candidate routes,
+each a `route_id` and its `segment_ids` in traversal order. Distance and
+duration are deliberately not accepted — the caller already has them and
+compares them itself; this endpoint contributes only comfort.
+
+**Response grain:** one row per requested route, carrying the route score and
+the two intermediate values that produced it (`average_comfort_score`,
+`worst_quartile_comfort_score`), plus `recommended_route_id`.
+
+Rules the implementation fixes:
+
+- Routes are returned sorted by `comfort_score` descending, and
+  `recommended_route_id` is the first of them. There is no `rank` field — it
+  would restate the array order and could contradict it. Tied routes keep
+  their request order.
+- Segment scores are read through the same current-then-standard fallback as
+  the point lookup, for the deduplicated union of every candidate's segments at
+  once. Reads stay at the point lookup's two round trips at most (one per
+  table) no matter how many candidates are compared, and segments shared
+  between candidates are read once.
+- A segment with no score in either table fails the request with `404` (see
+  `context/comfort-score.md`, "Route comfort score").
+- Bounds are per request, not per route: at most 10 candidate routes and 300
+  distinct segments, the latter reusing the existing batch-read limit.
+- Scores are rounded to two decimal places before serialization.
