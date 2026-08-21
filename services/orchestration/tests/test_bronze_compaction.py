@@ -18,7 +18,6 @@ from jobs.bronze_compaction import (
     BronzeCompactionConfig,
     BronzeCompactionRowCountMismatch,
     compact_bronze_prefix,
-    run_sensor_events_compaction,
     run_zone_weather_snapshot_compaction,
 )
 
@@ -107,7 +106,9 @@ class TestCompactBronzePrefixMergesClosedGroups:
 
 
 class TestCompactBronzePrefixVerifiesRowCount:
-    def test_hard_fails_and_preserves_originals_on_row_count_mismatch(self, tmp_path) -> None:
+    def test_hard_fails_and_cleans_up_invalid_output_on_row_count_mismatch(
+        self, tmp_path
+    ) -> None:
         root = tmp_path.as_uri()
         store = ObjectStore()
         for i in range(3):
@@ -119,11 +120,13 @@ class TestCompactBronzePrefixVerifiesRowCount:
             os.utime(child, (past_epoch, past_epoch))
 
         class _CorruptingObjectStore(ObjectStore):
-            """merge된 임시 키를 읽을 때만 한 행을 잘라내 검증 실패를 재현한다."""
+            """merge된 최종 키를 읽을 때만 한 행을 잘라내 검증 실패를 재현한다."""
 
             def read_bytes(self, uri: str) -> bytes:
                 raw = super().read_bytes(uri)
-                if "_bronze_compaction_tmp" not in uri:
+                # source 파일의 basename(part-N.parquet)엔 이 문자열이 절대 나오지
+                # 않으므로, 최종 키 읽기만 골라 잘라낼 수 있다.
+                if "compacted-" not in uri.rsplit("/", 1)[-1]:
                     return raw
                 table = pq.read_table(io.BytesIO(raw))
                 truncated = table.slice(0, table.num_rows - 1)
@@ -143,10 +146,42 @@ class TestCompactBronzePrefixVerifiesRowCount:
             )
 
         remaining = store.list_objects(root)
-        # 원본 3개는 그대로 보존된다. 검증에 실패한 임시 병합 키는 정리 대상이
-        # 아니므로(원본 보존이 데이터 안전 보장의 전부) 디렉터리에 남아 있을 수 있다.
         remaining_names = {obj.uri.rsplit("/", 1)[-1] for obj in remaining}
-        assert {"part-0.parquet", "part-1.parquet", "part-2.parquet"} <= remaining_names
+        # 원본 3개만 남는다 — 검증에 실패한 병합 결과물은 정리되고(best-effort
+        # delete), 원본은 그대로 보존된다.
+        assert len(remaining) == 3
+        assert remaining_names == {"part-0.parquet", "part-1.parquet", "part-2.parquet"}
+        assert not any(name.startswith("compacted-") for name in remaining_names)
+
+
+class TestCompactBronzePrefixExcludesOrphanedOutputsFromMerging:
+    def test_orphaned_compacted_output_is_not_treated_as_a_merge_candidate(
+        self, tmp_path
+    ) -> None:
+        root = tmp_path.as_uri()
+        store = ObjectStore()
+        # 이전 실행이 결과물은 썼지만 원본 삭제 전에 중단됐다고 가정한다.
+        _write_parquet(store, join_uri(root, "compacted-oldrun.parquet"), [{"value": "old-merged"}])
+        for i in range(3):
+            _write_parquet(store, join_uri(root, f"part-{i}.parquet"), [{"value": i}])
+        import os
+
+        old_epoch = OLD.timestamp()
+        for path in tmp_path.rglob("*.parquet"):
+            os.utime(path, (old_epoch, old_epoch))
+
+        summary = compact_bronze_prefix(
+            store, root, now=NOW, safety_margin=timedelta(hours=1), target_object_count=1
+        )
+
+        assert len(summary.compacted_groups) == 1
+        group = summary.compacted_groups[0]
+        assert group.source_object_count == 3  # orphaned compacted-*.parquet is NOT counted as a source
+        assert group.row_count == 3
+        remaining = store.list_objects(root)
+        remaining_names = {obj.uri.rsplit("/", 1)[-1] for obj in remaining}
+        assert "compacted-oldrun.parquet" in remaining_names  # orphan left untouched, never merged in
+        assert len(remaining) == 2  # the untouched orphan + this run's new compacted output
 
 
 class TestCompactBronzePrefixGroupsByParentDirectory:
@@ -175,11 +210,65 @@ class TestCompactBronzePrefixGroupsByParentDirectory:
             assert group.row_count == 3
 
 
+class TestCompactBronzePrefixOnS3:
+    def test_merges_small_objects_under_an_s3_root(self) -> None:
+        class FakeS3Client:
+            def __init__(self) -> None:
+                self.objects: dict[tuple[str, str], bytes] = {}
+
+            def put_object(self, **kwargs: object) -> None:
+                self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
+
+            def get_object(self, **kwargs: object) -> dict[str, object]:
+                value = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
+                return {"Body": io.BytesIO(value)}
+
+            def head_object(self, **kwargs: object) -> dict[str, object]:
+                key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+                if key not in self.objects:
+                    raise KeyError(f"Object not found: {key}")
+                return {}
+
+            def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+                bucket = str(kwargs["Bucket"])
+                prefix = str(kwargs["Prefix"])
+                contents = [
+                    {"Key": key, "LastModified": OLD, "Size": len(body)}
+                    for (obj_bucket, key), body in self.objects.items()
+                    if obj_bucket == bucket and key.startswith(prefix)
+                ]
+                return {"Contents": contents, "IsTruncated": False}
+
+            def delete_objects(self, **kwargs: object) -> dict[str, object]:
+                bucket = str(kwargs["Bucket"])
+                for entry in kwargs["Delete"]["Objects"]:  # type: ignore[index]
+                    self.objects.pop((bucket, entry["Key"]), None)
+                return {}
+
+        client = FakeS3Client()
+        store = ObjectStore(client)  # type: ignore[arg-type]
+        root = "s3://test-bucket/bronze/zone_weather_snapshot/weather_date=2026-08-20"
+        for i in range(3):
+            _write_parquet(store, join_uri(root, f"part-{i}.parquet"), [{"value": i}])
+
+        summary = compact_bronze_prefix(
+            store, root, now=NOW, safety_margin=timedelta(hours=1), target_object_count=1
+        )
+
+        assert len(summary.compacted_groups) == 1
+        group = summary.compacted_groups[0]
+        assert group.source_object_count == 3
+        assert group.row_count == 3
+        assert group.final_uri.startswith("s3://test-bucket/")
+        assert _row_count(store, group.final_uri) == 3
+        remaining = store.list_objects(root)
+        assert [obj.uri for obj in remaining] == [group.final_uri]
+
+
 class TestBronzeCompactionConfig:
     def test_from_env_reads_uris_and_defaults(self) -> None:
         config = BronzeCompactionConfig.from_env({})
 
-        assert config.sensor_events_uri == "data/local-lake/bronze/sensor-events"
         assert config.zone_weather_snapshot_uri == "data/local-lake/bronze/zone_weather_snapshot"
         assert config.safety_margin == timedelta(hours=1)
         assert config.target_object_count == 1
@@ -187,44 +276,19 @@ class TestBronzeCompactionConfig:
     def test_from_env_overrides(self) -> None:
         config = BronzeCompactionConfig.from_env(
             {
-                "BRONZE_COMPACTION_SENSOR_EVENTS_URI": "s3://bucket/sensor-events",
                 "BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI": "s3://bucket/zone_weather_snapshot",
                 "BRONZE_COMPACTION_SAFETY_MARGIN_MINUTES": "30",
             }
         )
 
-        assert config.sensor_events_uri == "s3://bucket/sensor-events"
         assert config.zone_weather_snapshot_uri == "s3://bucket/zone_weather_snapshot"
         assert config.safety_margin == timedelta(minutes=30)
 
 
 class TestRunCompactionEntrypoints:
-    def test_run_sensor_events_compaction_targets_the_configured_uri(self, tmp_path) -> None:
-        sensor_events_uri = join_uri(tmp_path.as_uri(), "sensor-events")
-        config = BronzeCompactionConfig(
-            sensor_events_uri=sensor_events_uri,
-            zone_weather_snapshot_uri=join_uri(tmp_path.as_uri(), "zone_weather_snapshot"),
-            safety_margin=timedelta(hours=1),
-            target_object_count=1,
-        )
-        store = ObjectStore()
-        for i in range(2):
-            _write_parquet(store, join_uri(sensor_events_uri, f"part-{i}.parquet"), [{"value": i}])
-        import os
-
-        past_epoch = OLD.timestamp()
-        for path in tmp_path.rglob("*.parquet"):
-            os.utime(path, (past_epoch, past_epoch))
-
-        summary = run_sensor_events_compaction(config, NOW, store=store)
-
-        assert summary.root_uri == sensor_events_uri
-        assert len(summary.compacted_groups) == 1
-
     def test_run_zone_weather_snapshot_compaction_targets_the_configured_uri(self, tmp_path) -> None:
         zone_weather_uri = join_uri(tmp_path.as_uri(), "zone_weather_snapshot")
         config = BronzeCompactionConfig(
-            sensor_events_uri=join_uri(tmp_path.as_uri(), "sensor-events"),
             zone_weather_snapshot_uri=zone_weather_uri,
             safety_margin=timedelta(hours=1),
             target_object_count=1,
