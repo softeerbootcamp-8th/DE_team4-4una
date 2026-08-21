@@ -86,8 +86,7 @@ services:
       ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
       # weather_pipeline(#222)이 15분마다 zone_weather_snapshot Parquet 이력을 쓰는 경로.
       ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
-      # bronze_compaction(#271)이 압축할 두 Bronze 대상의 로컬 경로.
-      BRONZE_COMPACTION_SENSOR_EVENTS_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/sensor-events
+      # bronze_compaction(#271)이 압축할 zone_weather_snapshot의 로컬 경로.
       BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
       # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다.
       CURRENT_SCORE_ROAD_SEGMENT_PATH: ${AIRFLOW_HOME}/data/processed/road_segment
