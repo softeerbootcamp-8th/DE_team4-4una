@@ -22,6 +22,17 @@ export KAFKA_STARTING_OFFSETS=earliest
 export STREAM_TRIGGER_INTERVAL_SECONDS=5
 export STREAM_BRONZE_OUTPUT_PATH=data/local-lake/bronze/sensor-events
 export STREAM_BRONZE_CHECKPOINT_LOCATION=checkpoints/bronze-sensor-events
+# Kafka에 이만큼(전체 partition 합계) 모일 때까지 배치를 미뤄 Bronze 파일을 크게 만든다.
+# 0은 끔이고, 그때는 위 trigger 주기마다 바로 쓴다. 601건짜리 스모크에서 몇 분씩
+# 기다리지 않도록 기본을 끔으로 뒀다. 운영에서는 600000 정도로 켠다
+# (parquet 약 128MB. 우리 Bronze 실측으로 디스크에서 행당 223B).
+export STREAM_MIN_OFFSETS_PER_TRIGGER=0
+# 위 조건과 항상 같이 걸린다. 양이 모자라도 이 시간이 지나면 배치를 실행한다.
+# 이게 없으면 한산할 때 배치가 아예 돌지 않아 멈춘 것처럼 보인다.
+export STREAM_MAX_TRIGGER_DELAY=5m
+# 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
+# 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
+export STREAM_BRONZE_OUTPUT_PARTITIONS=1
 
 SPARK_LOCAL_IP=127.0.0.1 uv run --package stream-processor stream-processor
 ```
