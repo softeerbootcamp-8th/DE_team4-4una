@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Self
@@ -15,7 +16,11 @@ import pytest
 from fastapi.testclient import TestClient
 from serving_api.app import create_app
 from serving_api.config import MAX_BATCH_ITEMS, ServingApiConfig
-from serving_api.repository import CURRENT_TABLE, STANDARD_TABLE
+from serving_api.repository import (
+    ACTIVE_VEHICLE_PROFILE_SQL,
+    CURRENT_TABLE,
+    STANDARD_TABLE,
+)
 
 CONFIG = ServingApiConfig.from_env(
     {
@@ -57,10 +62,16 @@ class FakeConnection:
     """
 
     def __init__(
-        self, rows: list[tuple[object, ...]], standard_rows: list[tuple[object, ...]]
+        self,
+        rows: list[tuple[object, ...]],
+        standard_rows: list[tuple[object, ...]],
+        active_profile_ids: set[int] | None = None,
     ) -> None:
         self._current = rows
         self._standard = standard_rows
+        # None은 "무엇을 물어도 활성"이라는 뜻이다 — 프로필과 무관한 테스트가
+        # 매번 유효한 프로필 집합을 적지 않아도 되게 한다.
+        self._active_profile_ids = active_profile_ids
         self._rows: list[tuple[object, ...]] = []
 
     def cursor(self) -> Self:
@@ -74,7 +85,17 @@ class FakeConnection:
 
     def execute(self, sql: str, parameters: tuple[object, ...] | None = None) -> None:
         # 폴백 분기를 재현하려면 조회 대상 테이블에 따라 다른 행을 돌려줘야 한다.
-        if CURRENT_TABLE in sql:
+        # 프로필 조회를 먼저 본다 — 점수 쿼리도 `vehicle_profile_id` 컬럼을
+        # 담고 있어 테이블 이름만으로는 구분되지 않는다.
+        if sql == ACTIVE_VEHICLE_PROFILE_SQL:
+            requested = parameters[0] if parameters else None
+            self._rows = [
+                (
+                    self._active_profile_ids is None
+                    or requested in self._active_profile_ids,
+                )
+            ]
+        elif CURRENT_TABLE in sql:
             self._rows = list(self._current)
         elif STANDARD_TABLE in sql:
             requested = set(parameters[1]) if parameters else set()
@@ -97,10 +118,12 @@ class FakePool:
         rows: list[tuple[object, ...]],
         failure: Exception | None,
         standard_rows: list[tuple[object, ...]] | None = None,
+        active_profile_ids: set[int] | None = None,
     ) -> None:
         self._rows = rows
         self._standard_rows = standard_rows or []
         self._failure = failure
+        self._active_profile_ids = active_profile_ids
 
     def open(self) -> None:
         return None
@@ -112,15 +135,16 @@ class FakePool:
     def connection(self):
         if self._failure is not None:
             raise self._failure
-        yield FakeConnection(self._rows, self._standard_rows)
+        yield FakeConnection(self._rows, self._standard_rows, self._active_profile_ids)
 
 
 def build_client(
     rows: list[tuple[object, ...]] | None = None,
     failure: Exception | None = None,
     standard_rows: list[tuple[object, ...]] | None = None,
+    active_profile_ids: set[int] | None = None,
 ) -> TestClient:
-    pool = FakePool(rows or [], failure, standard_rows)
+    pool = FakePool(rows or [], failure, standard_rows, active_profile_ids)
     return TestClient(create_app(CONFIG, pool_factory=lambda config: pool))
 
 
@@ -259,6 +283,9 @@ def test_route_evaluation_ranks_candidates_and_names_the_recommended_route() -> 
 
     assert response.status_code == 200
     assert response.json() == {
+        "requested_vehicle_profile_id": 2,
+        "effective_vehicle_profile_id": 2,
+        "vehicle_profile_fallback": False,
         "recommended_route_id": "route_b",
         "routes": [
             {
@@ -358,6 +385,116 @@ def test_route_evaluation_scores_a_repeated_segment_once_per_traversal() -> None
     assert averages == {"once": 60.0, "twice": 50.0}
 
 
+def test_route_evaluation_uses_an_active_vehicle_profile_as_requested() -> None:
+    with build_client([row("1001", 80.0)], active_profile_ids={0, 2}) as client:
+        response = client.post(
+            "/api/v1/routes/evaluate",
+            json={
+                "vehicle_profile_id": 2,
+                "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+            },
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["requested_vehicle_profile_id"] == 2
+    assert body["effective_vehicle_profile_id"] == 2
+    assert body["vehicle_profile_fallback"] is False
+
+
+@pytest.mark.parametrize(
+    ("requested", "active_profile_ids"),
+    [
+        pytest.param(999, {0, 2}, id="unknown-profile"),
+        # 비활성 프로필은 행이 있어도 그 프로필로 점수를 낼 수 없으니 없는 것과 같다.
+        pytest.param(2, {0}, id="inactive-profile"),
+    ],
+)
+def test_route_evaluation_falls_back_to_the_vehicle_agnostic_profile(
+    requested: int, active_profile_ids: set[int]
+) -> None:
+    # 프로필 하나가 잘못됐다고 경로 비교 전체를 실패시키지 않는다. 대신 어느
+    # 프로필로 계산했는지를 응답에 실어 호출자가 오해하지 않게 한다.
+    with build_client([row("1001", 80.0)], active_profile_ids=active_profile_ids) as client:
+        response = client.post(
+            "/api/v1/routes/evaluate",
+            json={
+                "vehicle_profile_id": requested,
+                "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+            },
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["requested_vehicle_profile_id"] == requested
+    assert body["effective_vehicle_profile_id"] == 0
+    assert body["vehicle_profile_fallback"] is True
+    assert body["recommended_route_id"] == "route_a"
+
+
+def test_route_evaluation_logs_a_warning_when_it_falls_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 200이 나가므로 잘못된 id가 계속 들어와도 응답만으로는 드러나지 않는다.
+    with build_client([row("1001", 80.0)], active_profile_ids={0}) as client, caplog.at_level(
+        logging.WARNING, logger="serving_api.routes"
+    ):
+        client.post(
+            "/api/v1/routes/evaluate",
+            json={
+                "vehicle_profile_id": 999,
+                "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+            },
+        )
+
+    assert "vehicle_profile_id=999 is unavailable" in caplog.text
+
+
+def test_route_evaluation_does_not_look_up_the_sentinel_profile() -> None:
+    # sentinel 행은 마이그레이션이 보장하므로 확인 왕복을 아낀다. 활성 프로필이
+    # 하나도 없다고 해도 0 요청은 폴백 없이 그대로 통해야 한다.
+    with build_client([row("1001", 80.0)], active_profile_ids=set()) as client:
+        response = client.post(
+            "/api/v1/routes/evaluate",
+            json={
+                "vehicle_profile_id": 0,
+                "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+            },
+        )
+
+    assert response.json()["vehicle_profile_fallback"] is False
+
+
+@pytest.mark.parametrize(
+    "endpoint_call",
+    [
+        pytest.param(
+            lambda client: client.get("/api/v1/segments/1001/comfort-scores/999"),
+            id="single-lookup",
+        ),
+        pytest.param(
+            lambda client: client.post(
+                "/api/v1/comfort-scores/batch",
+                json={"vehicle_profile_id": 999, "segment_ids": ["1001"]},
+            ),
+            id="batch-lookup",
+        ),
+    ],
+)
+def test_the_other_endpoints_keep_their_vehicle_profile_policy(endpoint_call) -> None:
+    # 폴백은 /routes/evaluate에만 적용한다 (#272). 두 엔드포인트는 요청한
+    # 프로필로만 조회하므로 프로필이 잘못되면 점수를 못 찾은 것으로 나타난다.
+    with build_client(active_profile_ids={0}) as client:
+        response = endpoint_call(client)
+
+    body = response.json()
+    assert response.status_code in (200, 404)
+    if response.status_code == 200:
+        assert body["not_found_segment_ids"] == ["1001"]
+    else:
+        assert body["error"]["code"] == "not_found"
+
+
 @pytest.mark.parametrize(
     "routes",
     [
@@ -396,6 +533,22 @@ def test_route_evaluation_rejects_a_malformed_request(routes: list[dict[str, obj
         response = client.post(
             "/api/v1/routes/evaluate",
             json={"vehicle_profile_id": 0, "routes": routes},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_route_evaluation_rejects_a_negative_vehicle_profile_id() -> None:
+    # 폴백은 "없는 프로필"을 위한 것이지 형식 오류를 받아주기 위한 것이 아니다.
+    # 음수는 프로필 id가 될 수 없으므로 조회 전에 Pydantic이 거른다.
+    with build_client() as client:
+        response = client.post(
+            "/api/v1/routes/evaluate",
+            json={
+                "vehicle_profile_id": -1,
+                "routes": [{"route_id": "route_a", "segment_ids": ["1001"]}],
+            },
         )
 
     assert response.status_code == 422
