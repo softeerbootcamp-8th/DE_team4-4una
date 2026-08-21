@@ -161,6 +161,22 @@ TaskGroup마다 수작업 SQL/Python 검증(`cleansing/validate.py` 선례)을 �
   이슈에서 진행).
 - 루트 `uv.lock` — 의존성 추가 및 `pyspark` 버전 조정에 따라 갱신.
 
+## 수정 노트 (#253)
+
+`data_quality_audit` DAG(at-rest 감사, 이 ADR의 롤아웃 ④번) 구현 착수
+직전 실측 검증 결과, 이 문서가 전제한 GX의 `TupleS3StoreBackend`가
+`great-expectations==1.21.0`(이 repo에 고정된 버전)엔 더 이상 존재하지
+않는다는 것을 확인했다 — GX 1.x가 self-hosted 클라우드 스토어(S3/GCS/Azure)를
+걷어내고 `ephemeral`/`file`/`cloud`(유료 GX Cloud SaaS) 세 컨텍스트 모드로
+단순화하면서 사라진 것으로 보인다. 이 문서의 "GX의 S3 store backend
+(`TupleS3StoreBackend`, 레거시 GX부터 있던 기능)로 Data Docs를 S3에
+호스팅한다"는 결정 자체(Data Docs는 S3에 쓴다)는 그대로 유효하지만, 구현
+메커니즘은 다음으로 바뀐다: `TupleFilesystemStoreBackend`로 로컬 임시
+디렉터리에 렌더링 → `boto3`로 그 디렉터리를 직접 S3에 업로드. GX가 S3에
+직접 쓰는 대신 우리 코드가 렌더 결과물을 옮기는 역할을 맡는다. 상세 근거는
+`docs/superpowers/specs/2026-08-20-data-quality-audit-dag-at-rest-gold-design.md`
+§1을 참고한다.
+
 ## 참고
 
 - 관련 이슈: #157(상위), #176 / PR #183(이 결정의 배경이 된 로컬 검증 사고

@@ -147,3 +147,33 @@ def test_main_returns_after_load_standard_segment_comfort_score_without_falling_
     )
 
     assert len(calls) == 1
+
+
+def test_audit_gold_command_requires_table() -> None:
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["audit-gold"])
+
+
+def test_audit_gold_command_accepts_standard_table() -> None:
+    arguments = cli.build_parser().parse_args(
+        ["audit-gold", "--table", "standard_segment_comfort_score"]
+    )
+
+    assert arguments.table == "standard_segment_comfort_score"
+
+
+def test_audit_gold_command_accepts_current_table() -> None:
+    arguments = cli.build_parser().parse_args(
+        ["audit-gold", "--table", "current_segment_comfort_score"]
+    )
+
+    assert arguments.table == "current_segment_comfort_score"
+
+
+def test_audit_gold_command_rejects_unknown_table() -> None:
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["audit-gold", "--table", "not_a_real_table"])

@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_standard_score_parser = subparsers.add_parser("validate-standard-score")
     validate_standard_score_parser.add_argument("--as-of", required=True)
+
+    audit_gold_parser = subparsers.add_parser("audit-gold")
+    audit_gold_parser.add_argument(
+        "--table",
+        required=True,
+        choices=["standard_segment_comfort_score", "current_segment_comfort_score"],
+    )
+
     return parser
 
 
@@ -278,6 +286,41 @@ def run_standard_comfort_score_loading(arguments: argparse.Namespace) -> None:
         connection.close()
 
 
+def run_gold_audit_cli(arguments: argparse.Namespace) -> None:
+    import boto3
+    import psycopg2
+
+    from batch_jobs.gold_audit_validation import (
+        GoldAuditValidationConfig,
+        run_gold_audit,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    config = GoldAuditValidationConfig.from_env()
+    connection = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
+    s3_client = boto3.client("s3")
+    try:
+        summary = run_gold_audit(config, connection, arguments.table, s3_client)
+        print(
+            json.dumps(
+                {
+                    "table": summary.table,
+                    "row_count": summary.row_count,
+                    "success": summary.success,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
     from batch_jobs.sensor_processing_validation import (
         SensorProcessingValidationConfig,
@@ -405,6 +448,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "validate-standard-score":
         run_standard_score_validation_cli(arguments)
+        return
+    if arguments.command == "audit-gold":
+        run_gold_audit_cli(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(

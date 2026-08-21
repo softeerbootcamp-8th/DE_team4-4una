@@ -355,6 +355,7 @@ name = "batch-jobs"
 version = "0.1.0"
 source = { editable = "services/batch-jobs" }
 dependencies = [
+    { name = "boto3" },
     { name = "de4-core" },
     { name = "duckdb" },
     { name = "great-expectations", extra = ["postgresql", "spark"] },
@@ -376,6 +377,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.40,<2.0" },
     { name = "de4-core", editable = "libs/de4-core" },
     { name = "duckdb", specifier = ">=1.4.3" },
     { name = "great-expectations", extras = ["spark", "postgresql"], specifier = ">=1.21.0" },
