@@ -177,6 +177,38 @@ TaskGroup마다 수작업 SQL/Python 검증(`cleansing/validate.py` 선례)을 �
 `docs/superpowers/specs/2026-08-20-data-quality-audit-dag-at-rest-gold-design.md`
 §1을 참고한다.
 
+## 수정 노트 (#250)
+
+`zone_weather_pipeline`(`latest_zone_weather`, Silver/Serving — Gold가
+아님) in-flight 검증 착수 과정에서, 이 문서가 전제한 "Gold/Postgres는
+SqlAlchemyExecutionEngine, 그 외는 Spark"라는 저장소 기준 분기가 실제로는
+GX 도입 자체의 비용을 가리고 있었다는 것을 실측으로 확인했다: `uv.lock`
+확인 결과 great-expectations는 엔진(`postgresql`/`spark` extra) 선택과
+무관하게 이미 `pandas`/`numpy`/`scipy`/`altair`/`cryptography`/
+`jsonschema`/`marshmallow`/`pydantic` 등 무거운 스택을 코어 의존성으로
+끌고 온다(`postgresql` extra는 `psycopg2-binary`/`sqlalchemy`만 얹을
+뿐이다). `zone_weather_pipeline`의 `run_weather_collection`은
+Spark/docker 없이 `airflow-scheduler` 컨테이너 안에서 직접 도는 경량
+PythonOperator로 설계됐고(`services/orchestration`은 지금
+`psycopg2-binary`/`pyarrow`/`requests`/`pyyaml` 정도만 의존한다), 여기에
+GX를 얹으면 그 경량 설계와 정면으로 부딪힌다.
+
+그래서 `latest_zone_weather` 검증(`validate_weather_collection` task)은
+예외적으로 GX 대신 **인라인 Python/SQL**로 구현한다
+(`orchestration.jobs.weather_validation`). GX가 주는 두 이점 — ①규칙이
+늘어날 때의 유지비 절감, ②in-flight/at-rest 검증 간 suite 공유 — 가 이
+테이블에는 약하다: 규칙이 6개뿐이고, `latest_zone_weather`는 존당 최신
+1행만 유지해 이력을 남기지 않으므로(#209) 공유할 at-rest 감사 대상 자체가
+없다. 규칙은 여전히 선언적으로 `context/data/quality-rules.md`("Zone
+weather quality" 절)에 문서화하고, 실행 코드만 GX Expectation Suite가
+아니라 Python 함수로 옮겨 검증한다.
+
+이 예외는 이 테이블에 한정된다 — 새로운 Postgres 대상 규칙이 늘거나
+`latest_zone_weather`에 at-rest 감사가 필요해지면(예: 이력을 남기는
+방향으로 바뀌면) GX 재도입을 다시 검토해야 한다. 그 외 저장소 기준
+엔진 분기(Gold/Postgres → SqlAlchemy, 나머지 → Spark) 결정 자체는
+`standard_score_pipeline`/`data_quality_audit`에서 그대로 유효하다.
+
 ## 참고
 
 - 관련 이슈: #157(상위), #176 / PR #183(이 결정의 배경이 된 로컬 검증 사고

@@ -127,6 +127,38 @@ therefore checks the current output in full rather than a single-hour slice.
   invariants enforced by `HOURLY_COMFORT_SCORE_SCHEMA` at write time (ADR-0004:
   hard invariants stay in code, not GX).
 
+## Zone weather quality (Silver/Serving)
+
+`latest_zone_weather` holds one row per TLC taxi zone — `run_weather_collection`
+UPSERTs it every 15 minutes from Open-Meteo (`jobs.weather`), and a failed
+zone's row is left untouched rather than overwritten with bad data (see
+`zone_weather_pipeline` in `services/orchestration/README.md`). Validation
+therefore scopes to `weather_time = target_time` — exactly the rows this
+run's UPSERT actually wrote or refreshed, excluding both failed zones (never
+UPSERTed) and stale-skipped zones (blocked by the anti-regression `WHERE
+weather_time <= EXCLUDED.weather_time` clause).
+
+- **Observation ranges**: `temperature_2m_c` in `[-60, 60]` (°C); `precipitation_mm`,
+  `rain_mm`, `snowfall_cm`, `visibility_m`, `wind_speed_10m_mps`, and
+  `wind_gusts_10m_mps` all non-negative (physical magnitudes); `weather_code`
+  in `[0, 99]` (WMO code range).
+- **`weather_state` enum**: must be one of `snow`, `rain`, `fog`, `high_wind`,
+  `dry` — `jobs.weather.classify_weather_state`'s output set.
+- **`impact_signature` format**: `<semver>|<sorted conditions or clear>`
+  (`jobs.weather_rules.format_impact_signature`'s exact shape) — rejects
+  malformed, unsorted, or duplicated condition lists.
+- **Freshness**: `fetched_at - weather_time` must fall within `[-60, 1800]`
+  seconds (provisional — sized for the DAG's 2-retry/2-minute-delay policy
+  plus scheduler lag).
+- Implemented as **inline Python/SQL**, not a GX Expectation Suite —
+  `orchestration.jobs.weather_validation` (issue #250), run as the
+  `validate_weather_collection` task right after `run_weather_collection`
+  and before `detect_changed_zones` (so bad data can't be misread as a
+  changed zone). See the ADR-0004 amendment note for why this one path
+  deviates from GX. Schema/PK invariants remain the writer's responsibility
+  (`jobs.weather.upsert_latest_zone_weather`) at write time (ADR-0004: hard
+  invariants stay in code, not GX).
+
 ## Gold quality
 
 - Enforce `0 <= comfort_score <= 100`. Implemented as a GX Expectation on

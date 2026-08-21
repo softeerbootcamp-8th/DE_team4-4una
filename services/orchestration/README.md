@@ -119,10 +119,21 @@ standard score의 `--as-of`에는 `data_interval_end`가 전달된다.
 
 ## zone_weather_pipeline (#207, #230)
 
-UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection` task 하나가 실행되며,
-`jobs.weather.run_latest_zone_weather_job`을 `airflow-scheduler` 컨테이너 안에서
+UTC 기준 15분마다(`*/15 * * * *`) `run_weather_collection >> validate_weather_collection
+>> detect_changed_zones` 순으로 실행되며, 둘 다
+`jobs.weather`/`jobs.weather_validation`을 `airflow-scheduler` 컨테이너 안에서
 직접 호출한다(PythonOperator) — 별도 컨테이너를 띄우지 않는다. `data_interval_end`가
 날씨 조회 기준 시각으로 전달된다.
+
+`validate_weather_collection`(#250)은 `run_weather_collection`이 이번 실행에
+실제로 UPSERT한 행(`weather_time = data_interval_end`)만 조회해 관측값 범위,
+`weather_state`/`impact_signature` 형식, freshness를 검사하고 위반 시 task를
+hard fail시킨다(`context/data/quality-rules.md`의 "Zone weather quality" 절).
+다른 파이프라인의 검증과 달리 Great Expectations가 아니라 인라인 Python/SQL로
+구현했다 — GX가 엔진 선택과 무관하게 무거운 의존성(pandas/numpy/scipy/altair 등)을
+끌고 와 이 DAG의 경량 설계와 맞지 않기 때문이다(`docs/adr/0004-...md`의 `#250`
+수정 노트 참고). `detect_changed_zones`보다 앞에 둔 이유는, 이상 데이터로 인해
+잘못된 zone이 "변경됨"으로 오판되는 걸 막기 위해서다.
 
 `jobs/`는 `dags/`와 나란히 있지만 별도로 `${AIRFLOW_HOME}/orchestration/jobs`에
 마운트되고, `PYTHONPATH=${AIRFLOW_HOME}/orchestration`로 `from jobs.weather import ...`가
