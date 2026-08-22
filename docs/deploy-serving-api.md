@@ -64,6 +64,7 @@ workflow다. `ci.yml`의 `ci-passed` 뒤에 붙어 있고, `push` 이벤트이�
 | `EC2_USER` | `ec2-user` (Amazon Linux 2023 기본 계정) |
 | `SERVING_API_CONTAINER_NAME` | `serving-api` |
 | `SERVING_API_PORT` | `8000` |
+| `SERVING_API_METRICS_PORT` | `9101` (Prometheus 전용 애플리케이션 metrics 포트, 자세한 scrape 설정은 [infra/monitoring/README.md](../infra/monitoring/README.md) 참고) |
 | `SERVING_API_ENV_FILE` | `/etc/serving-api/serving-api.env` |
 
 ## AWS 사전 준비
@@ -218,6 +219,9 @@ ECR 권한이 필요하다. 이걸 빼면 배포가 `docker pull`에서 실패�
 - **인스턴스 프로파일** 부착 (위 3번)
 - **보안그룹 22번 인바운드** — 러너가 SSH로 접속한다. GitHub 러너 IP 범위는 넓고
   자주 바뀌므로 범위를 좁히기 어렵다
+- **보안그룹 9101번 인바운드(source: Monitoring EC2 보안 그룹)** — Prometheus가
+  Serving API metrics를 scrape한다. 자세한 내용은
+  [infra/monitoring/README.md](../infra/monitoring/README.md) 참고
 - **퍼블릭 IP 또는 DNS** — 러너가 직접 접속하므로 필요하다
 - **env 파일** — 아래 참고
 
@@ -252,7 +256,8 @@ POSTGRES_PASSWORD=
 ```
 
 `SERVING_API_POOL_MIN_SIZE`, `SERVING_API_POOL_MAX_SIZE`는 선택이다.
-`SERVING_API_PORT`는 워크플로가 덮어쓰므로 여기 적어도 무시된다.
+`SERVING_API_PORT`, `SERVING_API_METRICS_PORT`는 워크플로가 덮어쓰므로 여기
+적어도 무시된다.
 
 DB 비밀번호가 들어가므로 소유자와 권한을 제한한다.
 
