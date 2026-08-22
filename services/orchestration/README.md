@@ -53,34 +53,42 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   각자 랜덤 생성) 웹 UI가 task 로그를 못 가져오고 "secret_key... time
   synchronized..." 경고만 뜬다. `AIRFLOW_JWT_SECRET`과 마찬가지로
   `openssl rand -hex 32`로 생성.
-- `BATCH_JOBS_IMAGE_TAG` — `standard_score_pipeline`의 batch-jobs task가 실행할
-  batch-jobs 이미지 태그. 아래 "통합 테스트 > 사전 준비"의 `make build-batch-jobs-image`로
-  만든다.
-- `CLEANSING_BRONZE_INPUT_PATH`, `CLEANSING_QUARANTINE_OUTPUT_PATH`,
-  `HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH`,
-  `HOURLY_SEGMENT_FEATURE_OUTPUT_PATH` — 통합 `cleanse-sensor-events` 커맨드의
-  Bronze 입력, quarantine 출력, road segment 입력, feature 출력 경로다. 비우면
-  DAG에 선언된 로컬 기본 경로를 사용한다.
-- `CLEANSING_CONFIG_PATH`, `HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH`,
-  `HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH`,
-  `HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH` — cleansing과 feature 계산
-  설정 파일 경로다. 비우면 batch-jobs의 패키지 기본 설정을 사용한다.
-- `HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE` — sensor processing이 읽을 road
-  segment의 `snapshot_date`다. 실제 road segment Parquet의 값과 일치해야 한다.
-- `HOURLY_SEGMENT_FEATURE_VERSION` — 생성할 feature 데이터의 버전이다
-  (예: `hourly-features-v1`).
-- `HOURLY_COMFORT_INPUT_PATH` 등 `HOURLY_COMFORT_*` 4개 키 — batch-jobs의
-  `score-hourly-comfort` 커맨드가 읽는 입출력 경로다. 비워두면
-  `HourlyComfortJobConfig.from_env()`가 `data/local-lake` 하위 기본 경로로
-  대체하므로(의도된 동작이다), 로컬 개발에서는 채우지 않아도 된다.
+- `BATCH_JOBS_IMAGE_TAG` — `data_quality_audit`의 batch-jobs task가 실행할
+  batch-jobs 이미지 태그(#295에서 이것도 EMR Serverless로 옮기면 사라진다).
+  아래 "통합 테스트 > 사전 준비"의 `make build-batch-jobs-image`로 만든다.
+- `AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID`, `AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN`,
+  `AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT` — `standard_score_pipeline`이 EMR
+  Serverless Job Run을 제출하는 데 필요한 설정이다(#292, ADR-0001). `AIRFLOW_VAR_*`
+  환경변수는 Airflow가 Variable로 자동 인식한다. entry point는 batch-jobs의
+  EMR Serverless 커스텀 이미지가 준비되기 전까지 플레이스홀더다.
+- `AIRFLOW_VAR_CLEANSING_BRONZE_INPUT_PATH`, `AIRFLOW_VAR_CLEANSING_QUARANTINE_OUTPUT_PATH`,
+  `AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH`,
+  `AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH` — 통합 `cleanse-sensor-events`
+  커맨드의 Bronze 입력, quarantine 출력, road segment 입력, feature 출력 경로다.
+  비우면 DAG에 선언된 로컬 기본 경로를 사용한다.
+- `AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE` — sensor processing이
+  읽을 road segment의 `snapshot_date`다. 실제 road segment Parquet의 값과
+  일치해야 한다.
+- `AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_VERSION` — 생성할 feature 데이터의
+  버전이다(예: `hourly-features-v1`).
+- `AIRFLOW_VAR_HOURLY_COMFORT_INPUT_PATH` 등 `AIRFLOW_VAR_HOURLY_COMFORT_*`
+  3개 키 — batch-jobs의 `score-hourly-comfort` 커맨드가 읽는 입출력 경로다.
+  비워두면 DAG에 선언된 로컬 기본 경로를 사용한다.
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
-  `POSTGRES_PASSWORD` — standard score 단계가 Gold 결과를 적재할 서빙 Postgres 접속
-  정보다. `StandardComfortScoreJobConfig.from_env()`가 필수로 요구하며, 비어
-  있으면(기본값 대체 없이) 즉시 실패한다. 로컬 개발에서는 `infra/compose/postgres.yaml`의
-  `postgres` 서비스를 그대로 가리키면 된다(`POSTGRES_HOST=postgres`). 이 값이
-  가리키는 서빙 DB에 마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
+  `POSTGRES_PASSWORD` — `data_quality_audit`이 여전히 docker-run으로 참조하는
+  서빙 Postgres 접속 정보다(#295 전까지).
+- `AIRFLOW_VAR_POSTGRES_HOST` 등 `AIRFLOW_VAR_POSTGRES_*` 5개 키,
+  `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI`,
+  `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS` — `standard_score` 단계가
+  Gold 결과를 적재할 서빙 Postgres 접속 정보와 롤업 윈도우다. 위
+  `POSTGRES_*`와 같은 값을 가리켜야 한다(EMR Serverless job의 driver_env로
+  넘기는 경로가 달라 값을 두 번 채워야 한다 — **주의**: 이 값은 EMR Serverless
+  Job Run 설정에 평문으로 남는 임시 방편이다, #292 논의). 로컬 개발에서는
+  `infra/compose/postgres.yaml`의 `postgres` 서비스를 그대로 가리키면 된다
+  (`POSTGRES_HOST=postgres`). 이 값이 가리키는 서빙 DB에
+  마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
 
-## standard_score_pipeline 로컬 전용 배선
+## standard_score_pipeline — EMR Serverless 실행 (#292, ADR-0001)
 
 `standard_score_pipeline`은 UTC 기준 매시 정각에 `[logical_date, logical_date + 1시간)`
 구간을 처리하며, 아래 순서로 실행된다.
@@ -89,12 +97,13 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
 sensor_processing >> hourly_scoring >> standard_score
 ```
 
-각 TaskGroup의 BashOperator는 `docker run`으로 host에 별도의 `batch-jobs`
-컨테이너를 띄운다("docker-outside-of-docker"). Airflow 공식 이미지에 pyspark를
-섞지 않기 위한 로컬 임시 배선이며, `airflow-scheduler` 컨테이너에 host의
-docker socket을 마운트해 동작한다(`infra/compose/airflow.yaml`). Cleansing과
-feature 계산은 `sensor_processing`의 단일 컨테이너와 Spark 세션에서 실행되며,
-중간 cleansed-event 데이터셋을 저장하거나 다시 읽지 않는다.
+각 TaskGroup의 task는 `EmrServerlessStartJobOperator`(`dags/emr_serverless.py`의
+`submit_batch_jobs_command`)로 미리 만들어진 EMR Serverless Application에 Job
+Run을 제출한다. Application ID·실행 역할 ARN·entry point는 Airflow Variable로
+관리하며, entry point는 batch-jobs의 EMR Serverless 커스텀 이미지가 준비되기
+전까지 플레이스홀더다. Cleansing과 feature 계산은 `sensor_processing`의 단일
+Job Run과 Spark 세션에서 실행되며, 중간 cleansed-event 데이터셋을 저장하거나
+다시 읽지 않는다.
 
 | 단계 | 실행 커맨드 | 주요 입출력 |
 | --- | --- | --- |
@@ -107,15 +116,30 @@ standard score의 `--as-of`에는 `data_interval_end`가 전달된다.
 구간을 처리하고, standard score는 해당 구간의 끝인
 `2026-08-18T10:00:00+00:00`을 기준으로 집계한다.
 
+`standard_score` TaskGroup의 두 task는 CLI 플래그가 없는 설정(Postgres
+자격증명, `STANDARD_COMFORT_SCORE_*`)을 `driver_env`
+(`spark.emr-serverless.driverEnv.*`)로 넘긴다. **주의**: 이 값은 EMR Serverless
+Job Run 설정에 평문으로 남아 GetJobRun API로 조회 가능하다 — Secrets Manager를
+지금 못 쓰는 상황이라 감수하기로 했다(#292 논의). 후속 이슈에서 IAM DB 인증
+등으로 교체할 예정이다.
+
+> ⚠️ 이 DAG의 실제 EMR Serverless 트리거 검증(entry point 완성, Job Run
+> 정상 실행 확인)은 batch-jobs의 커스텀 이미지가 준비되고 Airflow가 EC2로
+> 이전된 뒤 별도로 진행한다(#289). 아래 "통합 테스트" 절의 backfill/검증
+> 절차는 옛 docker-run 방식 기준이라 지금은 그대로 재현할 수 없다.
+
+`data_quality_audit`은 아직 `docker run`으로 host에 별도의 `batch-jobs`
+컨테이너를 띄우는 방식("docker-outside-of-docker")을 그대로 쓴다(#295에서
+같은 방식으로 옮길 예정). `airflow-scheduler` 컨테이너에 host의 docker
+socket을 마운트해 동작한다(`infra/compose/airflow.yaml`).
+
 > ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
 > 사실상의 제어권을 준다. 로컬 개발 환경 밖(공유 서버, 운영 환경 등)으로 이
-> compose 설정을 그대로 옮기지 않는다. EMR Serverless로 연결되면(ADR 0001,
-> 후속 이슈) 이 소켓 마운트와 `docker run` 호출은 `EmrServerlessStartJobOperator`로
-> 대체되며 통째로 사라진다.
+> compose 설정을 그대로 옮기지 않는다.
 
-**문제 해결**: `docker run` 단계에서 `permission denied`가 나면, host의
-`/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의 그룹이
-맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
+**문제 해결**: `docker run` 단계(`data_quality_audit`)에서 `permission denied`가
+나면, host의 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의
+그룹이 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
 
 ## zone_weather_pipeline (#207, #230)
 
@@ -398,8 +422,9 @@ docker compose -f infra/compose/postgres.yaml down
 
 ## 범위 밖
 
-- Great Expectations 검증 task, Slack 실패 알림, EMR Serverless 실제 연결
-  (#157 후속 이슈)
+- Great Expectations 검증 task, Slack 실패 알림
+- `data_quality_audit`의 EMR Serverless 연결(#295), batch-jobs 커스텀 이미지
+  완성 후 실제 Job Run 트리거 검증, Airflow의 EC2 이전(#289 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
 - 운영 배포, 인증/RBAC 설정
