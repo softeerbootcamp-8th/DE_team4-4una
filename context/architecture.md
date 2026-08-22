@@ -191,3 +191,23 @@ writes are expected, verifying row counts before discarding the originals.
 compaction of a Structured Streaming FileStreamSink directory is unsafe (the sink's
 `_spark_metadata/` commit log would go stale); its backlog cleanup is deferred to a
 follow-up issue. See [ADR-0009](../docs/adr/0009-bronze-compaction-dag.md).
+
+### Operational monitoring
+
+Project EC2 (running the deployed services) and Monitoring EC2 are separate AWS
+instances in the same VPC. `infra/compose/exporters.yaml` runs `node_exporter`
+(`:9100`) and cAdvisor (`:8081`) on Project EC2; `infra/compose/monitoring.yaml`
+runs Prometheus and Grafana (`:3000`) on Monitoring EC2. Prometheus resolves the
+`project-ec2` hostname to Project EC2's private IP through Docker `extra_hosts`,
+sourced from `infra/monitoring/.env` (`PROJECT_EC2_PRIVATE_IP`) — no AWS IP is
+hardcoded in tracked files, and Prometheus itself is bound to `127.0.0.1` on
+Monitoring EC2 rather than exposed publicly. See
+[ADR-0010](../docs/adr/0010-split-project-and-monitoring-ec2-for-prometheus-grafana.md)
+and [infra/monitoring/README.md](../infra/monitoring/README.md) for the full
+setup and validation steps.
+
+AWS Security Group provisioning for the two EC2s stays outside this repository's
+code (`terraform/envs/` is currently empty) — it is a manual prerequisite
+documented in `infra/monitoring/README.md`, not something this diagram or
+ADR-0010 settles. Grafana dashboards/alerts and metrics for the other services
+(Kafka, Spark, Airflow, `serving-api`) are not part of this scope yet.
