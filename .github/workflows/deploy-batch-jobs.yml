@@ -1,4 +1,5 @@
-# main에 들어간 Batch Jobs 이미지를 ECR에 배포하고 EC2에 준비한다.
+# main에 들어간 Batch Jobs 이미지를 ECR에 배포하고
+# EMR Serverless Application이 새 이미지를 사용하도록 갱신한다.
 
 name: Deploy Batch Jobs
 
@@ -20,7 +21,6 @@ jobs:
 
     env:
       REVISION: ${{ github.sha }}
-      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
 
     steps:
       - name: Check required variables
@@ -28,11 +28,10 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           ECR_REPOSITORY: ${{ vars.BATCH_JOBS_ECR_REPOSITORY }}
-          EC2_HOST: ${{ vars.EC2_HOST }}
-          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EMR_APPLICATION_ID: ${{ vars.EMR_APPLICATION_ID }}
         run: |
           missing=""
-          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST EC2_SSH_PRIVATE_KEY; do
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EMR_APPLICATION_ID; do
             eval "value=\${$name}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -67,6 +66,7 @@ jobs:
           image="${REGISTRY}/${REPOSITORY}:${REVISION}"
 
           docker build \
+            --platform linux/arm64 \
             --tag "$image" \
             --file services/batch-jobs/Dockerfile \
             --label "org.opencontainers.image.revision=${REVISION}" \
@@ -75,40 +75,23 @@ jobs:
           docker push "$image"
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Configure SSH
+      - name: Update EMR Serverless application
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          EC2_HOST: ${{ vars.EC2_HOST }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-      - name: Pull image on EC2
-        env:
-          EC2_HOST: ${{ vars.EC2_HOST }}
+          APPLICATION_ID: ${{ vars.EMR_APPLICATION_ID }}
           IMAGE: ${{ steps.image.outputs.image }}
-          REGISTRY: ${{ steps.image.outputs.registry }}
         run: |
           set -euo pipefail
 
-          ssh "${EC2_USER}@${EC2_HOST}" \
-            "aws ecr get-login-password --region '$AWS_REGION' \
-            | docker login --username AWS --password-stdin '$REGISTRY' \
-            && docker pull '$IMAGE' \
-            && docker tag '$IMAGE' 'batch-jobs:$REVISION'"
+          aws emr-serverless update-application \
+            --application-id "$APPLICATION_ID" \
+            --image-configuration "{\"imageUri\":\"$IMAGE\"}"
 
       - name: Job summary
         if: always()
         env:
           IMAGE: ${{ steps.image.outputs.image }}
+          APPLICATION_ID: ${{ vars.EMR_APPLICATION_ID }}
           JOB_STATUS: ${{ job.status }}
         run: |
           {
@@ -119,5 +102,5 @@ jobs:
             echo "| 결과 | $JOB_STATUS |"
             echo "| commit | \`$REVISION\` |"
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
-            echo "| local tag | \`batch-jobs:$REVISION\` |"
+            echo "| EMR application | \`$APPLICATION_ID\` |"
           } >> "$GITHUB_STEP_SUMMARY"
