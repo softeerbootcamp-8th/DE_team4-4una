@@ -6,6 +6,9 @@ x-airflow-env: &airflow-env
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
     AIRFLOW_HOME: ${AIRFLOW_HOME}
+    # AWS 자격증명은 EC2 Instance Role에서 받고, SDK가 EMR 리전을 찾도록 명시한다.
+    AWS_REGION: ${AWS_REGION}
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-${AWS_REGION}}
     # standard_score_pipeline(#292)이 EMR Serverless Job Run에 넘길 Application
     # ID·실행 역할 ARN·entry point. AIRFLOW_VAR_* 환경변수는 Airflow가 Variable로
     # 자동 인식한다(DB에 따로 안 넣어도 됨) — entry point는 batch-jobs의 EMR
