@@ -116,6 +116,19 @@ def _replace_partition(
     final_path: str,
     staged_path: str | None,
 ) -> None:
+    """백업 후 rename으로 스왑하고, 실패 시 백업에서 되돌린다.
+
+    **S3(EMRFS) 주의**: 로컬/HDFS의 rename은 메타데이터만 바꾸는 원자적
+    연산이지만, EMRFS의 `FileSystem.rename()`은 내부적으로 디렉터리의 각
+    객체를 copy 후 delete하는 방식이라 원자적이지 않다. 이 copy+delete
+    도중 프로세스가 죽으면 `final_path` 아래에 일부 파일만 옮겨진 채로
+    남을 수 있는데, `_path_exists()`는 디렉터리에 파일이 하나라도 있으면
+    "존재함"으로 보므로 다음 실행의 `_recover_backup()`이 이 부분 상태를
+    "정상적으로 완료된 상태"로 오판해 백업을 지워버릴 수 있다(row count는
+    호출부에서 별도로 검증하지만, 그 검증은 staging 단계에서 끝나고 이
+    스왑 단계에는 적용되지 않는다). 이 위험은 현재 감수하기로 했고(#290),
+    필요해지면 별도 이슈에서 스왑 전략 자체를 재설계한다.
+    """
     backup_path = _backup_path(final_path)
     had_existing = False
     promoted = False
