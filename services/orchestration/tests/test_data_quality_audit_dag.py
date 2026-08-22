@@ -1,8 +1,10 @@
-"""data_quality_audit DAG의 구조를 docker 없이 검증하는 테스트 (#253).
+"""data_quality_audit DAG의 구조를 docker 없이 검증하는 테스트 (#253, #295).
 
-실제 task 실행(batch-jobs 컨테이너 기동, S3 업로드)은 로컬 Airflow에서
-수동으로 확인한다(spec의 완료 조건). 여기서는 DAG가 정상 파싱되고, 두
-task가 서로 독립적(병렬)이며, outlet이 없는지를 확인한다.
+실제 task 실행(EMR Serverless Job Run 제출, S3 업로드)은 로컬 Airflow에서
+수동으로 확인한다(spec의 완료 조건 — 실제 EMR Serverless 트리거 검증은 #295의
+제외 범위). 여기서는 DAG가 정상 파싱되고, 두 task가 서로 독립적(병렬)이며,
+outlet이 없는지, 그리고 각 task가 EmrServerlessStartJobOperator로 올바른
+entry point arguments와 driver_env를 전달하는지를 확인한다.
 """
 
 from __future__ import annotations
@@ -12,7 +14,17 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+
 DAG_PATH = Path(__file__).resolve().parents[1] / "dags" / "data_quality_audit.py"
+
+# DagBag은 dags 폴더 자체를 sys.path에 넣어서 그 안의 sibling 모듈
+# (emr_serverless.py)을 top-level import로 가져올 수 있게 해준다. 여기서는
+# DagBag을 안 쓰고 파일을 직접 로드하므로, 같은 동작을 수동으로 재현한다
+# (test_standard_score_pipeline_dag.py와 동일한 패턴).
+_DAGS_DIR = str(DAG_PATH.parent)
+if _DAGS_DIR not in sys.path:
+    sys.path.insert(0, _DAGS_DIR)
 
 
 def _load_dag_module():
@@ -21,6 +33,15 @@ def _load_dag_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _entry_point_arguments(task) -> list[str]:
+    assert isinstance(task, EmrServerlessStartJobOperator)
+    return task.job_driver["sparkSubmit"]["entryPointArguments"]
+
+
+def _driver_env(task) -> str:
+    return task.job_driver["sparkSubmit"].get("sparkSubmitParameters", "")
 
 
 def test_dag_parses_with_expected_schedule():
@@ -56,42 +77,57 @@ def test_tasks_have_no_outlets():
         assert task.outlets == []
 
 
+def test_tasks_submit_to_emr_serverless_with_the_shared_variables():
+    module = _load_dag_module()
+
+    for task in module.dag.tasks:
+        assert isinstance(task, EmrServerlessStartJobOperator)
+        assert task.application_id == "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
+        assert (
+            task.execution_role_arn
+            == "{{ var.value.EMR_SERVERLESS_EXECUTION_ROLE_ARN }}"
+        )
+        assert (
+            task.job_driver["sparkSubmit"]["entryPoint"]
+            == "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
+        )
+
+
 def test_audit_standard_task_targets_standard_table():
     module = _load_dag_module()
 
-    task = module.dag.get_task("audit_standard_segment_comfort_score")
-    assert "audit-gold" in task.bash_command
-    assert "--table=standard_segment_comfort_score" in task.bash_command
+    args = _entry_point_arguments(
+        module.dag.get_task("audit_standard_segment_comfort_score")
+    )
+    assert args == ["audit-gold", "--table=standard_segment_comfort_score"]
 
 
 def test_audit_current_task_targets_current_table():
     module = _load_dag_module()
 
-    task = module.dag.get_task("audit_current_segment_comfort_score")
-    assert "audit-gold" in task.bash_command
-    assert "--table=current_segment_comfort_score" in task.bash_command
+    args = _entry_point_arguments(
+        module.dag.get_task("audit_current_segment_comfort_score")
+    )
+    assert args == ["audit-gold", "--table=current_segment_comfort_score"]
 
 
-def test_tasks_pass_postgres_and_aws_env_vars():
+def test_tasks_pass_postgres_and_gold_audit_bucket_via_driver_env():
     module = _load_dag_module()
 
     for task_id in (
         "audit_standard_segment_comfort_score",
         "audit_current_segment_comfort_score",
     ):
-        command = module.dag.get_task(task_id).bash_command
+        driver_env = _driver_env(module.dag.get_task(task_id))
         for env_var in (
             "POSTGRES_HOST",
             "POSTGRES_PORT",
             "POSTGRES_DB",
             "POSTGRES_USER",
             "POSTGRES_PASSWORD",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_REGION",
             "GOLD_AUDIT_S3_BUCKET",
         ):
-            assert env_var in command
+            assert env_var in driver_env
 
 
 def test_dag_preserves_retry_policy():
