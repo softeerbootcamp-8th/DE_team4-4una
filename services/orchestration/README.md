@@ -53,9 +53,6 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   각자 랜덤 생성) 웹 UI가 task 로그를 못 가져오고 "secret_key... time
   synchronized..." 경고만 뜬다. `AIRFLOW_JWT_SECRET`과 마찬가지로
   `openssl rand -hex 32`로 생성.
-- `BATCH_JOBS_IMAGE_TAG` — `data_quality_audit`의 batch-jobs task가 실행할
-  batch-jobs 이미지 태그(#295에서 이것도 EMR Serverless로 옮기면 사라진다).
-  아래 "통합 테스트 > 사전 준비"의 `make build-batch-jobs-image`로 만든다.
 - `AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID`, `AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN`,
   `AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT` — `standard_score_pipeline`이 EMR
   Serverless Job Run을 제출하는 데 필요한 설정이다(#292, ADR-0001). `AIRFLOW_VAR_*`
@@ -75,18 +72,26 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   3개 키 — batch-jobs의 `score-hourly-comfort` 커맨드가 읽는 입출력 경로다.
   비워두면 DAG에 선언된 로컬 기본 경로를 사용한다.
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
-  `POSTGRES_PASSWORD` — `data_quality_audit`이 여전히 docker-run으로 참조하는
-  서빙 Postgres 접속 정보다(#295 전까지).
+  `POSTGRES_PASSWORD` — `current_score_pipeline`의 PythonOperator
+  (`jobs/current_score.py`)가 `airflow-scheduler` 프로세스의 환경변수에서
+  직접 읽는 서빙 Postgres 접속 정보다.
 - `AIRFLOW_VAR_POSTGRES_HOST` 등 `AIRFLOW_VAR_POSTGRES_*` 5개 키,
   `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI`,
   `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS` — `standard_score` 단계가
-  Gold 결과를 적재할 서빙 Postgres 접속 정보와 롤업 윈도우다. 위
-  `POSTGRES_*`와 같은 값을 가리켜야 한다(EMR Serverless job의 driver_env로
-  넘기는 경로가 달라 값을 두 번 채워야 한다 — **주의**: 이 값은 EMR Serverless
-  Job Run 설정에 평문으로 남는 임시 방편이다, #292 논의). 로컬 개발에서는
+  Gold 결과를 적재할 서빙 Postgres 접속 정보와 롤업 윈도우다.
+  `data_quality_audit`의 audit-gold task도 같은 `AIRFLOW_VAR_POSTGRES_*` 5개
+  키를 driver_env로 재사용한다(#295). 위 `POSTGRES_*`와 같은 값을 가리켜야
+  한다(EMR Serverless job의 driver_env로 넘기는 경로가 달라 값을 두 번
+  채워야 한다 — **주의**: 이 값은 EMR Serverless Job Run 설정에 평문으로
+  남는 임시 방편이다, #292 논의). 로컬 개발에서는
   `infra/compose/postgres.yaml`의 `postgres` 서비스를 그대로 가리키면 된다
   (`POSTGRES_HOST=postgres`). 이 값이 가리키는 서빙 DB에
   마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
+- `AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET` — `data_quality_audit`의 audit-gold
+  task가 GX Data Docs를 올릴 S3 버킷이다(#295). 비워두면 batch-jobs 쪽
+  기본값(`de4-data-quality-docs`)을 쓴다. AWS 자격증명은 여기 넘기지 않고
+  EMR Serverless execution role(IAM)에 위임한다 — role에 이 버킷에 대한
+  `s3:PutObject` 권한이 미리 부여돼 있어야 한다.
 
 ## standard_score_pipeline — EMR Serverless 실행 (#292, ADR-0001)
 
@@ -128,18 +133,23 @@ Job Run 설정에 평문으로 남아 GetJobRun API로 조회 가능하다 — S
 > 이전된 뒤 별도로 진행한다(#289). 아래 "통합 테스트" 절의 backfill/검증
 > 절차는 옛 docker-run 방식 기준이라 지금은 그대로 재현할 수 없다.
 
-`data_quality_audit`은 아직 `docker run`으로 host에 별도의 `batch-jobs`
-컨테이너를 띄우는 방식("docker-outside-of-docker")을 그대로 쓴다(#295에서
-같은 방식으로 옮길 예정). `airflow-scheduler` 컨테이너에 host의 docker
-socket을 마운트해 동작한다(`infra/compose/airflow.yaml`).
+## data_quality_audit — EMR Serverless 실행 (#295, ADR-0001)
 
-> ⚠️ **보안 주의**: docker socket 마운트는 그 컨테이너에 host docker에 대한
-> 사실상의 제어권을 준다. 로컬 개발 환경 밖(공유 서버, 운영 환경 등)으로 이
-> compose 설정을 그대로 옮기지 않는다.
+`data_quality_audit`도 같은 공용 헬퍼(`dags/emr_serverless.py`의
+`submit_batch_jobs_command`)로 `EmrServerlessStartJobOperator`를 쓴다(#292의
+방식을 그대로 재사용). host의 docker socket을 마운트해 `docker run`으로
+batch-jobs 컨테이너를 직접 띄우던("docker-outside-of-docker") 방식은
+제거했다 — `infra/compose/airflow.yaml`에는 이제 docker socket 마운트가
+없다.
 
-**문제 해결**: `docker run` 단계(`data_quality_audit`)에서 `permission denied`가
-나면, host의 `/var/run/docker.sock` 권한(그룹)과 컨테이너 안 `airflow` 유저의
-그룹이 맞는지 확인한다(호스트 OS/도커 설정에 따라 다르다).
+`audit-gold` CLI는 `--table` 외 옵션이 없어, Postgres 자격증명과
+`GOLD_AUDIT_S3_BUCKET`을 `driver_env`로 넘긴다(위 "준비" 절 참고). AWS
+access key는 넘기지 않고 EMR Serverless의 execution role(IAM)에 위임한다 —
+role에 대상 S3 버킷에 대한 `s3:PutObject` 권한이 미리 부여돼 있어야 한다.
+
+> ⚠️ 이 DAG의 실제 EMR Serverless 트리거 검증도 `standard_score_pipeline`과
+> 마찬가지로 batch-jobs의 커스텀 이미지가 준비되고 Airflow가 EC2로 이전된 뒤
+> 별도로 진행한다(#289).
 
 ## zone_weather_pipeline (#207, #230)
 
@@ -423,8 +433,9 @@ docker compose -f infra/compose/postgres.yaml down
 ## 범위 밖
 
 - Great Expectations 검증 task, Slack 실패 알림
-- `data_quality_audit`의 EMR Serverless 연결(#295), batch-jobs 커스텀 이미지
-  완성 후 실제 Job Run 트리거 검증, Airflow의 EC2 이전(#289 후속 이슈)
+- `data_quality_audit`/`standard_score_pipeline` 모두, batch-jobs 커스텀
+  이미지 완성 후 실제 EMR Serverless Job Run 트리거 검증과 Airflow의 EC2
+  이전(#289 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
 - 운영 배포, 인증/RBAC 설정
