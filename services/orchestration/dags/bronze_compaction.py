@@ -47,6 +47,8 @@ with DAG(
     schedule="17 4 * * *",
     start_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),
     catchup=False,
+    # concurrent DAG run으로 같은 그룹이 중복 압축되는 걸 막는다(PR #280 리뷰).
+    max_active_runs=1,
     default_args={
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),

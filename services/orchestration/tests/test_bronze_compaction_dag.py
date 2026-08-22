@@ -31,6 +31,7 @@ def test_dag_parses_with_expected_schedule():
     assert module.dag.dag_id == "bronze_compaction"
     assert module.dag.schedule == "17 4 * * *"
     assert module.dag.catchup is False
+    assert module.dag.max_active_runs == 1
 
 
 def test_dag_contains_one_task_per_bronze_source():
