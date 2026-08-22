@@ -128,7 +128,7 @@ sudo chmod 600 /etc/sensor-producer/sensor-producer.env
 
 | 키 | 기본값 |
 | --- | --- |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` — 같은 EC2에 Kafka가 떠 있다면 컨테이너 네트워크 설정에 맞는 주소로 채운다 |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` — 컨테이너를 `--network host`로 띄우므로 같은 EC2에서 `docker compose`로 뜬 Kafka에 이 기본값 그대로 붙는다. 보통 채울 필요 없다 |
 | `KAFKA_SENSOR_TOPIC` | `sensor-events` |
 | `SENSOR_ENVIRONMENT_POINTER_URI` | 없음 — road environment를 S3 활성 포인터로 따라갈 때 사용 |
 | `SENSOR_ENVIRONMENT_MANIFEST_URI` | 없음 — 특정 빌드를 고정할 때 사용 (포인터와 동시 사용 불가) |
@@ -151,7 +151,7 @@ sudo chmod 600 /etc/sensor-producer/sensor-producer.env
 ```
 docker pull <새 이미지>
 docker rm --force <기존 컨테이너>   (없으면 무시)
-docker run -d <새 이미지> run ...   (리플레이 시작, 백그라운드)
+docker run -d --network host <새 이미지> run ...   (리플레이 시작, 백그라운드)
 10초 대기
 docker inspect Running == true     통과 — 워크플로 성공, 리플레이는 계속 진행
 docker inspect Running != true     실패 — 컨테이너 로그를 남기고 워크플로 실패
