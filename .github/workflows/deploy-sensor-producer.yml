@@ -170,8 +170,12 @@ jobs:
 
           docker rm -f "$CONTAINER" 2>/dev/null || true
 
+          # Kafka는 같은 EC2의 docker compose 컨테이너로 떠 있다. 기본 브리지
+          # 네트워크에서는 localhost가 이 컨테이너 자신을 가리켜 못 붙으므로,
+          # 호스트 네트워크를 그대로 써서 CLI 기본값(localhost:9092)이 맞게 한다.
           docker run -d \
             --name "$CONTAINER" \
+            --network host \
             --env-file "$ENV_FILE" \
             --label "org.opencontainers.image.revision=$REVISION" \
             "$IMAGE" "${run_args[@]}"
