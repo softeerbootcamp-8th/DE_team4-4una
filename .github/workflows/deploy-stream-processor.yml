@@ -24,8 +24,7 @@ jobs:
       EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
       CONTAINER: stream-processor
       ENV_FILE: /home/ec2-user/DE_team4-4una/.env
-      DATA_DIR: ${{ vars.STREAM_PROCESSOR_DATA_DIR || '/var/lib/de4/stream-processor' }}
-
+      DATA_DIR: /home/ec2-user/stream-processor-data
     steps:
       - name: Check required variables
         env:
