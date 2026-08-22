@@ -48,7 +48,7 @@ jobs:
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ vars.SERVING_API_ECR_REPOSITORY }}
           EC2_HOST: ${{ vars.EC2_HOST }}
           EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
         run: |
@@ -84,7 +84,7 @@ jobs:
         id: image
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
-          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          REPOSITORY: ${{ vars.SERVING_API_ECR_REPOSITORY }}
         run: |
           set -euo pipefail
           image="${REGISTRY}/${REPOSITORY}:${REVISION}"
@@ -156,4 +156,4 @@ jobs:
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
             echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
             echo "| container label | \`org.opencontainers.image.revision=$REVISION\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMAR
