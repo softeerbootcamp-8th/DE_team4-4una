@@ -7,34 +7,47 @@
 막지 않는다(soft fail — ADR-0004: "task 실패로 신호만 주고 다른 DAG는 막지
 않음").
 
-## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
+## EMR Serverless 실행 방식 (#295, ADR-0001)
 
-`standard_score_pipeline.py`와 동일하게 BashOperator로 batch-jobs 컨테이너를
-docker-outside-of-docker로 띄운다(`infra/compose/airflow.yaml`의 docker
-socket 마운트 필요). local-lake 마운트는 필요 없다 — Postgres만 조회한다.
+standard_score_pipeline(#292)과 같은 공용 헬퍼(`emr_serverless.
+submit_batch_jobs_command`)로, host의 docker socket을 마운트해 `docker run`으로
+batch-jobs 컨테이너를 직접 띄우던(docker-outside-of-docker) 방식에서 미리
+만들어진 EMR Serverless Application에 Job Run을 제출하는 방식으로 바뀌었다.
+`audit-gold` CLI는 `--table` 외 옵션이 없어, Postgres 자격증명과
+`GOLD_AUDIT_S3_BUCKET`은 driver_env로 넘긴다(standard_score_pipeline의 임시
+방편과 동일한 이유 — GetJobRun API로 평문 조회 가능, #292 논의). AWS
+access key는 넘기지 않고 EMR Serverless의 execution role(IAM)에 위임한다 —
+GX Data Docs를 올리는 데 필요한 S3 PutObject 권한은 role 쪽에 미리 부여돼
+있어야 한다(#295 논의).
 """
 
 from __future__ import annotations
 
 import datetime
 
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG
+from emr_serverless import submit_batch_jobs_command
 
-_AUDIT_GOLD_ENV_FLAGS = (
-    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
-    "-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e GOLD_AUDIT_S3_BUCKET "
+# standard_score_pipeline.py의 _POSTGRES_DRIVER_ENV와 같은 내용이다(#292). 그
+# 파일은 이 이슈(#295)의 제외 범위라 공유 모듈로 뽑지 않고 그대로 복제한다.
+_POSTGRES_DRIVER_ENV = {
+    "POSTGRES_HOST": "{{ var.value.POSTGRES_HOST }}",
+    "POSTGRES_PORT": "{{ var.value.POSTGRES_PORT }}",
+    "POSTGRES_DB": "{{ var.value.POSTGRES_DB }}",
+    "POSTGRES_USER": "{{ var.value.POSTGRES_USER }}",
+    "POSTGRES_PASSWORD": "{{ var.value.POSTGRES_PASSWORD }}",
+}
+
+# audit-gold CLI는 --table 외 옵션이 없어 GOLD_AUDIT_S3_BUCKET도 driver_env로
+# 넘긴다. 값이 없으면 batch-jobs 쪽 기본값(de4-data-quality-docs)과 동일한
+# 값으로 fallback한다.
+_GOLD_AUDIT_S3_BUCKET = (
+    "{{ var.value.get('GOLD_AUDIT_S3_BUCKET', 'de4-data-quality-docs') }}"
 )
 
 
-def _audit_gold_bash_command(table: str) -> str:
-    return (
-        "docker run --rm --network de4-local "
-        + _AUDIT_GOLD_ENV_FLAGS
-        + "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-        "uv run --no-sync --package batch-jobs batch-jobs "
-        f"audit-gold --table={table}"
-    )
+def _audit_gold_driver_env() -> dict[str, str]:
+    return {**_POSTGRES_DRIVER_ENV, "GOLD_AUDIT_S3_BUCKET": _GOLD_AUDIT_S3_BUCKET}
 
 
 with DAG(
@@ -51,11 +64,19 @@ with DAG(
 ) as dag:
     # 두 task는 서로 독립이라(의존관계 없음) 병렬로 실행된다. outlet이 없어
     # 이 DAG의 성공/실패는 어떤 다른 DAG도 깨우거나 막지 않는다.
-    audit_standard_segment_comfort_score = BashOperator(
+    audit_standard_segment_comfort_score = submit_batch_jobs_command(
         task_id="audit_standard_segment_comfort_score",
-        bash_command=_audit_gold_bash_command("standard_segment_comfort_score"),
+        entry_point_arguments=[
+            "audit-gold",
+            "--table=standard_segment_comfort_score",
+        ],
+        driver_env=_audit_gold_driver_env(),
     )
-    audit_current_segment_comfort_score = BashOperator(
+    audit_current_segment_comfort_score = submit_batch_jobs_command(
         task_id="audit_current_segment_comfort_score",
-        bash_command=_audit_gold_bash_command("current_segment_comfort_score"),
+        entry_point_arguments=[
+            "audit-gold",
+            "--table=current_segment_comfort_score",
+        ],
+        driver_env=_audit_gold_driver_env(),
     )

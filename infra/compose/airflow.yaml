@@ -38,22 +38,21 @@ x-airflow-env: &airflow-env
     AIRFLOW_VAR_POSTGRES_DB: ${AIRFLOW_VAR_POSTGRES_DB}
     AIRFLOW_VAR_POSTGRES_USER: ${AIRFLOW_VAR_POSTGRES_USER}
     AIRFLOW_VAR_POSTGRES_PASSWORD: ${AIRFLOW_VAR_POSTGRES_PASSWORD}
-    # data_quality_audit(#253)이 아직 docker-outside-of-docker로 도는 동안 쓰는
-    # 값 — #295에서 EMR Serverless로 옮기면 이 블록과 docker socket 마운트를
-    # 통째로 제거한다.
-    HOST_PROJECT_DIR: ${PWD}
-    BATCH_JOBS_IMAGE_TAG: ${BATCH_JOBS_IMAGE_TAG}
+    # data_quality_audit(#253)의 audit-gold task가 driver_env로 넘기는 값(#295로
+    # EMR Serverless로 옮기면서 위 AIRFLOW_VAR_POSTGRES_*를 공유한다). GX Data
+    # Docs를 업로드할 S3 버킷 — 값이 없으면 batch-jobs 쪽 기본값
+    # (de4-data-quality-docs)을 그대로 쓴다. AWS 자격증명은 여기서 넘기지 않고
+    # EMR Serverless execution role(IAM)에 위임한다(#295 논의).
+    AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET: ${AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET}
+    # current_score_pipeline의 PythonOperator(jobs/current_score.py,
+    # CurrentScoreJobConfig.from_env())가 scheduler 프로세스의 os.environ에서
+    # 직접 읽는 값이라, 위 AIRFLOW_VAR_POSTGRES_*(Airflow Variable)와는 별개로
+    # 필요하다.
     POSTGRES_HOST: ${POSTGRES_HOST}
     POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_DB: ${POSTGRES_DB}
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    # data_quality_audit DAG(#253)가 audit-gold task에 전달하는 값. GX Data
-    # Docs를 S3에 업로드하는 데 쓴다(ADR-0004, spec §1).
-    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    GOLD_AUDIT_S3_BUCKET: ${GOLD_AUDIT_S3_BUCKET}
-    AWS_REGION: ${AWS_REGION}
     # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
     # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
     AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
@@ -80,10 +79,11 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
-    # LocalExecutor는 task를 scheduler 프로세스 안에서 실행하므로, host의 docker에
-    # 위임하는(docker-outside-of-docker) BashOperator나 weather_pipeline(#207)의
-    # PythonOperator 둘 다 이 컨테이너에서만 동작하면 된다 — dag-processor/webserver는
-    # task를 실행하지 않으므로 아래 jobs 배선이 필요 없다.
+    # LocalExecutor는 task를 scheduler 프로세스 안에서 실행하므로,
+    # weather_pipeline(#207)의 PythonOperator처럼 이 컨테이너 안에서 직접 도는
+    # task는 여기서만 동작하면 된다 — dag-processor/webserver는 task를 실행하지
+    # 않으므로 아래 jobs 배선이 필요 없다(data_quality_audit이 host docker에
+    # 위임하던 BashOperator는 #295로 EMR Serverless로 옮기며 사라졌다).
     environment:
       <<: *airflow-env
       # weather_pipeline이 PythonOperator에서 jobs.weather를 임포트하기 위한 배선.
@@ -119,7 +119,6 @@ services:
       - ../../data/processed:${AIRFLOW_HOME}/data/processed:ro
       # zone_weather_snapshot Parquet을 쓰는 대상이라 다른 마운트와 달리 쓰기 가능해야 한다.
       - ../../data/local-lake:${AIRFLOW_HOME}/data/local-lake
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-init:
         condition: service_completed_successfully
