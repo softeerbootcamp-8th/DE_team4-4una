@@ -1,5 +1,5 @@
 """Vehicle sensor event producer."""
 
+from sensor_producer.cli import main
 
-def main() -> None:
-    print("sensor-producer")
+__all__ = ["main"]

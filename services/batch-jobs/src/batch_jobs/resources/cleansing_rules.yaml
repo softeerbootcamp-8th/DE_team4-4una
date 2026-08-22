@@ -1,0 +1,86 @@
+# 센서 이벤트 클렌징 판정 기준. cleansing.rules가 로드해 검증한다.
+#
+# 판정 순서(이 파일이 강제하진 않지만 클렌징 job 구현 시 반드시 지켜야 함):
+#   1. 파싱 실패            -> MALFORMED_JSON
+#   2. 필수 컬럼 NULL        -> MISSING_REQUIRED_FIELD
+#   3. 값 범위 이탈          -> OUT_OF_RANGE
+#   4. 중복(dedup)          -> DUPLICATE_EVENT
+# 2번을 4번보다 먼저 처리해야 한다. event_id가 NULL인 행들을 그대로 dedup에
+# 넣으면 서로 같은 값(NULL)으로 묶여 중복 오탐이 발생한다.
+#
+# provisional: true가 붙은 값은 근거가 아직 확정되지 않은 잠정값이다.
+
+# Bronze sensor_event 중 값이 반드시 있어야 하는 컬럼(MISSING_REQUIRED_FIELD 판정 대상).
+# event_date처럼 파티션 경로에서 유도되는 컬럼은 포함하지 않는다.
+required_columns:
+  - event_id
+  - vehicle_profile_id
+  - trip_id
+  - trip_seq
+  - event_time
+  - latitude
+  - longitude
+  - speed_mps
+  - accel_z
+  - _ingested_at
+  - _run_id
+
+# 컬럼별 유효 범위(OUT_OF_RANGE 판정 대상).
+value_ranges:
+  vehicle_profile_id:
+    min: 0
+    max: null
+  trip_seq:
+    min: 0
+    max: null
+  latitude: # NYC 5개 자치구 실측 범위(40.50~40.92)를 여유 있게 감싸는 값
+    min: 40.4
+    max: 41.0
+  longitude: # NYC 5개 자치구 실측 범위(-74.26~-73.70)를 여유 있게 감싸는 값. 서경이라 항상 음수
+    min: -74.3
+    max: -73.6
+  speed_mps:
+    min: 0
+    max: 60
+  heading:
+    min: 0
+    max: 360
+    max_exclusive: true
+  accel_x:
+    min: -30
+    max: 30
+  accel_y:
+    min: -30
+    max: 30
+  accel_z:
+    min: -30
+    max: 30
+  jerk_x:
+    min: -300
+    max: 300
+  jerk_y:
+    min: -300
+    max: 300
+  jerk_z:
+    min: -300
+    max: 300
+  steering_vibration:
+    min: 0
+    max: null
+  steering_angle: # 시뮬레이터가 도출하는 전륜(앞바퀴) 조향각. 조향휠 회전각(±540)이 아니다
+    min: -35
+    max: 35
+
+# event_time 절대 허용 범위. 배치 처리 시각 기준 정밀한 윈도우가 아니라, 이 파이프라인이
+# 과거(2024년 등) 데이터를 재생하는 구조라서 명백히 잘못된 값(연도 1000 등)만 걸러내기
+# 위한 느슨한 하한/상한이다. 실측 근거는 없는 잠정값이다.
+event_time_bounds:
+  min: "2000-01-01T00:00:00+00:00"
+  max: "2100-01-01T00:00:00+00:00"
+  provisional: true
+
+# 중복 제거 키와 우선순위. event_id 중복 시 _ingested_at이 가장 최신인 행만 남긴다.
+deduplication:
+  key:
+    - event_id
+  priority: latest_ingested_at

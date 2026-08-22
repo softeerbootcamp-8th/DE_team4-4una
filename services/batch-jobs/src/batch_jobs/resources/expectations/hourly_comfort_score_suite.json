@@ -1,0 +1,49 @@
+{
+  "expectations": [
+    {
+      "kwargs": {
+        "column": "vertical_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "longitudinal_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "lateral_score",
+        "min_value": 0.0,
+        "max_value": 100.0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "scoring_version",
+        "regex": "^\\d+\\.\\d+\\.\\d+$"
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_match_regex"
+    }
+  ],
+  "id": null,
+  "meta": {
+    "great_expectations_version": "1.21.0"
+  },
+  "name": "hourly_comfort_score_suite",
+  "notes": null
+}

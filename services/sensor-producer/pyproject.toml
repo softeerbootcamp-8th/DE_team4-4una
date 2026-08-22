@@ -3,7 +3,21 @@ name = "sensor-producer"
 version = "0.1.0"
 description = "Produces vehicle sensor events"
 requires-python = ">=3.12,<3.13"
-dependencies = ["de4-core"]
+dependencies = [
+    "de4-core",
+    "duckdb>=1.4.3",
+    "geopandas>=1.1.4",
+    "kafka-python-ng>=2.2.3",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.1",
+    "pyproj>=3.7.2",
+    "pyshp>=3.0.2",
+    "requests>=2.34.2",
+    "shapely>=2.1.2",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
 
 [project.scripts]
 sensor-producer = "sensor_producer:main"

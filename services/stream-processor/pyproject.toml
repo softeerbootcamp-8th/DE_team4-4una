@@ -3,7 +3,10 @@ name = "stream-processor"
 version = "0.1.0"
 description = "Processes streaming ride-comfort events"
 requires-python = ">=3.12,<3.13"
-dependencies = ["de4-core"]
+dependencies = ["de4-core", "pyspark==4.0.2"]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
 
 [project.scripts]
 stream-processor = "stream_processor:main"

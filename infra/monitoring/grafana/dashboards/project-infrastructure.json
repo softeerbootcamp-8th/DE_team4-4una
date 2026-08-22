@@ -1,0 +1,402 @@
+{
+  "id": null,
+  "uid": "project-infrastructure",
+  "title": "Project Infrastructure",
+  "tags": ["infrastructure", "monitoring"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Host / Project EC2",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Target Status",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "up{job=~\"prometheus|project-node|project-containers\"}",
+          "legendFormat": "{{job}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red", "index": 0 },
+                "1": { "text": "UP", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "CPU %",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"project-node\", mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Memory %",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 8, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"project-node\"} / node_memory_MemTotal_bytes{job=\"project-node\"})",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Disk % (root filesystem)",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 16, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "CPU Usage over Time",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"project-node\", mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Memory Usage over Time",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"project-node\"} / node_memory_MemTotal_bytes{job=\"project-node\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Network Receive",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(node_network_receive_bytes_total{job=\"project-node\", device!=\"lo\"}[5m]))",
+          "legendFormat": "receive"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Network Transmit",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(node_network_transmit_bytes_total{job=\"project-node\", device!=\"lo\"}[5m]))",
+          "legendFormat": "transmit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Docker Containers",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Container CPU Usage",
+      "description": "cAdvisor container_cpu_usage_seconds_total, per-container name label. Verify the name label in Prometheus Explore if this panel shows No data (see README).",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{job=\"project-containers\", name!=\"\"}[5m])) * 100",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Container Memory Usage",
+      "description": "cAdvisor container_memory_working_set_bytes, per-container name label. Verify the name label in Prometheus Explore if this panel shows No data (see README).",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (name) (container_memory_working_set_bytes{job=\"project-containers\", name!=\"\"})",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Container Network I/O",
+      "description": "cAdvisor container_network_{receive,transmit}_bytes_total, per-container name label. This label may not be populated for every network setup — verify in Prometheus Explore if this panel shows No data (see README).",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 50, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (name) (rate(container_network_receive_bytes_total{job=\"project-containers\", name!=\"\"}[5m]))",
+          "legendFormat": "{{name}} rx"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "sum by (name) (rate(container_network_transmit_bytes_total{job=\"project-containers\", name!=\"\"}[5m]))",
+          "legendFormat": "{{name}} tx"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    }
+  ]
+}

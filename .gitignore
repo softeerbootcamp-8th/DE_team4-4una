@@ -45,6 +45,7 @@ metastore_db/
 derby.log
 *.crc
 _SUCCESS
+checkpoints/
 
 # --- Airflow ---
 airflow.cfg
@@ -58,6 +59,8 @@ standalone_admin_password.txt
 *.csv
 data/
 !data/.gitkeep
+!context/data/
+!context/data/**
 
 # --- Terraform / Infra (추후 사용 시) ---
 *.tfstate
@@ -66,3 +69,7 @@ data/
 
 # --- Logs ---
 *.log
+
+# --- Superpowers subagent-driven-development scratch workspace ---
+.superpowers/
+.worktrees/

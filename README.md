@@ -22,11 +22,15 @@
 
 ```bash
 uv sync --all-packages
-uv run --package sensor-producer python -m sensor_producer
+uv run --package sensor-producer sensor-producer --help
 ```
 
 전체 워크스페이스는 하나의 `uv.lock`을 공유합니다. 특정 패키지 명령은 저장소 루트에서
 `uv run --package <패키지명> ...` 형식으로 실행합니다.
+
+실제 NYC 데이터로 센서 스트림을 생성하는 방법은
+[`services/sensor-producer/README.md`](services/sensor-producer/README.md)를
+참조하세요.
 
 ### 저장소 구조
 

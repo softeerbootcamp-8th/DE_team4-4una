@@ -3,7 +3,19 @@ name = "serving-api"
 version = "0.1.0"
 description = "Serves ride-comfort data to clients"
 requires-python = ">=3.12,<3.13"
-dependencies = ["de4-core"]
+dependencies = [
+    "de4-core",
+    "fastapi>=0.136.3,<0.137.0",
+    "psycopg[binary,pool]>=3.3.4",
+    "uvicorn[standard]>=0.52.3",
+]
+
+# httpx2는 starlette.testclient가 요구한다 — 없으면 테스트가 수집 단계에서 실패한다.
+[dependency-groups]
+dev = [
+    "httpx2>=2.10.0",
+    "pytest>=9.1.1",
+]
 
 [project.scripts]
 serving-api = "serving_api:main"

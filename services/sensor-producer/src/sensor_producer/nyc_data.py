@@ -1,0 +1,411 @@
+"""Acquire small reproducible samples from official NYC data sources."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import urllib.parse
+import urllib.request
+from collections.abc import Iterator
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import duckdb
+from de4_core import ObjectStore
+
+from sensor_producer.domain import TripRecord
+from sensor_producer.environment import load_taxi_zones
+
+NYC_TIMEZONE = ZoneInfo("America/New_York")
+TAXI_ZONE_URL = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip"
+DEFAULT_HVFHV_URL = (
+    "https://d37ci6vzurychx.cloudfront.net/trip-data/fhvhv_tripdata_2024-02.parquet"
+)
+LION_QUERY_URL = (
+    "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/"
+    "LION/FeatureServer/0/query"
+)
+PAVEMENT_DATASET_ID = "6yyb-pb25"
+HUMP_DATASET_ID = "jknp-skuy"
+USER_AGENT = "DE4-sensor-producer/0.1 (+https://github.com/softeerbootcamp-8th/DE_team4-4una)"
+TLC_TRIP_FETCH_BATCH_SIZE = 1000
+
+logger = logging.getLogger(__name__)
+
+
+def fetch_nyc_sample(
+    output_dir: Path,
+    zone_id: int = 181,
+    source_date: date = date(2024, 2, 1),
+    max_trips: int = 1,
+    hvfhv_url: str = DEFAULT_HVFHV_URL,
+) -> dict[str, object]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    taxi_path = output_dir / "taxi_zones.zip"
+    download_file(TAXI_ZONE_URL, taxi_path)
+    taxi_zones = load_taxi_zones(taxi_path)
+    if zone_id not in taxi_zones:
+        raise ValueError(f"taxi zone {zone_id} is not present in the official shapefile")
+    west, south, east, north = taxi_zones[zone_id].bounds
+    margin = 0.004
+    bbox = (west - margin, south - margin, east + margin, north + margin)
+
+    lion_path = output_dir / "lion.geojson"
+    pavement_path = output_dir / "pavement.geojson"
+    hump_path = output_dir / "speed_humps.geojson"
+    trip_path = output_dir / "trips.json"
+    fetch_lion(bbox, lion_path)
+    fetch_socrata(PAVEMENT_DATASET_ID, bbox, pavement_path)
+    fetch_socrata(HUMP_DATASET_ID, bbox, hump_path)
+    trip_rows = fetch_hvfhv_rows(hvfhv_url, source_date, zone_id, max_trips)
+    trip_path.write_text(json.dumps(trip_rows, indent=2, sort_keys=True))
+
+    source_items = [
+        source_item("tlc_hvfhv_trip_records", hvfhv_url, trip_path, len(trip_rows)),
+        source_item("tlc_taxi_zones", TAXI_ZONE_URL, taxi_path, len(taxi_zones)),
+        source_item(
+            "nyc_lion_26b",
+            LION_QUERY_URL,
+            lion_path,
+            geojson_count(lion_path),
+        ),
+        source_item(
+            "nyc_street_pavement_ratings",
+            f"https://data.cityofnewyork.us/resource/{PAVEMENT_DATASET_ID}.geojson",
+            pavement_path,
+            geojson_count(pavement_path),
+        ),
+        source_item(
+            "nyc_vzv_speed_humps",
+            f"https://data.cityofnewyork.us/resource/{HUMP_DATASET_ID}.geojson",
+            hump_path,
+            geojson_count(hump_path),
+        ),
+    ]
+    manifest: dict[str, object] = {
+        "created_at": datetime.now().astimezone().isoformat(),
+        "source_date": source_date.isoformat(),
+        "taxi_zone_id": zone_id,
+        "bbox_wgs84": list(bbox),
+        "sources": source_items,
+    }
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    return manifest
+
+
+def fetch_hvfhv_rows(
+    source_url: str,
+    source_date: date,
+    zone_id: int,
+    max_trips: int,
+) -> list[dict[str, object]]:
+    escaped_url = source_url.replace("'", "''")
+    query = f"""
+        SELECT
+            hvfhs_license_num,
+            dispatching_base_num,
+            originating_base_num,
+            request_datetime,
+            on_scene_datetime,
+            pickup_datetime,
+            dropoff_datetime,
+            PULocationID AS pu_location_id,
+            DOLocationID AS do_location_id,
+            trip_miles,
+            trip_time
+        FROM read_parquet('{escaped_url}')
+        WHERE CAST(request_datetime AS DATE) = ?
+          AND PULocationID = ?
+          AND DOLocationID = ?
+          AND request_datetime <= pickup_datetime
+          AND pickup_datetime < dropoff_datetime
+          AND trip_time > 0
+        ORDER BY request_datetime, pickup_datetime, dispatching_base_num
+        LIMIT ?
+    """
+    connection = duckdb.connect()
+    rows = connection.execute(
+        query,
+        [source_date.isoformat(), zone_id, zone_id, max_trips],
+    ).fetchall()
+    columns = [description[0] for description in connection.description]
+    connection.close()
+    if not rows:
+        raise ValueError(
+            f"no valid HVFHV trips found for {source_date} within taxi zone {zone_id}"
+        )
+
+    result: list[dict[str, object]] = []
+    for index, row in enumerate(rows):
+        values = dict(zip(columns, row, strict=True))
+        stable_text = "|".join(str(values[column]) for column in columns)
+        values["trip_id"] = hashlib.sha256(f"{stable_text}|{index}".encode()).hexdigest()[:24]
+        for key, value in list(values.items()):
+            if isinstance(value, datetime):
+                values[key] = value.isoformat()
+        result.append(values)
+    return result
+
+
+def load_trips(path: Path) -> list[TripRecord]:
+    values = json.loads(path.read_text())
+    trips = [
+        TripRecord(
+            trip_id=item["trip_id"],
+            request_datetime=parse_nyc_datetime(item["request_datetime"]),
+            pickup_datetime=parse_nyc_datetime(item["pickup_datetime"]),
+            dropoff_datetime=parse_nyc_datetime(item["dropoff_datetime"]),
+            pu_location_id=int(item["pu_location_id"]),
+            do_location_id=int(item["do_location_id"]),
+            trip_miles=float(item["trip_miles"]),
+        )
+        for item in values
+    ]
+    return sorted(trips, key=lambda trip: (trip.request_datetime, trip.trip_id))
+
+
+def materialize_trip_parquet(
+    uri: str,
+    cache_dir: Path,
+    object_store: ObjectStore | None = None,
+) -> Path:
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.query or parsed.fragment or not parsed.path.lower().endswith(".parquet"):
+        raise ValueError("TLC trip URI must identify one Parquet object")
+    if parsed.scheme in {"", "file"}:
+        raw_path = urllib.parse.unquote(parsed.path) if parsed.scheme else uri
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
+    if parsed.scheme != "s3":
+        raise ValueError(f"unsupported TLC trip URI scheme: {parsed.scheme}")
+
+    filename = Path(urllib.parse.unquote(parsed.path)).name
+    cache_key = hashlib.sha256(uri.encode()).hexdigest()[:20]
+    destination = cache_dir / "tlc" / f"{cache_key}-{filename}"
+    if destination.is_file():
+        logger.info("TLC trip cache hit: uri=%s path=%s", uri, destination)
+        return destination
+
+    logger.info("TLC trip cache miss; downloading object: uri=%s", uri)
+    temporary = destination.with_suffix(".parquet.part")
+    temporary.unlink(missing_ok=True)
+    store = object_store or ObjectStore()
+    try:
+        store.download_file(uri, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def iter_hvfhv_parquet_trips(
+    path: Path,
+    source_date: date,
+    maximum: int | None = None,
+    *,
+    batch_size: int = TLC_TRIP_FETCH_BATCH_SIZE,
+) -> Iterator[TripRecord]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if maximum is not None and maximum <= 0:
+        raise ValueError("maximum must be positive")
+
+    limit_clause = " LIMIT ?" if maximum is not None else ""
+    query = f"""
+        SELECT
+            request_datetime,
+            pickup_datetime,
+            dropoff_datetime,
+            PULocationID AS pu_location_id,
+            DOLocationID AS do_location_id,
+            trip_miles,
+            file_row_number
+        FROM read_parquet(?, file_row_number = true)
+        WHERE request_datetime >= ?
+          AND request_datetime < ?
+          AND request_datetime IS NOT NULL
+          AND pickup_datetime IS NOT NULL
+          AND dropoff_datetime IS NOT NULL
+          AND PULocationID IS NOT NULL
+          AND DOLocationID IS NOT NULL
+          AND trip_miles IS NOT NULL
+          AND request_datetime <= pickup_datetime
+          AND pickup_datetime < dropoff_datetime
+          AND trip_miles > 0
+          AND isfinite(trip_miles)
+        ORDER BY
+            request_datetime,
+            pickup_datetime,
+            dropoff_datetime,
+            file_row_number
+        {limit_clause}
+    """
+    # 날짜 범위 조건을 사용해 Parquet row group predicate pushdown을 허용한다
+    period_start = datetime.combine(source_date, time.min)
+    period_end = period_start + timedelta(days=1)
+    parameters: list[object] = [str(path), period_start, period_end]
+    if maximum is not None:
+        parameters.append(maximum)
+
+    connection = duckdb.connect()
+    yielded = False
+    try:
+        cursor = connection.execute(query, parameters)
+        while rows := cursor.fetchmany(batch_size):
+            for row in rows:
+                request_time = parse_nyc_datetime(row[0])
+                pickup_time = parse_nyc_datetime(row[1])
+                dropoff_time = parse_nyc_datetime(row[2])
+                trip = TripRecord(
+                    trip_id=stable_trip_id(
+                        source_date,
+                        int(row[6]),
+                        request_time,
+                        pickup_time,
+                        dropoff_time,
+                        int(row[3]),
+                        int(row[4]),
+                        float(row[5]),
+                    ),
+                    request_datetime=request_time,
+                    pickup_datetime=pickup_time,
+                    dropoff_datetime=dropoff_time,
+                    pu_location_id=int(row[3]),
+                    do_location_id=int(row[4]),
+                    trip_miles=float(row[5]),
+                )
+                yielded = True
+                yield trip
+        if not yielded:
+            raise ValueError(f"no valid HVFHV trips found for {source_date}")
+    finally:
+        connection.close()
+
+
+def stable_trip_id(
+    source_date: date,
+    file_row_number: int,
+    request_datetime: datetime,
+    pickup_datetime: datetime,
+    dropoff_datetime: datetime,
+    pu_location_id: int,
+    do_location_id: int,
+    trip_miles: float,
+) -> str:
+    values = (
+        "tlc-hvfhv-parquet-v1",
+        source_date.isoformat(),
+        str(file_row_number),
+        request_datetime.isoformat(),
+        pickup_datetime.isoformat(),
+        dropoff_datetime.isoformat(),
+        str(pu_location_id),
+        str(do_location_id),
+        format(trip_miles, ".17g"),
+    )
+    return hashlib.sha256("|".join(values).encode()).hexdigest()[:24]
+
+
+def parse_nyc_datetime(value: str | datetime) -> datetime:
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
+    return parsed.replace(tzinfo=NYC_TIMEZONE) if parsed.tzinfo is None else parsed
+
+
+def fetch_lion(bbox: tuple[float, float, float, float], output_path: Path) -> None:
+    features: list[dict[str, object]] = []
+    offset = 0
+    while True:
+        parameters = {
+            "where": "1=1",
+            "geometry": ",".join(str(value) for value in bbox),
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": (
+                "SegmentID,NodeIDFrom,NodeIDTo,TrafDir,SegmentTyp,FeatureTyp,"
+                "RB_Layer,NodeLevelF,NodeLevelT,POSTED_SPEED,CurveFlag,Radius,Street"
+            ),
+            "returnGeometry": "true",
+            "outSR": "4326",
+            "f": "geojson",
+            "resultRecordCount": "2000",
+            "resultOffset": str(offset),
+        }
+        document = request_json(f"{LION_QUERY_URL}?{urllib.parse.urlencode(parameters)}")
+        page = document.get("features", [])
+        features.extend(page)
+        if not document.get("properties", {}).get("exceededTransferLimit") or not page:
+            break
+        offset += len(page)
+    output_path.write_text(
+        json.dumps(
+            {"type": "FeatureCollection", "features": features},
+            separators=(",", ":"),
+        )
+    )
+
+
+def fetch_socrata(
+    dataset_id: str,
+    bbox: tuple[float, float, float, float],
+    output_path: Path,
+) -> None:
+    west, south, east, north = bbox
+    parameters = {
+        "$limit": "50000",
+        "$where": f"within_box(the_geom, {north}, {west}, {south}, {east})",
+    }
+    url = (
+        f"https://data.cityofnewyork.us/resource/{dataset_id}.geojson?"
+        f"{urllib.parse.urlencode(parameters)}"
+    )
+    document = request_json(url)
+    output_path.write_text(json.dumps(document, separators=(",", ":")))
+
+
+def request_json(url: str) -> dict[str, object]:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return json.load(response)
+
+
+def download_file(url: str, output_path: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with (
+        urllib.request.urlopen(request, timeout=120) as response,
+        output_path.open("wb") as destination,
+    ):
+        while chunk := response.read(1024 * 1024):
+            destination.write(chunk)
+
+
+def source_item(
+    source_id: str,
+    source_url: str,
+    local_path: Path,
+    selected_records: int,
+) -> dict[str, object]:
+    return {
+        "source_id": source_id,
+        "source_url": source_url,
+        "local_file": local_path.name,
+        "selected_records": selected_records,
+        "sha256": file_sha256(local_path),
+        "bytes": local_path.stat().st_size,
+    }
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def geojson_count(path: Path) -> int:
+    return len(json.loads(path.read_text()).get("features", []))

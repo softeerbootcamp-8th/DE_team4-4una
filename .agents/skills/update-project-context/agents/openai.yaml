@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Project Context"
+  short_description: "Keep project context aligned with implementation"
+  default_prompt: "Use $update-project-context to review the current changes and update the affected project context."

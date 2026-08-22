@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "kwargs": {
+        "column": "zero_sample_rate",
+        "min_value": 0.0,
+        "max_value": 0.05
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    }
+  ],
+  "id": null,
+  "meta": {
+    "great_expectations_version": "1.21.0"
+  },
+  "name": "hourly_comfort_score_zero_sample_rate_suite",
+  "notes": null
+}

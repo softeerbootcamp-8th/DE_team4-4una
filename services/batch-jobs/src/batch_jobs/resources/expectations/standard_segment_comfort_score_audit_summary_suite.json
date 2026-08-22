@@ -1,0 +1,30 @@
+{
+  "expectations": [
+    {
+      "kwargs": {
+        "column": "age_seconds",
+        "min_value": 0,
+        "max_value": 10800
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    },
+    {
+      "kwargs": {
+        "column": "orphan_vehicle_profile_count",
+        "min_value": 0,
+        "max_value": 0
+      },
+      "meta": {},
+      "severity": "critical",
+      "type": "expect_column_values_to_be_between"
+    }
+  ],
+  "id": null,
+  "meta": {
+    "great_expectations_version": "1.21.0"
+  },
+  "name": "standard_segment_comfort_score_audit_summary_suite",
+  "notes": null
+}

@@ -1,0 +1,137 @@
+x-airflow-env: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_POSTGRES_DB}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW_HOME: ${AIRFLOW_HOME}
+    # standard_score_pipeline(#292)이 EMR Serverless Job Run에 넘길 Application
+    # ID·실행 역할 ARN·entry point. AIRFLOW_VAR_* 환경변수는 Airflow가 Variable로
+    # 자동 인식한다(DB에 따로 안 넣어도 됨) — entry point는 batch-jobs의 EMR
+    # Serverless 커스텀 이미지가 준비되기 전까지 플레이스홀더다.
+    AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID: ${AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID}
+    AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN: ${AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN}
+    AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT: ${AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT}
+    # sensor_processing task의 실행 설정(entry_point_arguments로 그대로 전달됨).
+    # target_hour와 run_id는 Airflow 실행 컨텍스트에서 직접 전달한다
+    # (standard_score_pipeline.py 참고).
+    AIRFLOW_VAR_CLEANSING_BRONZE_INPUT_PATH: ${AIRFLOW_VAR_CLEANSING_BRONZE_INPUT_PATH}
+    AIRFLOW_VAR_CLEANSING_QUARANTINE_OUTPUT_PATH: ${AIRFLOW_VAR_CLEANSING_QUARANTINE_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_VERSION: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_VERSION}
+    # hourly_scoring task가 쓰는 값. run_id는 여기 포함하지 않고
+    # Airflow의 `{{ run_id }}` 템플릿으로 직접 전달한다(standard_score_pipeline.py 참고).
+    AIRFLOW_VAR_HOURLY_COMFORT_INPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_INPUT_PATH}
+    AIRFLOW_VAR_HOURLY_COMFORT_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_COMFORT_REJECTED_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_REJECTED_OUTPUT_PATH}
+    # standard_score task가 쓰는 값. as_of는 여기 포함하지 않고 Airflow의
+    # `{{ data_interval_end.isoformat() }}` 템플릿으로 직접 전달한다
+    # (standard_score_pipeline.py 참고). 이 값들은 CLI 플래그가 없어 EMR Serverless
+    # job의 driver_env(spark.emr-serverless.driverEnv.*)로 넘긴다 — POSTGRES_*는
+    # Job Run 설정에 평문으로 남는 임시 방편이다(#292 논의, Secrets Manager
+    # 도입 전까지).
+    AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI: ${AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI}
+    AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS: ${AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS}
+    AIRFLOW_VAR_POSTGRES_HOST: ${AIRFLOW_VAR_POSTGRES_HOST}
+    AIRFLOW_VAR_POSTGRES_PORT: ${AIRFLOW_VAR_POSTGRES_PORT}
+    AIRFLOW_VAR_POSTGRES_DB: ${AIRFLOW_VAR_POSTGRES_DB}
+    AIRFLOW_VAR_POSTGRES_USER: ${AIRFLOW_VAR_POSTGRES_USER}
+    AIRFLOW_VAR_POSTGRES_PASSWORD: ${AIRFLOW_VAR_POSTGRES_PASSWORD}
+    # data_quality_audit(#253)의 audit-gold task가 driver_env로 넘기는 값(#295로
+    # EMR Serverless로 옮기면서 위 AIRFLOW_VAR_POSTGRES_*를 공유한다). GX Data
+    # Docs를 업로드할 S3 버킷 — 값이 없으면 batch-jobs 쪽 기본값
+    # (de4-data-quality-docs)을 그대로 쓴다. AWS 자격증명은 여기서 넘기지 않고
+    # EMR Serverless execution role(IAM)에 위임한다(#295 논의).
+    AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET: ${AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET}
+    # current_score_pipeline의 PythonOperator(jobs/current_score.py,
+    # CurrentScoreJobConfig.from_env())가 scheduler 프로세스의 os.environ에서
+    # 직접 읽는 값이라, 위 AIRFLOW_VAR_POSTGRES_*(Airflow Variable)와는 별개로
+    # 필요하다.
+    POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_PORT: ${POSTGRES_PORT}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
+    # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.1-python3.12
+  environment:
+    <<: *airflow-env
+  volumes:
+    - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+
+services:
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: ["airflow", "db", "migrate"]
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    # LocalExecutor는 task를 scheduler 프로세스 안에서 실행하므로,
+    # weather_pipeline(#207)의 PythonOperator처럼 이 컨테이너 안에서 직접 도는
+    # task는 여기서만 동작하면 된다 — dag-processor/webserver는 task를 실행하지
+    # 않으므로 아래 jobs 배선이 필요 없다(data_quality_audit이 host docker에
+    # 위임하던 BashOperator는 #295로 EMR Serverless로 옮기며 사라졌다).
+    environment:
+      <<: *airflow-env
+      # weather_pipeline이 PythonOperator에서 jobs.weather를 임포트하기 위한 배선.
+      # jobs/를 아래 마운트하고 PYTHONPATH에 그 부모를 잡아 `from jobs.weather import ...`가
+      # 되게 한다. jobs.weather는 함수 안에서만 임포트되므로(지연 임포트) dag-processor는
+      # 이 값이 없어도 DAG를 정상 파싱한다. bronze_compaction(#271)의 jobs.bronze_compaction은
+      # de4_core.ObjectStore를 쓰는 첫 PythonOperator job이라, libs/de4-core도 같은 방식으로
+      # 마운트하고 PYTHONPATH에 추가해야 `import de4_core`가 된다(공식 이미지엔 de4-core가
+      # 설치돼 있지 않음 — batch-jobs 컨테이너와 달리 uv workspace 전체를 설치하지 않는다).
+      PYTHONPATH: ${AIRFLOW_HOME}/orchestration:${AIRFLOW_HOME}/de4-core-src
+      ZONE_MASTER_PATH: ${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet
+      # weather_pipeline(#222)이 15분마다 zone_weather_snapshot Parquet 이력을 쓰는 경로.
+      ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
+      # bronze_compaction(#271)이 압축할 zone_weather_snapshot의 로컬 경로.
+      BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
+      # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다.
+      CURRENT_SCORE_ROAD_SEGMENT_PATH: ${AIRFLOW_HOME}/data/processed/road_segment
+      CURRENT_SCORE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
+      # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
+      # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
+      # great-expectations/pandas는 current_score_quarantine(#251)의 행 단위 GX 검증용.
+      # boto3는 bronze_compaction(#271)이 s3:// 경로를 다룰 때 de4_core.ObjectStore가 쓴다.
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0"
+    volumes:
+      - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+      - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
+      # bronze_compaction(#271)의 jobs.bronze_compaction이 임포트하는 de4_core 패키지
+      # 소스 — jobs 마운트와 같은 이유로 필요(공식 이미지에 de4-core 미설치, :ro).
+      - ../../libs/de4-core/src/de4_core:${AIRFLOW_HOME}/de4-core-src/de4_core:ro
+      # weather_pipeline의 task가 실제로 실행되는 컨테이너에만 필요 — zone_master.parquet 읽기용(:ro).
+      - ../../data/reference:${AIRFLOW_HOME}/data/reference:ro
+      # current_score의 road_segment 읽기용(:ro). batch-jobs task가 docker로 마운트하는 것과 같은 경로다.
+      - ../../data/processed:${AIRFLOW_HOME}/data/processed:ro
+      # zone_weather_snapshot Parquet을 쓰는 대상이라 다른 마운트와 달리 쓰기 가능해야 한다.
+      - ../../data/local-lake:${AIRFLOW_HOME}/data/local-lake
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+networks:
+  default:
+    name: de4-local

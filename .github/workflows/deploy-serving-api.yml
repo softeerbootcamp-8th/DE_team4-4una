@@ -1,0 +1,159 @@
+# main에 들어간 커밋을 serving-api 컨테이너로 배포한다.
+#
+# ci.yml이 CI 통과 후 호출하는 reusable workflow다. 직접 트리거되지 않으며,
+# main push 여부 판정은 호출하는 쪽에서 한다.
+#
+# 순서: 이미지 빌드 -> ECR push -> SSH로 EC2에 배포 스크립트 전송 -> 결과 확인.
+# 컨테이너 교체와 health 확인, 실패 시 되돌리기는 인스턴스에서 실행되는
+# services/serving-api/deploy/deploy_on_instance.sh가 담당한다.
+#
+# AWS 식별자와 EC2 주소는 repository variables에, SSH 개인키는 secret에 둔다.
+# 하나라도 비어 있으면 첫 스텝이 어떤 값이 없는지 알려주고 멈춘다.
+# 필요한 값과 사전 조건은 docs/deploy-serving-api.md에 정리한다.
+name: Deploy Serving API
+
+on:
+  # ci.yml에서 호출된다. workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가 되어,
+  # main으로 제한한 OIDC trust policy와 어긋난다.
+  workflow_call:
+
+permissions:
+  contents: read
+  # OIDC 인증에 필요하다. 이 줄이 없으면 AWS 자격증명을 받지 못한다.
+  id-token: write
+
+# 배포 두 개가 동시에 돌면 컨테이너가 섞인다. 취소하지 않고 앞 배포를 기다린다.
+concurrency:
+  group: deploy-serving-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    # 배포 대상이 arm64(t4g) 인스턴스라 arm 러너에서 빌드한다.
+    runs-on: ubuntu-24.04-arm
+    env:
+      # 배포할 커밋. 호출자의 컨텍스트를 이어받으므로 CI가 검사한 커밋과 같다.
+      REVISION: ${{ github.sha }}
+      CONTAINER: ${{ vars.SERVING_API_CONTAINER_NAME || 'serving-api' }}
+      # Amazon Linux 2023의 기본 계정이다.
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      HOST_PORT: ${{ vars.SERVING_API_PORT || '8000' }}
+      ENV_FILE: ${{ vars.SERVING_API_ENV_FILE || '/etc/serving-api/serving-api.env' }}
+      HEALTH_PATH: /health
+      HEALTH_TIMEOUT: "90"
+    steps:
+      # 값이 없으면 나중에 aws 명령이 알아보기 힘든 에러를 낸다. 여기서 먼저 잡는다.
+      - name: Check required variables
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          ECR_REPOSITORY: ${{ vars.SERVING_API_ECR_REPOSITORY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST \
+                      EC2_SSH_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::repository variables가 비어 있습니다:$missing"
+            echo "Settings > Secrets and variables > Actions > Variables 에서 설정하세요."
+            echo "필요한 값은 docs/deploy-serving-api.md에 정리되어 있습니다."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          # 안 적으면 main 최신을 가져온다. 배포할 커밋을 직접 지정한다.
+          ref: ${{ env.REVISION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.SERVING_API_ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${REPOSITORY}:${REVISION}"
+
+          # Dockerfile이 uv.lock과 libs/de4-core까지 COPY하므로 빌드 컨텍스트는
+          # 저장소 루트다. 뭘 뺄지는 .dockerignore가 정한다.
+          docker build \
+            --tag "$image" \
+            --file services/serving-api/Dockerfile \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            .
+          docker push "$image"
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          # 비대화식이라 호스트 키를 미리 받아둔다. 없으면 확인 프롬프트에서 멈춘다.
+          # 인스턴스를 재생성해도 자동으로 새 키를 받지만, 그만큼 첫 접속 MITM에 열려 있다.
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: |
+          set -euo pipefail
+
+          # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 stdin으로
+          # 넘긴다. printf %q가 값을 따옴표로 감싸므로 경로에 공백이 있어도 깨지지 않는다.
+          # AWS_REGION은 configure-aws-credentials가 job 환경에 내보낸 값을 쓴다.
+          prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nHOST_PORT=%q\nENV_FILE=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\n' \
+            "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$HOST_PORT" \
+            "$ENV_FILE" "$REVISION" "$HEALTH_PATH" "$HEALTH_TIMEOUT")
+
+          # ssh는 원격 명령의 종료 코드를 그대로 돌려준다. 스크립트가 rollback 후 1로
+          # 끝나면 이 스텝도 실패한다.
+          {
+            printf '%s\n' "$prelude"
+            cat services/serving-api/deploy/deploy_on_instance.sh
+          } | ssh "${EC2_USER}@${EC2_HOST}" 'bash -s'
+
+      # 어떤 커밋이 어떤 이미지로 어디에 배포됐는지 실행 화면에 남긴다.
+      - name: Job summary
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Serving API 배포"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`$REVISION\` |"
+            echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+            echo "| container label | \`org.opencontainers.image.revision=$REVISION\` |"
+          } >> "$GITHUB_STEP_SUMMAR

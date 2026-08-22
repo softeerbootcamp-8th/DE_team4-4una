@@ -1,0 +1,109 @@
+version: 0.2.2
+last_reviewed: 2026-08-22
+status: draft
+
+sources:
+  - id: nyc_street_pavement_ratings
+    official_uri: https://data.cityofnewyork.us/resource/6yyb-pb25.geojson
+    batch_local_filename: pavement.geojson
+    file_format: GeoJSON
+    role: Monthly road-condition reference
+    expected_grain: One pavement-rating observation per source-defined road unit and survey period
+    refresh_cadence: monthly
+    required_uses:
+      - Pavement-condition feature
+      - Spatial mapping to canonical LION segments
+    open_items:
+      - Exact field schema and identifier stability
+      - Snapshot selection rule when the source updates more or less often than monthly
+      - Mapping from rating values to simulation inputs
+
+  - id: nyc_speed_humps
+    official_uri: https://data.cityofnewyork.us/resource/jknp-skuy.geojson
+    batch_local_filename: speed_humps.geojson
+    file_format: GeoJSON
+    role: Monthly road-obstacle reference
+    expected_grain: One source record per speed-hump location or installation
+    refresh_cadence: monthly
+    required_uses:
+      - Spatially attach hump locations to canonical road segments
+      - Generate deterministic hump traversal effects
+    open_items:
+      - Geometry type, units, and coordinate reference system
+      - Handling of multiple humps and records near intersections
+
+  - id: nyc_lion
+    official_uri: https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/LION/FeatureServer/0/query
+    batch_local_filename: lion.geojson
+    file_format: GeoJSON
+    prototype_release: 26B
+    role: Road topology and canonical segment reference
+    expected_grain: One record per source-defined street segment
+    refresh_cadence: monthly
+    required_uses:
+      - Canonical SegmentID
+      - Routable graph and road geometry
+      - Road attributes used by simulation
+    open_items:
+      - Directionality and connectivity rules
+      - Identifier versioning across releases
+
+  - id: osm_traffic_signals
+    prototype_filename: export.geojson
+    file_format: GeoJSON
+    role: Monthly traffic-control reference
+    expected_grain: One OpenStreetMap traffic-signal node
+    refresh_cadence: monthly
+    required_uses:
+      - Spatially attach traffic-signal counts to canonical LION segments
+      - Preserve raw OSM tags for future feature promotion
+    open_items:
+      - Accepted Overpass query and geographic boundary
+      - Snapshot retention and attribution requirements
+      - Matching tolerance and treatment of signals near segment intersections
+
+  - id: tlc_taxi_zones
+    official_geometry_uri: https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip
+    batch_local_filename: taxi_zones.zip
+    file_format: ZIP archive containing an ESRI Shapefile
+    role: Pickup and drop-off spatial constraint
+    expected_grain: One geometry per TLC LocationID
+    refresh_cadence: monthly
+    required_uses:
+      - Map HVFHV pickup and drop-off LocationIDs to polygons
+      - Select deterministic valid road endpoints inside polygons
+    open_items:
+      - Boundary and no-road handling
+      - LocationID version compatibility with the chosen HVFHV month
+
+  - id: tlc_hvfhv_trip_records
+    prototype_uri: https://d37ci6vzurychx.cloudfront.net/trip-data/fhvhv_tripdata_2024-02.parquet
+    prototype_source_day: 2024-02-01
+    source_filename_pattern: fhvhv_tripdata_YYYY-MM.parquet
+    file_format: Apache Parquet
+    role: Passenger-trip simulation input
+    expected_grain: One completed trip record
+    refresh_cadence: one pinned source day per demonstration run
+    required_uses:
+      - Request-time dispatch ordering
+      - Pickup and drop-off taxi zones
+      - Pickup-to-drop-off passenger-trip duration and available distance signals
+      - Deterministic sampling of approximately 1000 trips
+    open_items:
+      - Eligible-row filters
+      - Acceptance of the implemented physical Parquet row-number tie-breaker as the long-term stable row identity
+      - Sampling and vehicle-assignment algorithms
+      - Treatment of overlapping trips and long dispatch gaps
+
+source_snapshot_metadata:
+  required_fields:
+    - source_id
+    - snapshot_id
+    - source_uri
+    - retrieved_at
+    - source_period_or_version
+    - content_checksum
+    - file_format
+    - row_count
+    - schema_fingerprint
+    - ingestion_run_id

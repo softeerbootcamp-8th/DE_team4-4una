@@ -3,7 +3,24 @@ name = "batch-jobs"
 version = "0.1.0"
 description = "Runs offline ride-comfort data jobs"
 requires-python = ">=3.12,<3.13"
-dependencies = ["de4-core"]
+dependencies = [
+    "de4-core",
+    "duckdb>=1.4.3",
+    "boto3>=1.40,<2.0",
+    "great-expectations[spark,postgresql]>=1.21.0",
+    "numpy>=2.0.0",
+    "pandas>=2.0.0",
+    "psycopg2-binary>=2.9,<3.0",
+    "pyarrow>=25.0.1",
+    "pyproj>=3.7.2",
+    "pyshp>=3.0.2",
+    "pyspark==4.0.2",
+    "pyyaml>=6.0,<7.0",
+    "shapely>=2.1.2",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
 
 [project.scripts]
 batch-jobs = "batch_jobs:main"

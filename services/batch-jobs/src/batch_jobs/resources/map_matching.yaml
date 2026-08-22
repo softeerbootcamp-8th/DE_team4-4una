@@ -1,0 +1,17 @@
+# processed_sensor_event GPS 좌표 주변에서 LION road_segment 후보를 찾을 때 쓰는 설정값. map_matching.config가 로드한다.
+# provisional: true가 붙은 값은 나중에 바뀔 수 있다. 값이 바뀌면 이 파일의 value만 갱신하면 된다.
+
+# 센서 GPS 포인트 주변 이 반경(미터) 이내의 road_segment를 후보로 본다.
+candidate_search_radius_m:
+  value: 30.0
+  provisional: true
+
+# match_score 계산 시 거리 점수에 곱하는 가중치. heading_weight와 합이 1.0이어야 한다.
+distance_weight:
+  value: 0.7
+  provisional: true
+
+# match_score 계산 시 heading 점수에 곱하는 가중치. distance_weight와 합이 1.0이어야 한다.
+heading_weight:
+  value: 0.3
+  provisional: true

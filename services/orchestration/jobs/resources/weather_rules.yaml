@@ -1,0 +1,58 @@
+# 날씨 보정 규칙 파라미터 (#215, context/comfort-score.md Step B/C).
+# 전부 provisional: true — 실제 관측이 쌓이기 전까지의 잠정값이다.
+
+# --- 조건 판정 경계 ---
+# 강수/강설은 시간당 환산값(15분 합 x 4)과 비교한다.
+rain_mm_per_hour:
+  value: 0.5
+  provisional: true
+snow_cm_per_hour:
+  value: 0.2
+  provisional: true
+# 기온이 0도여도 노면은 이미 얼어 있을 수 있어 여유를 둔다.
+freezing_temperature_c:
+  value: 0.5
+  provisional: true
+# weather.py의 HIGH_WIND_GUST_THRESHOLD_MPS, LOW_VISIBILITY_THRESHOLD_M과 같은 값이다.
+wind_gust_mps:
+  value: 15.0
+  provisional: true
+low_visibility_m:
+  value: 1000.0
+  provisional: true
+
+# --- 방향별 감점 (0~100 스케일, 높을수록 편안) ---
+# 비/결빙은 제동, 돌풍은 조향, 강설은 노면과 제동에 영향을 준다. 방향 매핑은 Step B 확정 사항.
+# 결빙이 가장 큰 이유는 제동력 자체가 사라지는 유일한 조건이기 때문이다.
+rain_longitudinal_deduction:
+  value: 6.0
+  provisional: true
+ice_longitudinal_deduction:
+  value: 18.0
+  provisional: true
+snow_vertical_deduction:
+  value: 5.0
+  provisional: true
+snow_longitudinal_deduction:
+  value: 10.0
+  provisional: true
+wind_lateral_deduction:
+  value: 6.0
+  provisional: true
+# 시야는 차량 운동을 바꾸지 않아 최종 점수에만 소폭 반영한다.
+low_visibility_final_deduction:
+  value: 4.0
+  provisional: true
+
+# --- 방향 점수 결합 가중치 ---
+# batch-jobs의 resources/comfort_score.yaml과 같은 값이어야 한다. Step C가 standard와
+# 동일한 결합을 요구하지만 서비스 경계 때문에 batch_jobs를 import할 수 없어 규약으로 맞춘다.
+vertical_weight:
+  value: 0.5
+  provisional: true
+longitudinal_weight:
+  value: 0.3
+  provisional: true
+lateral_weight:
+  value: 0.2
+  provisional: true
