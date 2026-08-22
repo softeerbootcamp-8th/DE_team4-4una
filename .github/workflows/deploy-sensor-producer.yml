@@ -1,4 +1,5 @@
-# main에 들어간 Sensor Producer 이미지를 ECR에 배포한다.
+# main에 들어간 Sensor Producer 이미지를 ECR에 배포하고
+# EC2에서 리플레이 컨테이너를 새 이미지로 교체한다.
 # ci.yml이 CI 통과 후 호출하는 reusable workflow다.
 
 name: Deploy Sensor Producer
@@ -22,6 +23,9 @@ jobs:
 
     env:
       REVISION: ${{ github.sha }}
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      CONTAINER: sensor-producer
+      ENV_FILE: ${{ vars.SENSOR_PRODUCER_ENV_FILE || '/etc/sensor-producer/sensor-producer.env' }}
 
     steps:
       - name: Check required variables
@@ -29,9 +33,11 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           ECR_REPOSITORY: ${{ vars.SENSOR_PRODUCER_ECR_REPOSITORY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
         run: |
           missing=""
-          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY; do
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST EC2_SSH_PRIVATE_KEY; do
             eval "value=\${$name}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -74,11 +80,116 @@ jobs:
           docker push "$image"
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "IMAGE='$IMAGE' \
+             REGISTRY='$REGISTRY' \
+             AWS_REGION='$AWS_REGION' \
+             CONTAINER='$CONTAINER' \
+             ENV_FILE='$ENV_FILE' \
+             REVISION='$REVISION' \
+             bash -s" <<'EOF'
+          set -euo pipefail
+
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login \
+                --username AWS \
+                --password-stdin "$REGISTRY"
+
+          docker pull "$IMAGE"
+
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "Sensor Producer env file not found: $ENV_FILE"
+            exit 1
+          fi
+
+          # trips 원본, source-date 같은 재생 설정은 CLI 옵션이라
+          # --env-file만으로는 컨테이너에 못 넘긴다. 같은 파일을 셸 변수로도
+          # 읽어서 docker run 뒤에 붙일 옵션을 조립한다.
+          set -a
+          . "$ENV_FILE"
+          set +a
+
+          if [ -z "${SENSOR_PRODUCER_TRIPS_URI:-}" ] && [ -z "${SENSOR_PRODUCER_TRIPS_PATH:-}" ]; then
+            echo "SENSOR_PRODUCER_TRIPS_URI 또는 SENSOR_PRODUCER_TRIPS_PATH 중 하나가 필요합니다: $ENV_FILE"
+            exit 1
+          fi
+
+          run_args=(run --publisher kafka)
+
+          if [ -n "${SENSOR_PRODUCER_TRIPS_URI:-}" ]; then
+            if [ -z "${SENSOR_PRODUCER_SOURCE_DATE:-}" ]; then
+              echo "SENSOR_PRODUCER_TRIPS_URI를 쓰려면 SENSOR_PRODUCER_SOURCE_DATE도 필요합니다: $ENV_FILE"
+              exit 1
+            fi
+            run_args+=(--trips-uri "$SENSOR_PRODUCER_TRIPS_URI" --source-date "$SENSOR_PRODUCER_SOURCE_DATE")
+          else
+            run_args+=(--trips-path "$SENSOR_PRODUCER_TRIPS_PATH")
+          fi
+
+          if [ -n "${SENSOR_PRODUCER_ROAD_SEGMENT_PATH:-}" ]; then
+            run_args+=(--road-segment-path "$SENSOR_PRODUCER_ROAD_SEGMENT_PATH")
+          fi
+          if [ -n "${SENSOR_PRODUCER_RUN_ID:-}" ]; then
+            run_args+=(--run-id "$SENSOR_PRODUCER_RUN_ID")
+          fi
+          if [ -n "${SENSOR_PRODUCER_MAX_TRIPS:-}" ]; then
+            run_args+=(--max-trips "$SENSOR_PRODUCER_MAX_TRIPS")
+          fi
+          if [ -n "${SENSOR_PRODUCER_VEHICLE_MIX:-}" ]; then
+            run_args+=(--vehicle-mix "$SENSOR_PRODUCER_VEHICLE_MIX")
+          fi
+          if [ -n "${SENSOR_PRODUCER_VEHICLE_PROFILE_ID:-}" ]; then
+            run_args+=(--vehicle-profile-id "$SENSOR_PRODUCER_VEHICLE_PROFILE_ID")
+          fi
+
+          docker rm -f "$CONTAINER" 2>/dev/null || true
+
+          docker run -d \
+            --name "$CONTAINER" \
+            --env-file "$ENV_FILE" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            "$IMAGE" "${run_args[@]}"
+
+          sleep 10
+
+          if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+            echo "Sensor Producer failed to start."
+            docker logs "$CONTAINER" --tail 100
+            exit 1
+          fi
+          EOF
 
       - name: Job summary
         if: always()
         env:
           IMAGE: ${{ steps.image.outputs.image }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
           JOB_STATUS: ${{ job.status }}
         run: |
           {
@@ -89,4 +200,6 @@ jobs:
             echo "| 결과 | $JOB_STATUS |"
             echo "| commit | \`$REVISION\` |"
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+            echo "| container | \`$CONTAINER\` |"
           } >> "$GITHUB_STEP_SUMMARY"
