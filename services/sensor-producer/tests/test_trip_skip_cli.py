@@ -1,7 +1,13 @@
 import argparse
 
 import pytest
-from sensor_producer.cli import enforce_trip_skip_ratio, limit_trips, ratio
+from sensor_producer.cli import (
+    build_parser,
+    enforce_trip_skip_ratio,
+    limit_trips,
+    ratio,
+    resolve_trips,
+)
 from sensor_producer.simulation import ReplayResult
 
 
@@ -46,3 +52,12 @@ def test_limit_trips_does_not_consume_beyond_maximum() -> None:
 
     assert selected == consumed
     assert len(consumed) == 2
+
+
+def test_parquet_trip_uri_requires_source_date() -> None:
+    arguments = build_parser().parse_args(
+        ["run", "--trips-uri", "s3://bucket/fhvhv.parquet"]
+    )
+
+    with pytest.raises(SystemExit, match="--source-date is required"):
+        resolve_trips(arguments, input_dir=None)

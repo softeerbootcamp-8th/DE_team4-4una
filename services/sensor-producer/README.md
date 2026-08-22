@@ -131,13 +131,24 @@ docker run --rm -v "$PWD/data/nyc-sensor:/data:ro" \
   -e AWS_REGION=us-east-1 \
   -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
   -e SENSOR_ENVIRONMENT_POINTER_URI=s3://de4-lake/prepared/simulation_environment/active.json \
-  de4-sensor-producer run --trips-path /data/trips.json --publisher kafka
+  de4-sensor-producer run \
+    --trips-uri s3://de4-lake/raw/tlc/fhvhv_tripdata_2024-02.parquet \
+    --source-date 2024-02-01 \
+    --publisher kafka
 ```
 
 The producer verifies the manifest and both runtime Parquet checksums before routing,
 then caches them under `SENSOR_CACHE_DIR`. Use `--environment-manifest-uri` to pin a
-specific build. Reading the full TLC Parquet dataset from S3 is a separate step; this
-command still receives a bounded local `trips.json`.
+specific build. `--trips-uri` accepts one exact `file://` or `s3://` Parquet object;
+it never discovers a prefix or selects a month automatically. S3 input is downloaded
+through the EC2 IAM role and reused from the local cache on later runs.
+
+`--source-date` selects one NYC source day. DuckDB reads only the timestamps, pickup
+and drop-off zone IDs, trip distance, and Parquet row number needed by the simulator;
+it applies validity filters, deterministic ordering, and `--max-trips` before yielding
+rows in batches. The physical row number is the final ordering tie-breaker and part of
+the deterministic `trip_id`, so the input object must be treated as immutable. The
+legacy `--trips-path <trips.json>` input remains available for local fixtures.
 
 ## Timing and delivery contracts
 
