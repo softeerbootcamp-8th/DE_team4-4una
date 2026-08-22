@@ -61,6 +61,18 @@ x-airflow-env: &airflow-env
     # webserver/scheduler/dag-processor가 서로 다른 secret_key를 랜덤 생성하면
     # 웹 UI가 scheduler의 로그 서버(8793)에서 task 로그를 못 가져온다(서명 검증 실패).
     AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    # StatsD metrics — airflow-statsd-exporter(9125/udp, 같은 de4-local 네트워크)로 보낸다.
+    # DogStatsD 형식(STATSD_DATADOG_ENABLED)을 켜서 dag_id/task_id가 label로 남게 한다.
+    AIRFLOW__METRICS__STATSD_ON: "True"
+    AIRFLOW__METRICS__STATSD_HOST: airflow-statsd-exporter
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
+    AIRFLOW__METRICS__STATSD_DATADOG_ENABLED: "True"
+    # DogStatsD 경로는 apache-airflow[statsd]가 아니라 별도 datadog 패키지가 필요하다
+    # (from datadog import DogStatsd). 공통 env에 둬서 init/dag-processor/webserver도
+    # 같이 설치받는다 — scheduler는 자기 _PIP_ADDITIONAL_REQUIREMENTS를 통째로 재선언해서
+    # 아래에 따로 추가했다.
+    _PIP_ADDITIONAL_REQUIREMENTS: "datadog>=0.47.0"
 
 x-airflow-common: &airflow-common
   image: apache/airflow:3.3.1-python3.12
@@ -111,7 +123,9 @@ services:
       # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
       # great-expectations/pandas는 current_score_quarantine(#251)의 행 단위 GX 검증용.
       # boto3는 bronze_compaction(#271)이 s3:// 경로를 다룰 때 de4_core.ObjectStore가 쓴다.
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0"
+      # datadog은 DogStatsD 연동에 필요하다(위 x-airflow-env 참고) — 이 키를 여기서
+      # 통째로 재선언하므로 공통 env 값은 안 물려받아 따로 추가했다.
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0 datadog>=0.47.0"
     volumes:
       - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
       - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
@@ -136,6 +150,20 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+
+  airflow-statsd-exporter:
+    image: prom/statsd-exporter:v0.30.0-distroless
+    restart: unless-stopped
+    # v0.30.0은 plain 태그가 없어(Docker Hub 확인) distroless를 쓴다 — arm64 지원 확인.
+    volumes:
+      - ../monitoring/statsd/airflow-mapping.yml:/etc/statsd-exporter/airflow-mapping.yml:ro
+    command:
+      - --statsd.mapping-config=/etc/statsd-exporter/airflow-mapping.yml
+    # 기본값이 이미 --web.listen-address=:9102, --statsd.listen-udp=:9125라 별도 지정 불필요.
+    ports:
+      - "9102:9102"
+    expose:
+      - "9125/udp"
 
 networks:
   default:
