@@ -3,3 +3,17 @@ services:
     image: apache/kafka:4.3.1
     ports:
       - "9092:9092"
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: kafka-exporter
+    restart: unless-stopped
+    # 기본 브리지 네트워크로 두면 이 컨테이너 안의 localhost가 자기 자신을
+    # 가리켜 같은 EC2의 kafka 컨테이너에 못 붙는다 — sensor-producer(#316),
+    # stream-processor(#323)가 겪은 것과 같은 문제라 같은 방식(host network +
+    # localhost)으로 맞춘다.
+    network_mode: host
+    command:
+      - --kafka.server=localhost:9092
+    depends_on:
+      - kafka

@@ -7,19 +7,25 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
 
 ```text
 [Project EC2]                                   [Monitoring EC2]
-- node_exporter :9100     --- private VPC --->   - Prometheus (scrape)
-- cAdvisor      :8081     --- private VPC --->     127.0.0.1:9090 (host 내부 전용)
-- Serving API   :8000                            - Grafana :3000 (Prometheus를 datasource로 사용)
-- API metrics   :9101     --- private VPC --->
+- node_exporter  :9100    --- private VPC --->   - Prometheus (scrape)
+- cAdvisor       :8081    --- private VPC --->     127.0.0.1:9090 (host 내부 전용)
+- Serving API    :8000                           - Grafana :3000 (Prometheus를 datasource로 사용)
+- API metrics    :9101    --- private VPC --->
+- Kafka          :9092    (Project EC2 안에서만 접근)
+- Kafka Exporter :9308    --- private VPC --->
 ```
 
 - Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100),
-  cAdvisor(8081), Serving API 애플리케이션 metrics(9101)를 scrape한다.
+  cAdvisor(8081), Serving API 애플리케이션 metrics(9101), Kafka Exporter
+  metrics(9308)를 scrape한다.
 - Serving API는 요청을 처리하는 API port(8000)와 metrics를 노출하는
   port(9101)를 분리한다 — `/metrics`가 공개 API 표면에 섞이지 않는다.
+- Kafka Exporter는 Kafka broker(9092) 자체를 외부에 새로 공개하지 않고,
+  Project EC2 안에서만 broker에 붙어 metrics를 9308로 노출한다. Monitoring
+  EC2는 9308만 스크랩하면 되고 9092에는 접근하지 않는다.
 - Grafana는 같은 Docker network에서 `http://prometheus:9090`으로 Prometheus에
   접근한다. Datasource는 [grafana/provisioning/datasources/prometheus.yml](grafana/provisioning/datasources/prometheus.yml)로
-  자동 등록되고, `Project Infrastructure`와 `Serving API` dashboard도
+  자동 등록되고, `Project Infrastructure`, `Serving API`, `Kafka` dashboard도
   provisioning으로 자동 생성된다. 자세한 내용은 아래
   [Grafana Dashboard](#grafana-dashboard) 참고.
 - `prometheus.yml`에는 실제 AWS private IP를 하드코딩하지 않는다. 대신
@@ -39,6 +45,11 @@ Project EC2 Security Group (inbound):
 | 9100 | TCP | Monitoring EC2 Security Group |
 | 8081 | TCP | Monitoring EC2 Security Group |
 | 9101 | TCP | Monitoring EC2 Security Group |
+| 9308 | TCP | Monitoring EC2 Security Group |
+
+Kafka broker(9092)는 Monitoring EC2에 새로 공개할 필요가 없다 — Kafka
+Exporter가 Project EC2 안에서 `localhost:9092`로 붙어 9308로 metrics를
+대신 노출한다.
 
 Monitoring EC2 Security Group (inbound):
 
@@ -95,6 +106,24 @@ Docker 내부 상태, 커널 메시지 버퍼(`/dev/kmsg`)에 접근해야 한�
 특히 Amazon Linux 2023의 cgroup v2 환경에서는 `privileged: true`와
 `/dev/kmsg` device 마운트 없이는 일부 cgroup 정보를 읽지 못하는 경우가 있다.
 그 외 권한은 추가하지 않았다.
+
+### Kafka Exporter
+
+Kafka와 같은 `infra/compose/kafka.yaml`에서 함께 뜬다.
+
+```bash
+docker compose -f infra/compose/kafka.yaml up -d
+curl http://localhost:9308/metrics
+```
+
+`kafka-exporter`는 `network_mode: host`로 띄운다 — 기본 브리지 네트워크에서는
+이 컨테이너 안의 `localhost`가 자기 자신을 가리켜 같은 EC2의 `kafka`
+컨테이너에 붙지 못한다. sensor-producer([issue #316](https://github.com/softeerbootcamp-8th/DE_team4-4una/issues/316))와
+stream-processor([issue #323](https://github.com/softeerbootcamp-8th/DE_team4-4una/issues/323))가 겪은 것과 같은
+문제라 이번에도 `host network + localhost:9092`로 맞췄다(Docker Compose
+network에서 `kafka:9092`로 접근하는 방식은 검토했지만 같은 이유로 채택하지
+않았다). 그래서 `--kafka.server=localhost:9092`를 쓰고, `9092:9092`처럼 별도
+port publish도 필요 없다(host network가 이미 host의 모든 포트를 그대로 쓴다).
 
 ## Monitoring EC2 실행 방법
 
@@ -153,12 +182,14 @@ Prometheus Targets(`http://localhost:9090/targets`)에서 다음 job이 모두
 - `project-node`
 - `project-containers`
 - `serving-api`
+- `kafka`
 
-Monitoring EC2에서 Project EC2의 Serving API metrics endpoint에 직접 접근되는지
-확인하려면(문제가 생겼을 때만 필요):
+Monitoring EC2에서 Project EC2의 애플리케이션 metrics endpoint에 직접
+접근되는지 확인하려면(문제가 생겼을 때만 필요):
 
 ```bash
 curl http://<PROJECT_EC2_PRIVATE_IP>:9101/metrics
+curl http://<PROJECT_EC2_PRIVATE_IP>:9308/metrics
 ```
 
 9090은 `127.0.0.1`에만 bind되어 있으므로, Monitoring EC2 밖에서 Prometheus UI를
@@ -178,15 +209,15 @@ http://<MONITORING_EC2_PUBLIC_IP>:3000
 
 ## Grafana Dashboard
 
-Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`와 `Serving API`
-dashboard가 자동으로 provisioning된다. 두 dashboard 모두 같은 provider
+Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`, `Serving API`,
+`Kafka` dashboard가 자동으로 provisioning된다. 세 dashboard 모두 같은 provider
 (`Infrastructure` 폴더, `/var/lib/grafana/dashboards`)가 디렉터리 전체를
 읽어서 등록하므로, dashboard를 추가할 때 provider(`dashboards.yml`)를 새로
 만들 필요는 없다 — JSON 파일만 그 디렉터리에 추가하면 된다.
 
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
 - 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → Project Infrastructure**
-  / **Serving API**
+  / **Serving API** / **Kafka**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
@@ -195,6 +226,7 @@ dashboard가 자동으로 provisioning된다. 두 dashboard 모두 같은 provid
     container dashboard 본문(패널, PromQL, 임계값)
   - `infra/monitoring/grafana/dashboards/serving-api.json` — Serving API
     dashboard 본문
+  - `infra/monitoring/grafana/dashboards/kafka.json` — Kafka dashboard 본문
 
 ### Serving API dashboard 지표
 
@@ -221,6 +253,53 @@ dashboard가 자동으로 provisioning된다. 두 dashboard 모두 같은 provid
 | p50 / p95 / p99 latency | `histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` (0.95/0.99는 quantile 값만 교체) |
 | Requests by Endpoint | `sum by (route) (rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
 | Latency by Endpoint (p95) | `histogram_quantile(0.95, sum by (le, route) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` |
+
+### Kafka dashboard 지표
+
+[Kafka Exporter](https://github.com/danielqsj/kafka_exporter)(`danielqsj/kafka-exporter:v1.9.0`)가
+노출하는 metric을 그대로 쓴다 — 존재하지 않는 metric 이름을 임의로 만들지
+않았다.
+
+| Metric | 종류 | Label |
+| --- | --- | --- |
+| `kafka_brokers` | Gauge | (없음) |
+| `kafka_topic_partitions` | Gauge | `topic` |
+| `kafka_topic_partition_current_offset` | Gauge | `topic`, `partition` |
+| `kafka_topic_partition_under_replicated_partition` | Gauge | `topic`, `partition` |
+| `kafka_consumergroup_lag` | Gauge | `consumergroup`, `topic`, `partition` |
+| `kafka_consumergroup_lag_sum` | Gauge | `consumergroup`, `topic` (모든 partition 합산) |
+| `kafka_consumergroup_members` | Gauge | `consumergroup` |
+
+패널별 PromQL:
+
+| Panel | PromQL |
+| --- | --- |
+| Target Status | `up{job="kafka"}` |
+| Brokers | `kafka_brokers{job="kafka"}` |
+| Topics | `count(kafka_topic_partitions{job="kafka", topic!~"__.*"})` |
+| Partitions | `sum(kafka_topic_partitions{job="kafka", topic!~"__.*"})` |
+| Under Replicated | `sum(kafka_topic_partition_under_replicated_partition{job="kafka"})` |
+| Message Rate over Time | `sum by (topic) (rate(kafka_topic_partition_current_offset{job="kafka", topic!~"__.*"}[5m]))` |
+| Consumer Lag | `sum(kafka_consumergroup_lag{job="kafka"})` |
+| Consumer Lag by Topic | `sum by (topic) (kafka_consumergroup_lag_sum{job="kafka"})` |
+| Consumer Group Members | `sum by (consumergroup) (kafka_consumergroup_members{job="kafka"})` |
+
+몇 가지 명확히 해 둘 점:
+
+- **내부 토픽 포함 여부**: `Topics`/`Partitions`/`Message Rate`는 `__`로
+  시작하는 내부 토픽(`__consumer_offsets` 등)을 제외한다 — 실제로 운영하는
+  `sensor-events` 같은 토픽 상태를 보기 위함이다. 반대로 `Under Replicated`는
+  클러스터 건강 신호이므로 내부 토픽을 포함한 전체를 본다.
+- **Message Rate는 byte throughput이 아니다**: `kafka_topic_partition_current_offset`의
+  증가율로 근사한 message(레코드) 개수 기준 rate다. Kafka broker의 실제
+  `Bytes In/Out` JMX metric은 이번 작업 범위에서 제외했다(JMX Exporter 추가
+  금지) — dashboard와 이 문서 모두 "Bytes In/Out"이라고 부르지 않는다.
+- **Consumer 관련 패널(`Consumer Lag`, `Consumer Lag by Topic`,
+  `Consumer Group Members`)은 consumer group이 하나도 없으면 `No data`가
+  정상이다.** Kafka Exporter는 실행 중인 consumer group이 없으면 이 metric
+  자체를 아예 내보내지 않는다 — Prometheus나 exporter 장애가 아니다. 검증할
+  때는 먼저 실제 consumer(예: `stream-processor`)가 그 토픽에 붙어 있는지
+  확인한다.
 
 ### Source of truth와 `allowUiUpdates`
 
@@ -278,6 +357,22 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   2. Project EC2에서 `curl http://localhost:9101/metrics`가 응답하는지.
   3. Project EC2 Security Group에 9101(source: Monitoring EC2 Security Group)
      inbound 규칙이 있는지.
+
+- Kafka 패널: `up{job="kafka"}`가 `0`이거나 값이 없으면 아래를 순서대로
+  확인한다.
+  1. `kafka-exporter` 컨테이너 상태 — `docker compose -f infra/compose/kafka.yaml ps`,
+     떠 있지 않으면 `docker compose -f infra/compose/kafka.yaml logs kafka-exporter`.
+  2. exporter → Kafka 연결 오류 — 로그에 `localhost:9092`로 못 붙는다는
+     메시지가 있으면 `kafka` 컨테이너가 떠 있는지, `kafka-exporter`가
+     `network_mode: host`로 뜬 게 맞는지 확인한다.
+  3. Project EC2에서 `curl http://localhost:9308/metrics`가 응답하는지.
+  4. Monitoring EC2에서 `curl http://<PROJECT_EC2_PRIVATE_IP>:9308/metrics`가
+     응답하는지(연결 자체가 안 되면 3번은 통과해도 이건 실패할 수 있다).
+  5. Project EC2 Security Group에 9308(source: Monitoring EC2 Security Group)
+     inbound 규칙이 있는지.
+  6. 위가 다 정상인데 `Consumer Lag`류 패널만 `No data`라면, 위
+     [Kafka dashboard 지표](#kafka-dashboard-지표) 마지막 항목대로 consumer
+     group이 아직 없는 것뿐일 수 있다 — 장애가 아니다.
 
 ### Dashboard 변경 배포
 
