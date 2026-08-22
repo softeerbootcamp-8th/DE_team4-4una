@@ -156,4 +156,4 @@ jobs:
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
             echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
             echo "| container label | \`org.opencontainers.image.revision=$REVISION\` |"
-          } >> "$GITHUB_STEP_SUMMAR
+          } >> "$GITHUB_STEP_SUMMARY"
