@@ -438,4 +438,6 @@ docker compose -f infra/compose/postgres.yaml down
   이전(#289 후속 이슈)
 - Kafka -> Bronze 오케스트레이션
 - CeleryExecutor/KubernetesExecutor 등 분산 실행 지원
-- 운영 배포, 인증/RBAC 설정
+- CD는 EC2에서 컨테이너를 기동하고 헬스체크까지 확인한다(#315). 인증 관리자
+  교체(SimpleAuthManager → FAB 등)와 RBAC 설정, RDS의 Airflow용 DB(스키마)
+  실제 생성은 범위 밖이다 — 사람이 사전에 수행한다

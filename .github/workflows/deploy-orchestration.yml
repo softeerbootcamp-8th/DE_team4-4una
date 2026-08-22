@@ -21,6 +21,12 @@ jobs:
     env:
       REVISION: ${{ github.sha }}
       EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      # git clone/pull 대신 러너가 이미 checkout한 트리를 rsync로 미는 방식이라,
+      # EC2에 새 GitHub 자격증명(deploy key 등)이 필요 없다.
+      REPO_DIR: ${{ vars.ORCHESTRATION_REPO_DIR || '/home/ec2-user/DE_team4-4una' }}
+      ENV_FILE: ${{ vars.ORCHESTRATION_ENV_FILE || '/etc/orchestration/orchestration.env' }}
+      HEALTH_PATH: /api/v2/monitor/health
+      HEALTH_TIMEOUT: "180"
 
     steps:
       - name: Check required variables
@@ -106,11 +112,81 @@ jobs:
             && docker pull '$IMAGE' \
             && docker tag '$IMAGE' 'orchestration:$REVISION'"
 
+      - name: Sync repository to EC2
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$REPO_DIR'"
+
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.venv/' \
+            --exclude='data/' \
+            --exclude='dist/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            --exclude='.ruff_cache/' \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            ./ "${EC2_USER}@${EC2_HOST}:${REPO_DIR}/"
+
+      - name: Start Airflow via docker compose
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$REPO_DIR' && docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d"
+
+      - name: Wait for Airflow health
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "REPO_DIR='$REPO_DIR' HEALTH_PATH='$HEALTH_PATH' HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
+          set -euo pipefail
+
+          elapsed=0
+          interval=5
+
+          while true; do
+            response=$(curl -sf "http://localhost:8080${HEALTH_PATH}" || true)
+
+            if echo "$response" | python3 -c '
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(1)
+          ok = all(data.get(c, {}).get("status") == "healthy" for c in ("metadatabase", "scheduler"))
+          sys.exit(0 if ok else 1)
+          '; then
+              echo "Airflow is healthy."
+              exit 0
+            fi
+
+            if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
+              echo "::error::Airflow health check timed out after ${HEALTH_TIMEOUT}s. Last response: $response"
+              cd "$REPO_DIR"
+              docker compose -f infra/compose/airflow.yaml logs --tail=200
+              exit 1
+            fi
+
+            sleep "$interval"
+            elapsed=$((elapsed + interval))
+          done
+          EOF
+
       - name: Job summary
         if: always()
         env:
           IMAGE: ${{ steps.image.outputs.image }}
           JOB_STATUS: ${{ job.status }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
         run: |
           {
             echo "### Orchestration 배포"
@@ -121,4 +197,7 @@ jobs:
             echo "| commit | \`$REVISION\` |"
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
             echo "| local tag | \`orchestration:$REVISION\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+            echo "| repo dir | \`$REPO_DIR\` |"
+            echo "| health | \`http://localhost:8080${HEALTH_PATH}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
