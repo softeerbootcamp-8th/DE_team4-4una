@@ -122,6 +122,7 @@ jobs:
 
           rsync -az --delete \
             --exclude='.git/' \
+            --exclude='.env' \
             --exclude='.venv/' \
             --exclude='data/' \
             --exclude='dist/' \
