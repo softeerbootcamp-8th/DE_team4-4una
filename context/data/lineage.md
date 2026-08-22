@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-19
+last_reviewed: 2026-08-22
 ---
 
 # Data Lineage
@@ -102,11 +102,22 @@ Starting with an API record, an agent or contributor should be able to identify:
 5. The trip and road-environment snapshots.
 6. Checksums and versions for original source files.
 
-## Partitioning candidates
+## Physical partitioning
 
-Physical choices remain open, but likely access patterns should be considered:
+The implemented Stream Processor partitions Bronze sensor events by UTC sensor
+measurement time:
 
-- Raw events: event date, simulation run, and possibly vehicle type.
+- Raw events: `event_date=YYYY-MM-DD/hour=HH`. Malformed payloads without a
+  usable `event_time` use the Kafka record timestamp so they remain available
+  to the hourly quarantine path.
+- Each Bronze output path has one durable Structured Streaming checkpoint.
+  Replacing the checkpoint while reusing the output path can collide with the
+  file sink's `_spark_metadata` batch IDs and advance Kafka offsets without
+  creating Parquet files.
+
+The following physical choices remain open and should follow measured access
+patterns:
+
 - Traversals: score/source period and canonical segment partition strategy.
 - Gold scores: score period and algorithm version.
 

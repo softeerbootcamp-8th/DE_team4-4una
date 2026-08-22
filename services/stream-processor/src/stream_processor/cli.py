@@ -1,9 +1,13 @@
-"""Entry point for the Kafka-to-local-Bronze streaming job."""
+"""Entry point for the Kafka-to-Bronze streaming job."""
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import signal
+from pathlib import Path
+from threading import Event
 
 import pyspark
 from pyspark.sql import SparkSession
@@ -17,26 +21,58 @@ from stream_processor.progress import ProgressLogger
 # Kafka 커넥터는 pip 패키지가 아니라 Maven jar라서, 최초 실행 시 이 좌표로 내려받는다.
 # pyspark 버전과 정확히 맞아야 해서 하드코딩 대신 설치된 버전을 그대로 사용한다.
 KAFKA_PACKAGE = f"org.apache.spark:spark-sql-kafka-0-10_2.13:{pyspark.__version__}"
+_HADOOP_CLIENT_JAR = re.compile(r"hadoop-client-api-(?P<version>[0-9.]+)\.jar$")
+
+
+def bundled_hadoop_version() -> str:
+    """Return the Hadoop version bundled with the installed PySpark wheel."""
+    jar_dir = Path(pyspark.__file__).resolve().parent / "jars"
+    versions = {
+        match.group("version")
+        for jar in jar_dir.glob("hadoop-client-api-*.jar")
+        if (match := _HADOOP_CLIENT_JAR.fullmatch(jar.name)) is not None
+    }
+    if len(versions) != 1:
+        raise RuntimeError(f"expected one bundled Hadoop version, found {sorted(versions)}")
+    return versions.pop()
+
+
+# PySpark에 포함되지 않은 S3A 구현을 번들 Hadoop과 같은 버전으로 내려받는다
+HADOOP_AWS_PACKAGE = f"org.apache.hadoop:hadoop-aws:{bundled_hadoop_version()}"
+SPARK_PACKAGES = f"{KAFKA_PACKAGE},{HADOOP_AWS_PACKAGE}"
 
 
 def build_spark_session() -> SparkSession:
-    return (
+    builder = (
         SparkSession.builder.appName("stream-processor")
-        .config("spark.jars.packages", KAFKA_PACKAGE)
+        .config("spark.jars.packages", SPARK_PACKAGES)
         .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
     )
+    # spark-submit/클러스터에서는 master를 주입하지 않고, 단독 Docker 실행에서만 지정한다
+    if master := os.getenv("STREAM_SPARK_MASTER"):
+        builder = builder.master(master)
+    return builder.getOrCreate()
 
 
-def install_shutdown_handler(query: StreamingQuery) -> None:
-    """SIGINT/SIGTERM 수신 시 query.stop()을 먼저 호출해, awaitTermination()이
-    KeyboardInterrupt 등 예외로 인한 스택트레이스 없이 정상 종료되도록 한다."""
+def install_shutdown_handler() -> Event:
+    """Return an event set when the process receives SIGINT or SIGTERM."""
+    shutdown_requested = Event()
 
     def _handle_signal(signum: int, frame: object) -> None:
-        query.stop()
+        # signal handler 안에서 Py4J를 재호출하면 진행 중인 JVM 응답과 충돌할 수 있다
+        shutdown_requested.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+    return shutdown_requested
+
+
+def await_shutdown(query: StreamingQuery, shutdown_requested: Event) -> None:
+    """Wait for query completion or stop it safely after a process signal."""
+    while not shutdown_requested.is_set():
+        if query.awaitTermination(1):
+            return
+    query.stop()
 
 
 def main() -> None:
@@ -50,5 +86,5 @@ def main() -> None:
 
     stream_df = read_kafka_stream(spark, config)
     query = write_bronze_stream(stream_df, config)
-    install_shutdown_handler(query)
-    query.awaitTermination()
+    shutdown_requested = install_shutdown_handler()
+    await_shutdown(query, shutdown_requested)
