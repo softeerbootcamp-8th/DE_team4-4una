@@ -276,3 +276,12 @@ jobs:
       contents: read
       id-token: write
     secrets: inherit
+    
+  deploy-batch-jobs:
+    needs: ci-passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-batch-jobs.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
