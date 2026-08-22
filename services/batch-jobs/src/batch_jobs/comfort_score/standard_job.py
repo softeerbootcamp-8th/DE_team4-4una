@@ -34,9 +34,13 @@ from batch_jobs.comfort_score.universe import load_universe
 
 logger = logging.getLogger(__name__)
 
-# 운영 배포 이미지에는 미리 구워 넣는 걸 후속 과제로 남긴다 — 로컬 개발에서는
-# Spark가 Maven에서 자동으로 받는다. 버전은 정확히 고정한다.
+# 로컬 개발에서는 Spark가 Maven에서 자동으로 받는다. 버전은 정확히 고정한다.
 POSTGRES_JDBC_PACKAGE = "org.postgresql:postgresql:42.7.4"
+
+# EMR Serverless는 job 실행마다 Maven Central까지 나가는 네트워크 경로가 없거나
+# 불안정할 수 있다(ADR-0001). POSTGRES_JDBC_JAR_URI가 설정되면 미리 S3에 올려둔
+# jar를 spark.jars로 직접 참조하고, 없으면(로컬 개발) 기존처럼 Maven에서 받는다.
+POSTGRES_JDBC_JAR_URI_ENV = "POSTGRES_JDBC_JAR_URI"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,11 +95,23 @@ class StandardComfortScoreJobSummary:
     updated_count: int
 
 
+def _postgres_jdbc_spark_config(
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Postgres JDBC 드라이버를 어떤 spark.jars* 설정으로 로드할지 고른다."""
+    source = env if env is not None else os.environ
+    jar_uri = source.get(POSTGRES_JDBC_JAR_URI_ENV)
+    if jar_uri:
+        return "spark.jars", jar_uri
+    return "spark.jars.packages", POSTGRES_JDBC_PACKAGE
+
+
 def build_spark_session() -> SparkSession:
+    jdbc_config_key, jdbc_config_value = _postgres_jdbc_spark_config()
     return (
         SparkSession.builder.appName("standard-segment-comfort-score-load")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars.packages", POSTGRES_JDBC_PACKAGE)
+        .config(jdbc_config_key, jdbc_config_value)
         .getOrCreate()
     )
 
