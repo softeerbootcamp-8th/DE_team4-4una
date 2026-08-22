@@ -498,7 +498,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pyproj", specifier = ">=3.7.2" },
     { name = "pyshp", specifier = ">=3.0.2" },
-    { name = "pyspark", specifier = ">=4.1.3,<5.0.0" },
+    { name = "pyspark", specifier = "==4.0.2" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "shapely", specifier = ">=2.1.2" },
 ]
@@ -1058,8 +1058,8 @@ name = "httpcore2"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/83/a896fc59940fc5a6e2aff3a4be1d92fa890112936803b331cae75a993c34/httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc", size = 67427, upload-time = "2026-08-09T09:11:32.123Z" }
 wheels = [
@@ -2079,12 +2079,12 @@ wheels = [
 
 [[package]]
 name = "pyspark"
-version = "4.1.3"
+version = "4.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "py4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/ae/33e589ae3cf03c2e9bb78139de00bdfbdc083ebc45b9a4c282f5e33efe70/pyspark-4.1.3.tar.gz", hash = "sha256:b600238e771e45618a58beaf9d63cfd9aa06f61ce193244cedf890a04a4409f7", size = 455504008, upload-time = "2026-07-15T10:39:01.647Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/89/408b42c803db71f4a4d8a3f1ab0745a40dfe41aeacdfc453545665a171f4/pyspark-4.0.2.tar.gz", hash = "sha256:938b4a1883383374d331ebfcb5d92debfa1891cf3d7a6d730520a1a2d23f1a90", size = 434209940, upload-time = "2026-02-05T19:31:13.6Z" }
 
 [[package]]
 name = "pytest"
@@ -2619,7 +2619,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "de4-core", editable = "libs/de4-core" },
-    { name = "pyspark", specifier = ">=4.1.3,<5.0.0" },
+    { name = "pyspark", specifier = "==4.0.2" },
 ]
 
 [package.metadata.requires-dev]
