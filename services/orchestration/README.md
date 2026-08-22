@@ -87,6 +87,13 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   `infra/compose/postgres.yaml`의 `postgres` 서비스를 그대로 가리키면 된다
   (`POSTGRES_HOST=postgres`). 이 값이 가리키는 서빙 DB에
   마이그레이션(`migrate-database`)이 먼저 적용돼 있어야 한다.
+- `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI` — `standard_score`
+  단계가 PostgreSQL에 쓰기 전에 먼저 저장하는 S3 Gold snapshot 경로다(#265).
+  비우면 `STANDARD_COMFORT_SCORE_DATA_LAKE_URI/gold/standard_segment_comfort_score`를
+  기본값으로 쓴다. AWS 자격증명은 EMR Serverless execution role(IAM)에
+  위임하므로, role에 이 경로가 속한 버킷의 `gold/*`에 대한 `s3:PutObject`
+  권한(같은 as_of 재실행 시 기존 객체 교체까지 커버하려면 `s3:DeleteObject`도)이
+  미리 부여돼 있어야 한다.
 - `AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET` — `data_quality_audit`의 audit-gold
   task가 GX Data Docs를 올릴 S3 버킷이다(#295). 비워두면 batch-jobs 쪽
   기본값(`de4-data-quality-docs`)을 쓴다. AWS 자격증명은 여기 넘기지 않고
@@ -114,7 +121,7 @@ Job Run과 Spark 세션에서 실행되며, 중간 cleansed-event 데이터셋�
 | --- | --- | --- |
 | sensor processing | `cleanse-sensor-events` | Bronze + road snapshot → `sensor_event_quarantine`, `hourly_segment_features` |
 | hourly scoring | `score-hourly-comfort` | features → `hourly_comfort_score`, rejected |
-| standard score | `load-standard-segment-comfort-score` | `hourly_comfort_score` 168시간 롤업 → 서빙 PostgreSQL(`standard_segment_comfort_score`) |
+| standard score | `load-standard-segment-comfort-score` | `hourly_comfort_score` 168시간 롤업 → S3 Gold `standard_segment_comfort_score` snapshot → 서빙 PostgreSQL(`standard_segment_comfort_score`) |
 
 standard score의 `--as-of`에는 `data_interval_end`가 전달된다.
 예를 들어 logical date가 `2026-08-18 09:00 UTC`이면 sensor processing은 09시

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from de4_core import join_uri
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -25,6 +26,9 @@ from batch_jobs.comfort_score.formula import compute_standard_comfort_scores
 from batch_jobs.comfort_score.loader import (
     DEFAULT_WINDOW_HOURS,
     load_hourly_comfort_score_for_gold,
+)
+from batch_jobs.comfort_score.standard_storage import (
+    write_standard_comfort_score_snapshot,
 )
 from batch_jobs.comfort_score.standard_writer import (
     EXPECTED_STAGING_COLUMNS,
@@ -48,6 +52,7 @@ class StandardComfortScoreJobConfig:
     data_lake_uri: str
     window_hours: int
     comfort_score_config_path: Path
+    gold_output_uri: str
     postgres_host: str
     postgres_port: int
     postgres_db: str
@@ -61,9 +66,9 @@ class StandardComfortScoreJobConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> StandardComfortScoreJobConfig:
         source = env if env is not None else os.environ
+        data_lake_uri = source.get("STANDARD_COMFORT_SCORE_DATA_LAKE_URI") or "data/local-lake"
         return cls(
-            data_lake_uri=source.get("STANDARD_COMFORT_SCORE_DATA_LAKE_URI")
-            or "data/local-lake",
+            data_lake_uri=data_lake_uri,
             window_hours=int(
                 source.get("STANDARD_COMFORT_SCORE_WINDOW_HOURS")
                 or DEFAULT_WINDOW_HOURS
@@ -72,6 +77,8 @@ class StandardComfortScoreJobConfig:
                 source.get("STANDARD_COMFORT_SCORE_CONFIG_PATH")
                 or DEFAULT_COMFORT_SCORE_CONFIG_PATH
             ),
+            gold_output_uri=source.get("STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI")
+            or join_uri(data_lake_uri, "gold", "standard_segment_comfort_score"),
             postgres_host=_require(source, "POSTGRES_HOST"),
             postgres_port=int(_require(source, "POSTGRES_PORT")),
             postgres_db=_require(source, "POSTGRES_DB"),
@@ -122,7 +129,9 @@ def run_standard_comfort_score_job(
     as_of: datetime,
     connection,
 ) -> StandardComfortScoreJobSummary:
-    """168h 윈도우를 읽어 standard 점수를 산출한 뒤 PostgreSQL에 UPSERT한다.
+    """168h 윈도우를 읽어 standard 점수를 산출하고, S3 Gold snapshot에 저장한 뒤
+    그 결과를 다시 읽어 PostgreSQL에 UPSERT한다(#265). Gold 저장이 실패하면 예외가
+    그대로 올라가 PostgreSQL을 건드리지 않는다.
 
     `as_of`가 그대로 `score_as_of`가 된다 — 데이터에서 유도하지 않는 실행 식별자다.
     universe가 비어 있지 않은 한 산출 행 수는 입력 데이터가 아니라 도로망 크기로
@@ -160,8 +169,13 @@ def run_standard_comfort_score_job(
                 "had no qualifying hour at all so no population mean could be formed"
             )
 
+        gold_result = write_standard_comfort_score_snapshot(
+            spark, scored, config.gold_output_uri, as_of,
+        )
+        gold_df = spark.read.parquet(gold_result.output_uri)
+
         write_summary = write_standard_comfort_scores(
-            scored, config.jdbc_url, config.postgres_user, config.postgres_password,
+            gold_df, config.jdbc_url, config.postgres_user, config.postgres_password,
             connection,
         )
         summary = StandardComfortScoreJobSummary(

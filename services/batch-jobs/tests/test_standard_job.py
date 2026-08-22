@@ -1,16 +1,30 @@
-"""Tests for batch_jobs/comfort_score/standard_job.py Spark session wiring (#290).
+"""Tests for batch_jobs/comfort_score/standard_job.py (#290, #265).
 
-`_postgres_jdbc_spark_config()`가 실제 `SparkSession`을 만들지 않고도 EMR
-Serverless(S3 jar)와 로컬 개발(Maven 자동 다운로드) 중 어떤 spark.jars* 설정을
-고를지 검증할 수 있게 순수 함수로 분리했다.
+TestGoldBeforePostgres는 #265의 실행 순서(계산 -> S3 Gold -> read-back ->
+PostgreSQL)를 실제 Spark 세션으로 검증한다. 단위 동작은 test_standard_storage.py와
+기존 standard_writer 테스트가 다루므로, 여기서는 두 단계를 잇는 wiring만 본다.
 """
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import ClassVar
+from unittest.mock import Mock
+
+import pytest
+from batch_jobs.comfort_score.config import DEFAULT_COMFORT_SCORE_CONFIG_PATH
 from batch_jobs.comfort_score.standard_job import (
     POSTGRES_JDBC_PACKAGE,
+    StandardComfortScoreJobConfig,
     _postgres_jdbc_spark_config,
+    run_standard_comfort_score_job,
 )
+from batch_jobs.comfort_score.standard_storage import standard_snapshot_uri
+from batch_jobs.comfort_score.standard_writer import WriteSummary
+from de4_core import join_uri
+from pyspark.sql import SparkSession
 
 
 def test_falls_back_to_maven_package_when_jar_uri_is_not_set():
@@ -28,3 +42,189 @@ def test_uses_s3_jar_uri_when_postgres_jdbc_jar_uri_is_set():
         "spark.jars",
         "s3://de4-artifacts/jars/postgresql-42.7.4.jar",
     )
+
+
+class TestStandardComfortScoreJobConfigGoldOutputUri:
+    BASE_ENV: ClassVar[dict[str, str]] = {
+        "POSTGRES_HOST": "db.local",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": "de4",
+        "POSTGRES_USER": "app",
+        "POSTGRES_PASSWORD": "secret",
+    }
+
+    def test_defaults_to_a_gold_path_under_the_data_lake(self):
+        config = StandardComfortScoreJobConfig.from_env(
+            {**self.BASE_ENV, "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": "data/local-lake"}
+        )
+
+        assert config.gold_output_uri == join_uri(
+            "data/local-lake", "gold", "standard_segment_comfort_score"
+        )
+
+    def test_explicit_gold_output_uri_overrides_the_default(self):
+        config = StandardComfortScoreJobConfig.from_env(
+            {
+                **self.BASE_ENV,
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": "data/local-lake",
+                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": "s3://de4-lake/gold/standard",
+            }
+        )
+
+        assert config.gold_output_uri == "s3://de4-lake/gold/standard"
+
+
+class FakeCursor:
+    def __init__(self, vehicle_profile_ids: tuple[int, ...]) -> None:
+        self._vehicle_profile_ids = vehicle_profile_ids
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        del sql, params
+
+    def fetchall(self) -> list[tuple[int]]:
+        return [(profile_id,) for profile_id in self._vehicle_profile_ids]
+
+    def close(self) -> None:
+        pass
+
+
+class FakeConnection:
+    """load_universe()의 vehicle_profile 조회만 흉내낸다."""
+
+    def __init__(self, vehicle_profile_ids: tuple[int, ...] = (1,)) -> None:
+        self._vehicle_profile_ids = vehicle_profile_ids
+
+    def cursor(self) -> FakeCursor:
+        return FakeCursor(self._vehicle_profile_ids)
+
+
+@pytest.fixture(scope="module")
+def _standard_job_order_spark():
+    session = (
+        SparkSession.builder.appName("batch-jobs-standard-job-order-tests")
+        .master("local[1]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
+
+
+class TestGoldBeforePostgres:
+    AS_OF = datetime(2026, 8, 20, 3, 0, 0, tzinfo=UTC)
+    SEGMENT_ID = "seg-1"
+    VEHICLE_PROFILE_ID = 1
+    HOURLY_SCHEMA = (
+        "segment_id string, vehicle_profile_id int, data_period_start timestamp, "
+        "data_period_end timestamp, road_snapshot_date date, vertical_score double, "
+        "longitudinal_score double, lateral_score double, scoring_version string, "
+        "sample_count long, trip_count long, _run_id string, _processed_at timestamp"
+    )
+
+    @pytest.fixture
+    def spark(self, _standard_job_order_spark):
+        return _standard_job_order_spark
+
+    def _build_config(self, spark, tmp_path: Path) -> StandardComfortScoreJobConfig:
+        data_lake_uri = str(tmp_path)
+        self._write_universe_environment(spark, tmp_path)
+        self._write_hourly_comfort_score(spark, data_lake_uri)
+        return StandardComfortScoreJobConfig(
+            data_lake_uri=data_lake_uri,
+            window_hours=168,
+            comfort_score_config_path=DEFAULT_COMFORT_SCORE_CONFIG_PATH,
+            gold_output_uri=str(tmp_path / "gold"),
+            postgres_host="unused",
+            postgres_port=5432,
+            postgres_db="unused",
+            postgres_user="unused",
+            postgres_password="unused",
+        )
+
+    def _write_universe_environment(self, spark, tmp_path: Path) -> None:
+        # load_universe()가 읽는 pointer -> manifest -> segment artifact 구성.
+        segment_dir = tmp_path / "segment_reference"
+        spark.createDataFrame(
+            [(self.SEGMENT_ID,)], "segment_id string"
+        ).write.mode("overwrite").parquet(str(segment_dir))
+
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "artifacts": [
+                        {
+                            "role": "enriched_segment_reference",
+                            "uri": segment_dir.resolve().as_uri(),
+                        }
+                    ]
+                }
+            )
+        )
+        pointer_dir = tmp_path / "prepared" / "simulation_environment"
+        pointer_dir.mkdir(parents=True)
+        (pointer_dir / "active.json").write_text(
+            json.dumps({"manifest_uri": manifest_path.resolve().as_uri()})
+        )
+
+    def _write_hourly_comfort_score(self, spark, data_lake_uri: str) -> None:
+        row = (
+            self.SEGMENT_ID,
+            self.VEHICLE_PROFILE_ID,
+            self.AS_OF.replace(tzinfo=None) - timedelta(hours=1),
+            self.AS_OF.replace(tzinfo=None),
+            self.AS_OF.date(),
+            80.0,
+            40.0,
+            20.0,
+            "1.0.0",
+            10,
+            10,
+            "run-1",
+            self.AS_OF.replace(tzinfo=None),
+        )
+        uri = join_uri(data_lake_uri, "silver", "hourly_comfort_score")
+        spark.createDataFrame([row], self.HOURLY_SCHEMA).write.mode("overwrite").parquet(uri)
+
+    def test_gold_write_failure_prevents_postgres_write(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        config = self._build_config(spark, tmp_path)
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.write_standard_comfort_score_snapshot",
+            Mock(side_effect=RuntimeError("gold write boom")),
+        )
+        postgres_writer = Mock()
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.write_standard_comfort_scores",
+            postgres_writer,
+        )
+
+        with pytest.raises(RuntimeError, match="gold write boom"):
+            run_standard_comfort_score_job(spark, config, self.AS_OF, FakeConnection())
+
+        postgres_writer.assert_not_called()
+
+    def test_postgres_write_receives_the_gold_read_back_dataframe(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        config = self._build_config(spark, tmp_path)
+        postgres_writer = Mock(
+            return_value=WriteSummary(staging_count=1, inserted_count=1, updated_count=0)
+        )
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.write_standard_comfort_scores",
+            postgres_writer,
+        )
+
+        summary = run_standard_comfort_score_job(spark, config, self.AS_OF, FakeConnection())
+
+        postgres_writer.assert_called_once()
+        received_df = postgres_writer.call_args.args[0]
+        assert received_df.count() == summary.scored_count
+
+        target_uri = standard_snapshot_uri(config.gold_output_uri, self.AS_OF)
+        on_disk_rows = {tuple(r) for r in spark.read.parquet(target_uri).collect()}
+        received_rows = {tuple(r) for r in received_df.collect()}
+        assert received_rows == on_disk_rows

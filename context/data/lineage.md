@@ -65,7 +65,8 @@ Bronze `sensor_event`
         -> segment x vehicle-profile features (persisted)
   -> hourly comfort scoring + rejected output
   -> Gold window aggregation
-  -> idempotent PostgreSQL upsert
+  -> S3 Gold `standard_segment_comfort_score` snapshot
+  -> idempotent PostgreSQL serving-store upsert
 ```
 
 T1 and T2 run in the same Spark session. T1 cleanses every whole Bronze hour
