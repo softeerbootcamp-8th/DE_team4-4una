@@ -16,3 +16,8 @@ scrape_configs:
     static_configs:
       - targets:
           - project-ec2:8081
+
+  - job_name: serving-api
+    static_configs:
+      - targets:
+          - project-ec2:9101

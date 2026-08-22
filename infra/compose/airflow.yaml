@@ -1,6 +1,8 @@
 x-airflow-env: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_POSTGRES_DB}
+    # 로컬은 postgres.yaml의 postgres 서비스(postgres:5432)를 기본값으로 쓰고,
+    # EC2에서는 orchestration.env가 RDS 호스트/포트로 덮어쓴다.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@${AIRFLOW_POSTGRES_HOST:-postgres}:${AIRFLOW_POSTGRES_PORT:-5432}/${AIRFLOW_POSTGRES_DB}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
     AIRFLOW_HOME: ${AIRFLOW_HOME}
