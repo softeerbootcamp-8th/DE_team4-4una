@@ -9,7 +9,8 @@ cleanse와 features를 동일 Spark 세션에서 실행하는 sensor_processing 
 책임을 current_score_pipeline(#231)으로 넘기고, 이 DAG는
 standard_segment_comfort_score까지만 담당한다. dag_id도
 standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 경로를
-제거하면서 publish 단계도 함께 빠졌다.
+제거하면서 publish 단계도 함께 빠졌다. 이슈 #265: run_standard_score 내부에서
+PostgreSQL 적재 전에 S3 Gold snapshot을 먼저 저장하도록 바뀌었다(Task 구조는 그대로).
 
 ## EMR Serverless 실행 방식 (#292, ADR-0001)
 
@@ -183,11 +184,11 @@ with DAG(
         run_hourly_scoring >> validate_hourly_scoring
 
     with TaskGroup(group_id="standard_score") as standard_score:
-        # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해
-        # PostgreSQL에 UPSERT한다. as_of는 `[as_of - window_hours, as_of)`
-        # 윈도우의 끝을 의미하므로, 방금 끝난 데이터 구간의 끝인
-        # data_interval_end를 쓴다. STANDARD_COMFORT_SCORE_*/POSTGRES_*는
-        # CLI 플래그가 없어(from_env() 전용) driver_env로 넘긴다.
+        # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 S3 Gold
+        # snapshot에 저장한 뒤(#265) PostgreSQL에 UPSERT한다. as_of는
+        # `[as_of - window_hours, as_of)` 윈도우의 끝이므로 data_interval_end를 쓴다.
+        # STANDARD_COMFORT_SCORE_*/POSTGRES_*는 CLI 플래그가 없어(from_env() 전용)
+        # driver_env로 넘긴다.
         run_standard_score = submit_batch_jobs_command(
             task_id="run_standard_score",
             entry_point_arguments=[
@@ -203,6 +204,9 @@ with DAG(
                 ),
                 "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
                     "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
+                ),
+                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": (
+                    "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
                 ),
             },
         )
