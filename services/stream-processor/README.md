@@ -63,6 +63,17 @@ JSON에는 추가하지 않습니다.
 환경변수에 넣지 않고 EC2 Instance Role에서 가져옵니다. Spark 경로에는
 `s3://`가 아니라 `s3a://`를 사용합니다.
 
+CD 배포 전 다음 GitHub Repository Variable을 등록해야 합니다. 둘 중 하나라도
+비어 있거나 `s3a://` URI가 아니면 기존 컨테이너를 교체하기 전에 배포가 실패합니다.
+
+| 변수 | 예시 |
+| --- | --- |
+| `STREAM_BRONZE_OUTPUT_PATH` | `s3a://de4-data-lake/bronze/sensor-events` |
+| `STREAM_BRONZE_CHECKPOINT_LOCATION` | `s3a://de4-data-lake/checkpoints/stream-processor/sensor-events` |
+
+EC2 Instance Role에는 두 경로를 조회하고 쓸 수 있는 S3 권한이 필요합니다. 동일한
+출력 경로에는 배포를 거쳐도 같은 checkpoint URI를 계속 사용해야 합니다.
+
 ```bash
 docker build -f services/stream-processor/Dockerfile -t de4-stream-processor .
 

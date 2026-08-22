@@ -23,8 +23,10 @@ jobs:
       REVISION: ${{ github.sha }}
       EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
       CONTAINER: stream-processor
-      ENV_FILE: /home/ec2-user/DE_team4-4una/.env
-      DATA_DIR: /home/ec2-user/stream-processor-data
+      KAFKA_BOOTSTRAP_SERVERS: ${{ vars.KAFKA_BOOTSTRAP_SERVERS || 'localhost:9092' }}
+      KAFKA_SENSOR_TOPIC: ${{ vars.KAFKA_SENSOR_TOPIC || 'sensor-events' }}
+      BRONZE_OUTPUT_PATH: ${{ vars.STREAM_BRONZE_OUTPUT_PATH }}
+      BRONZE_CHECKPOINT_LOCATION: ${{ vars.STREAM_BRONZE_CHECKPOINT_LOCATION }}
     steps:
       - name: Check required variables
         env:
@@ -33,10 +35,13 @@ jobs:
           ECR_REPOSITORY: ${{ vars.STREAM_PROCESSOR_ECR_REPOSITORY }}
           EC2_HOST: ${{ vars.EC2_HOST }}
           EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          BRONZE_OUTPUT_PATH: ${{ vars.STREAM_BRONZE_OUTPUT_PATH }}
+          BRONZE_CHECKPOINT_LOCATION: ${{ vars.STREAM_BRONZE_CHECKPOINT_LOCATION }}
         run: |
           missing=""
 
-          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST EC2_SSH_PRIVATE_KEY; do
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST EC2_SSH_PRIVATE_KEY \
+            BRONZE_OUTPUT_PATH BRONZE_CHECKPOINT_LOCATION; do
             eval "value=\${$name}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -110,8 +115,10 @@ jobs:
              REGISTRY='$REGISTRY' \
              AWS_REGION='$AWS_REGION' \
              CONTAINER='$CONTAINER' \
-             ENV_FILE='$ENV_FILE' \
-             DATA_DIR='$DATA_DIR' \
+             KAFKA_BOOTSTRAP_SERVERS='$KAFKA_BOOTSTRAP_SERVERS' \
+             KAFKA_SENSOR_TOPIC='$KAFKA_SENSOR_TOPIC' \
+             BRONZE_OUTPUT_PATH='$BRONZE_OUTPUT_PATH' \
+             BRONZE_CHECKPOINT_LOCATION='$BRONZE_CHECKPOINT_LOCATION' \
              REVISION='$REVISION' \
              bash -s" <<'EOF'
           set -euo pipefail
@@ -123,33 +130,71 @@ jobs:
 
           docker pull "$IMAGE"
 
-          # 컨테이너가 교체되어도 Bronze / checkpoint는 EC2에 유지한다.
-          mkdir -p \
-            "$DATA_DIR/bronze" \
-            "$DATA_DIR/checkpoints"
+          # 운영 적재가 로컬 경로로 조용히 폴백되지 않도록 S3A URI만 허용한다.
+          for uri in "$BRONZE_OUTPUT_PATH" "$BRONZE_CHECKPOINT_LOCATION"; do
+            case "$uri" in
+              s3a://*) ;;
+              *)
+                echo "Stream Processor path must use s3a://: $uri"
+                exit 1
+                ;;
+            esac
 
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "Stream Processor env file not found: $ENV_FILE"
-            exit 1
-          fi
+            bucket_and_key="${uri#s3a://}"
+            bucket="${bucket_and_key%%/*}"
+            aws s3api head-bucket --bucket "$bucket"
+          done
 
           docker rm -f "$CONTAINER" 2>/dev/null || true
 
           docker run -d \
             --name "$CONTAINER" \
             --restart unless-stopped \
-            --env-file "$ENV_FILE" \
-            -e STREAM_BRONZE_OUTPUT_PATH=/data/bronze/sensor-events \
-            -e STREAM_BRONZE_CHECKPOINT_LOCATION=/data/checkpoints/bronze-sensor-events \
-            -v "$DATA_DIR/bronze:/data/bronze" \
-            -v "$DATA_DIR/checkpoints:/data/checkpoints" \
+            --network host \
+            -e AWS_REGION="$AWS_REGION" \
+            -e AWS_DEFAULT_REGION="$AWS_REGION" \
+            -e KAFKA_BOOTSTRAP_SERVERS="$KAFKA_BOOTSTRAP_SERVERS" \
+            -e KAFKA_SENSOR_TOPIC="$KAFKA_SENSOR_TOPIC" \
+            -e KAFKA_STARTING_OFFSETS=earliest \
+            -e STREAM_SPARK_MASTER='local[*]' \
+            -e STREAM_TRIGGER_INTERVAL_SECONDS=5 \
+            -e STREAM_MIN_OFFSETS_PER_TRIGGER=600000 \
+            -e STREAM_MAX_TRIGGER_DELAY=5m \
+            -e STREAM_BRONZE_OUTPUT_PARTITIONS=1 \
+            -e STREAM_BRONZE_OUTPUT_PATH="$BRONZE_OUTPUT_PATH" \
+            -e STREAM_BRONZE_CHECKPOINT_LOCATION="$BRONZE_CHECKPOINT_LOCATION" \
             --label "org.opencontainers.image.revision=$REVISION" \
             "$IMAGE"
 
+          query_started=false
+          for _ in $(seq 1 12); do
+            state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
+            if [ "$state" != "running" ]; then
+              echo "Stream Processor failed while starting: state=$state"
+              docker logs "$CONTAINER" --tail 100
+              exit 1
+            fi
+
+            if grep -q "stream query started" < <(docker logs "$CONTAINER" 2>&1); then
+              query_started=true
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$query_started" != "true" ]; then
+            echo "Stream Processor query did not start within 60 seconds."
+            docker logs "$CONTAINER" --tail 100
+            exit 1
+          fi
+
+          # query 시작 직후 Kafka/S3 오류로 재시작하는 경우도 배포 실패로 판정한다.
           sleep 10
 
-          if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
-            echo "Stream Processor failed to start."
+          state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
+          restarts="$(docker inspect -f '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo 1)"
+          if [ "$state" != "running" ] || [ "$restarts" -ne 0 ]; then
+            echo "Stream Processor is unhealthy: state=$state restarts=$restarts"
             docker logs "$CONTAINER" --tail 100
             exit 1
           fi
@@ -172,4 +217,6 @@ jobs:
             echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
             echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
             echo "| container | \`$CONTAINER\` |"
+            echo "| bronze | \`${BRONZE_OUTPUT_PATH:-(미설정)}\` |"
+            echo "| checkpoint | \`${BRONZE_CHECKPOINT_LOCATION:-(미설정)}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

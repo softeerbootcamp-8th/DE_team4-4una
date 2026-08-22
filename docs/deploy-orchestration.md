@@ -82,6 +82,10 @@ curl은 이미 준비돼 있다. 추가로 필요한 것은 다음과 같다.
 
 `docker compose --env-file`로 넘기는 파일이다. 사람이 인스턴스에 직접 만들고,
 값은 저장소에 기록하지 않는다. 기본 경로는 `/etc/orchestration/orchestration.env`다.
+CD는 GitHub Repository Variable의 `AWS_REGION`을 원격 Compose 프로세스에
+`AWS_REGION`과 `AWS_DEFAULT_REGION`으로 전달한다. 수동으로 Compose를 실행할
+때에는 같은 두 키를 env 파일에 직접 설정해야 EMR Serverless 클라이언트가 호출할
+리전을 결정할 수 있다.
 
 필요한 키 전체 목록과 각 값의 의미는
 [services/orchestration/README.md의 "준비" 절](../services/orchestration/README.md#준비)을

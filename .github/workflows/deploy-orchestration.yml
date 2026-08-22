@@ -133,12 +133,15 @@ jobs:
 
       - name: Start Airflow via docker compose
         env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
           EC2_HOST: ${{ vars.EC2_HOST }}
         run: |
           set -euo pipefail
 
           ssh "${EC2_USER}@${EC2_HOST}" \
-            "cd '$REPO_DIR' && docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d"
+            "cd '$REPO_DIR' \
+            && AWS_REGION='$AWS_REGION' AWS_DEFAULT_REGION='$AWS_REGION' \
+            docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d"
 
       - name: Wait for Airflow health
         env:
