@@ -209,5 +209,13 @@ setup and validation steps.
 AWS Security Group provisioning for the two EC2s stays outside this repository's
 code (`terraform/envs/` is currently empty) — it is a manual prerequisite
 documented in `infra/monitoring/README.md`, not something this diagram or
-ADR-0010 settles. Grafana dashboards/alerts and metrics for the other services
-(Kafka, Spark, Airflow, `serving-api`) are not part of this scope yet.
+ADR-0010 settles.
+
+Grafana auto-provisions a `Project Infrastructure` dashboard
+(`infra/monitoring/grafana/dashboards/project-infrastructure.json`, registered
+through `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml`)
+covering Project EC2 host metrics (CPU/memory/disk/network from
+`node_exporter`) and per-container CPU/memory/network (from cAdvisor). The
+dashboard JSON is the source of truth (`allowUiUpdates: false`); manual
+Grafana UI edits are not persisted. Alerting and metrics for the other
+services (Kafka, Spark, Airflow, `serving-api`) remain outside this scope.

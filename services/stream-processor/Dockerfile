@@ -1,5 +1,6 @@
 FROM python:3.12-slim
 
+# PySpark 실행과 컨테이너 종료 처리에 필요한 런타임
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
