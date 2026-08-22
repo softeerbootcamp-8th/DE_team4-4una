@@ -39,6 +39,7 @@ jobs:
       # Amazon Linux 2023의 기본 계정이다.
       EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
       HOST_PORT: ${{ vars.SERVING_API_PORT || '8000' }}
+      METRICS_PORT: ${{ vars.SERVING_API_METRICS_PORT || '9101' }}
       ENV_FILE: ${{ vars.SERVING_API_ENV_FILE || '/etc/serving-api/serving-api.env' }}
       HEALTH_PATH: /health
       HEALTH_TIMEOUT: "90"
@@ -127,8 +128,8 @@ jobs:
           # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 stdin으로
           # 넘긴다. printf %q가 값을 따옴표로 감싸므로 경로에 공백이 있어도 깨지지 않는다.
           # AWS_REGION은 configure-aws-credentials가 job 환경에 내보낸 값을 쓴다.
-          prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nHOST_PORT=%q\nENV_FILE=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\n' \
-            "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$HOST_PORT" \
+          prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nHOST_PORT=%q\nMETRICS_PORT=%q\nENV_FILE=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\n' \
+            "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$HOST_PORT" "$METRICS_PORT" \
             "$ENV_FILE" "$REVISION" "$HEALTH_PATH" "$HEALTH_TIMEOUT")
 
           # ssh는 원격 명령의 종료 코드를 그대로 돌려준다. 스크립트가 rollback 후 1로

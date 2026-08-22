@@ -9,15 +9,19 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
 [Project EC2]                                   [Monitoring EC2]
 - node_exporter :9100     --- private VPC --->   - Prometheus (scrape)
 - cAdvisor      :8081     --- private VPC --->     127.0.0.1:9090 (host 내부 전용)
-                                                  - Grafana :3000 (Prometheus를 datasource로 사용)
+- Serving API   :8000                            - Grafana :3000 (Prometheus를 datasource로 사용)
+- API metrics   :9101     --- private VPC --->
 ```
 
-- Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100)와
-  cAdvisor(8081)의 metrics를 scrape한다.
+- Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100),
+  cAdvisor(8081), Serving API 애플리케이션 metrics(9101)를 scrape한다.
+- Serving API는 요청을 처리하는 API port(8000)와 metrics를 노출하는
+  port(9101)를 분리한다 — `/metrics`가 공개 API 표면에 섞이지 않는다.
 - Grafana는 같은 Docker network에서 `http://prometheus:9090`으로 Prometheus에
   접근한다. Datasource는 [grafana/provisioning/datasources/prometheus.yml](grafana/provisioning/datasources/prometheus.yml)로
-  자동 등록되고, `Project Infrastructure` dashboard도 provisioning으로 자동
-  생성된다. 자세한 내용은 아래 [Grafana Dashboard](#grafana-dashboard) 참고.
+  자동 등록되고, `Project Infrastructure`와 `Serving API` dashboard도
+  provisioning으로 자동 생성된다. 자세한 내용은 아래
+  [Grafana Dashboard](#grafana-dashboard) 참고.
 - `prometheus.yml`에는 실제 AWS private IP를 하드코딩하지 않는다. 대신
   `PROJECT_EC2_PRIVATE_IP` 값을 compose의 `extra_hosts`로 넘겨 Prometheus
   컨테이너 안에서 `project-ec2` hostname을 그 IP로 매핑한다.
@@ -34,6 +38,7 @@ Project EC2 Security Group (inbound):
 | --- | --- | --- |
 | 9100 | TCP | Monitoring EC2 Security Group |
 | 8081 | TCP | Monitoring EC2 Security Group |
+| 9101 | TCP | Monitoring EC2 Security Group |
 
 Monitoring EC2 Security Group (inbound):
 
@@ -74,6 +79,12 @@ cAdvisor 확인:
 
 ```bash
 curl http://localhost:8081/metrics
+```
+
+Serving API metrics 확인(Serving API 컨테이너가 이 EC2에서 같이 떠 있을 때):
+
+```bash
+curl http://localhost:9101/metrics
 ```
 
 ### cAdvisor에 privileged/device 설정을 쓰는 이유
@@ -135,12 +146,20 @@ Grafana health 확인:
 curl http://localhost:3000/api/health
 ```
 
-Prometheus Targets(`http://localhost:9090/targets`)에서 다음 세 job이 모두
+Prometheus Targets(`http://localhost:9090/targets`)에서 다음 job이 모두
 `UP`이어야 한다.
 
 - `prometheus`
 - `project-node`
 - `project-containers`
+- `serving-api`
+
+Monitoring EC2에서 Project EC2의 Serving API metrics endpoint에 직접 접근되는지
+확인하려면(문제가 생겼을 때만 필요):
+
+```bash
+curl http://<PROJECT_EC2_PRIVATE_IP>:9101/metrics
+```
 
 9090은 `127.0.0.1`에만 bind되어 있으므로, Monitoring EC2 밖에서 Prometheus UI를
 확인해야 한다면 SSH port forwarding을 사용한다.
@@ -159,17 +178,49 @@ http://<MONITORING_EC2_PUBLIC_IP>:3000
 
 ## Grafana Dashboard
 
-Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure` dashboard가
-자동으로 provisioning된다.
+Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`와 `Serving API`
+dashboard가 자동으로 provisioning된다. 두 dashboard 모두 같은 provider
+(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`)가 디렉터리 전체를
+읽어서 등록하므로, dashboard를 추가할 때 provider(`dashboards.yml`)를 새로
+만들 필요는 없다 — JSON 파일만 그 디렉터리에 추가하면 된다.
 
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
 - 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → Project Infrastructure**
+  / **Serving API**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
     파일 기반으로 읽음)
-  - `infra/monitoring/grafana/dashboards/project-infrastructure.json` — dashboard
-    본문(패널, PromQL, 임계값)
+  - `infra/monitoring/grafana/dashboards/project-infrastructure.json` — host/
+    container dashboard 본문(패널, PromQL, 임계값)
+  - `infra/monitoring/grafana/dashboards/serving-api.json` — Serving API
+    dashboard 본문
+
+### Serving API dashboard 지표
+
+`services/serving-api/src/serving_api/metrics.py`가 노출하는 metric 이름을
+그대로 PromQL에 쓴다.
+
+| Metric | 종류 | Label |
+| --- | --- | --- |
+| `serving_api_http_requests_total` | Counter | `method`, `route`, `status` |
+| `serving_api_http_request_duration_seconds` | Histogram | `method`, `route` |
+
+`route`는 실제 요청 경로가 아니라 route template(예:
+`/api/v1/segments/{segment_id}/comfort-scores/{vehicle_profile_id}`)이다.
+매칭되는 route가 없으면 `unmatched` 고정값을 쓴다 — `segment_id` 같은 사용자
+입력값이 label에 들어가 카디널리티가 늘어나지 않게 하기 위함이다.
+
+패널별 PromQL:
+
+| Panel | PromQL |
+| --- | --- |
+| Target Status | `up{job="serving-api"}` |
+| Requests/sec | `sum(rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
+| 2xx / 4xx / 5xx | `sum(rate(serving_api_http_requests_total{job="serving-api", status=~"2.."}[5m]))` (4xx/5xx는 `status=~"4.."`/`"5.."`) |
+| p50 / p95 / p99 latency | `histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` (0.95/0.99는 quantile 값만 교체) |
+| Requests by Endpoint | `sum by (route) (rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
+| Latency by Endpoint (p95) | `histogram_quantile(0.95, sum by (le, route) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` |
 
 ### Source of truth와 `allowUiUpdates`
 
@@ -217,6 +268,16 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   container_network_receive_bytes_total{job="project-containers"}
   container_network_transmit_bytes_total{job="project-containers"}
   ```
+
+- Serving API 패널: `up{job="serving-api"}`가 `0`이거나 값이 아예 없으면
+  Prometheus가 Project EC2의 9101 포트에 못 닿는 것이다. 다음을 순서대로
+  확인한다.
+  1. Serving API 컨테이너가 최신 배포 스크립트로 떠서 `SERVING_API_METRICS_PORT`
+     env와 `9101:9101` port publish를 실제로 가지고 있는지
+     (`docker inspect <container>`).
+  2. Project EC2에서 `curl http://localhost:9101/metrics`가 응답하는지.
+  3. Project EC2 Security Group에 9101(source: Monitoring EC2 Security Group)
+     inbound 규칙이 있는지.
 
 ### Dashboard 변경 배포
 

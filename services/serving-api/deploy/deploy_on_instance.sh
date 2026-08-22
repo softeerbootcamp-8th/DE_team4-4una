@@ -2,7 +2,7 @@
 # EC2에서 실행되는 배포 스크립트. 워크플로가 SSH로 접속해, 아래 변수 대입문을 앞에
 # 붙인 이 파일 내용을 stdin으로 넘긴다.
 #
-#   IMAGE REGISTRY AWS_REGION CONTAINER HOST_PORT ENV_FILE REVISION
+#   IMAGE REGISTRY AWS_REGION CONTAINER HOST_PORT METRICS_PORT ENV_FILE REVISION
 #   HEALTH_PATH HEALTH_TIMEOUT
 #
 # 비밀값은 다루지 않는다. DB 접속 정보는 인스턴스의 ENV_FILE에만 있고 경로만 넘긴다.
@@ -32,14 +32,16 @@ start_container() {
 
   docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
 
-  # --env가 --env-file보다 뒤라 SERVING_API_PORT는 이 값이 이긴다. 앱이 듣는 포트와
-  # publish 대상이 어긋나지 않게 못박는다.
+  # --env가 --env-file보다 뒤라 SERVING_API_PORT/SERVING_API_METRICS_PORT는 이 값이
+  # 이긴다. 앱이 듣는 포트와 publish 대상이 어긋나지 않게 못박는다.
   docker run --detach \
     --name "$CONTAINER" \
     --restart unless-stopped \
     --env-file "$ENV_FILE" \
     --env "SERVING_API_PORT=${HOST_PORT}" \
+    --env "SERVING_API_METRICS_PORT=${METRICS_PORT}" \
     --publish "${HOST_PORT}:${HOST_PORT}" \
+    --publish "${METRICS_PORT}:${METRICS_PORT}" \
     --label "org.opencontainers.image.revision=${revision}" \
     "$image"
 }

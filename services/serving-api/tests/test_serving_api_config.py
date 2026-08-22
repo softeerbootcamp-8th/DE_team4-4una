@@ -6,6 +6,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 from serving_api.config import (
     DEFAULT_HOST,
+    DEFAULT_METRICS_PORT,
     DEFAULT_POOL_MAX_SIZE,
     DEFAULT_POOL_MIN_SIZE,
     DEFAULT_PORT,
@@ -30,6 +31,7 @@ def test_from_env_applies_defaults_for_optional_settings() -> None:
 
     assert config.host == DEFAULT_HOST
     assert config.port == DEFAULT_PORT
+    assert config.metrics_port == DEFAULT_METRICS_PORT
     assert config.pool_min_size == DEFAULT_POOL_MIN_SIZE
     assert config.pool_max_size == DEFAULT_POOL_MAX_SIZE
 
@@ -40,6 +42,7 @@ def test_from_env_reads_optional_settings() -> None:
         | {
             "SERVING_API_HOST": "127.0.0.1",
             "SERVING_API_PORT": "9000",
+            "SERVING_API_METRICS_PORT": "9200",
             "SERVING_API_POOL_MIN_SIZE": "2",
             "SERVING_API_POOL_MAX_SIZE": "20",
         }
@@ -47,6 +50,7 @@ def test_from_env_reads_optional_settings() -> None:
 
     assert config.host == "127.0.0.1"
     assert config.port == 9000
+    assert config.metrics_port == 9200
     assert config.pool_min_size == 2
     assert config.pool_max_size == 20
 
@@ -61,7 +65,9 @@ def test_from_env_requires_every_postgres_setting(missing: str) -> None:
 
 def test_conninfo_keeps_values_that_need_quoting() -> None:
     # 접속 문자열을 직접 조립했다면 공백이 들어간 비밀번호에서 깨진다.
-    config = ServingApiConfig.from_env(REQUIRED_ENV | {"POSTGRES_PASSWORD": "two words"})
+    config = ServingApiConfig.from_env(
+        REQUIRED_ENV | {"POSTGRES_PASSWORD": "two words"}
+    )
 
     parsed = conninfo_to_dict(config.conninfo)
 
@@ -108,9 +114,13 @@ def test_from_env_reads_the_route_comfort_policy() -> None:
 @pytest.mark.parametrize(
     ("weights", "match"),
     [
-        pytest.param({"average_weight": 0.7, "worst_quartile_weight": 0.7}, "sum to 1", id="sum"),
         pytest.param(
-            {"average_weight": 1.5, "worst_quartile_weight": -0.5}, "negative", id="negative"
+            {"average_weight": 0.7, "worst_quartile_weight": 0.7}, "sum to 1", id="sum"
+        ),
+        pytest.param(
+            {"average_weight": 1.5, "worst_quartile_weight": -0.5},
+            "negative",
+            id="negative",
         ),
     ],
 )
@@ -123,7 +133,9 @@ def test_route_comfort_config_rejects_weights_that_leave_the_0_100_scale(
 
 
 @pytest.mark.parametrize("worst_ratio", [0.0, -0.1, 1.5])
-def test_route_comfort_config_rejects_an_out_of_range_worst_ratio(worst_ratio: float) -> None:
+def test_route_comfort_config_rejects_an_out_of_range_worst_ratio(
+    worst_ratio: float,
+) -> None:
     # 0이면 하위 구간이 하나도 없고, 1을 넘으면 경로 길이보다 많은 구간을 뜻한다.
     with pytest.raises(ValueError, match="worst_ratio"):
         RouteComfortConfig(
