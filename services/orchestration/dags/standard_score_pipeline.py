@@ -11,22 +11,22 @@ standard_segment_comfort_score까지만 담당한다. dag_id도
 standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 경로를
 제거하면서 publish 단계도 함께 빠졌다.
 
-## 로컬 실행 방식 (임시, EMR Serverless 전환 시 사라짐)
+## EMR Serverless 실행 방식 (#292, ADR-0001)
 
-Airflow는 공식 이미지를 그대로 쓰고(#70) pyspark를 섞지 않기 위해, 각 task는
-BashOperator로 `docker run`을 호출해 별도의 batch-jobs 컨테이너를 host에
-직접 띄운다("docker-outside-of-docker"). airflow-scheduler 컨테이너에 host의
-docker socket을 마운트해야 동작한다(`infra/compose/airflow.yaml` 참고).
+각 task는 host의 docker socket을 마운트해 `docker run`으로 batch-jobs
+컨테이너를 직접 띄우던(docker-outside-of-docker) 방식에서, 미리 만들어진 EMR
+Serverless Application에 Job Run을 제출하는 `EmrServerlessStartJobOperator`
+(`emr_serverless.submit_batch_jobs_command`)로 바뀌었다. Application ID·실행
+역할 ARN·entry point는 Airflow Variable로 관리한다(`AIRFLOW_VAR_*` 환경변수로
+주입 가능 — `.env.example` 참고). entry point는 batch-jobs의 EMR Serverless
+커스텀 이미지가 준비되기 전까지 플레이스홀더다.
 
-**보안 주의**: docker socket 마운트는 사실상 host docker에 대한 제어권을
-컨테이너에 주는 것과 같다. 로컬 개발 환경 밖(공유 서버 등)으로 이 설정을
-그대로 복사하지 않는다.
-
-EMR Serverless로 연결되면(ADR 0001, 후속 이슈) 이 `docker run` 호출과
-`infra/compose/airflow.yaml`의 docker socket 마운트는 통째로 삭제되고,
-`EmrServerlessStartJobOperator`로 교체된다. TaskGroup 경계·task 의존관계·
-`run_id` 템플릿 전달 방식은 그대로 유지된다.
-
+**임시 방편(Postgres 자격증명)**: `standard_score` TaskGroup의 두 task는 Postgres
+자격증명이 필요한데, CLI에 `--postgres-*` 플래그가 없어 `driver_env`
+(`spark.emr-serverless.driverEnv.*`)로 넘긴다. 이 값은 EMR Serverless Job Run
+설정에 평문으로 남아 GetJobRun API로 조회 가능하다 — Secrets Manager를 지금
+못 쓰는 상황이라 감수하기로 했다(#292 논의). 후속 이슈에서 IAM DB 인증 등으로
+교체할 예정이다.
 """
 
 from __future__ import annotations
@@ -34,122 +34,55 @@ from __future__ import annotations
 import datetime
 
 import pendulum
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, TaskGroup
 from airflow.timetables.interval import CronDataIntervalTimetable
 from comfort_score_assets import STANDARD_SCORE_ASSET
+from emr_serverless import submit_batch_jobs_command
 
-# BATCH_JOBS_IMAGE_TAG는 `make build-batch-jobs-image`가 만든 git-SHA 태그를
-# 가리켜야 한다(재현성). HOST_PROJECT_DIR와 BATCH_JOBS_IMAGE_TAG가 없으면
-# 셸의 `:?` 문법으로 docker 실행 전에 즉시 실패시킨다.
-#
-# T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
-# cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
-_RUN_SENSOR_PROCESSING_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:/app/data/local-lake "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/processed:"
-    "/app/data/processed:ro "
-    "-e CLEANSING_CONFIG_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH "
-    "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    # 이미지의 기본 CMD(`uv run --no-sync --package batch-jobs batch-jobs`)를 그대로
-    # 반복해야 한다. `docker run <image> <cmd>`는 CMD를 완전히 덮어써서 셸 없이
-    # 직접 exec하므로, `batch-jobs`(uv venv 안의 엔트리포인트)만 주면 PATH에서
-    # 못 찾아 실패한다.
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "cleanse-sensor-events "
-    "--target-hour='{{ data_interval_start.isoformat() }}' "
-    '--road-snapshot-date="${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE'
-    ':?HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE must be set}" '
-    '--feature-version="${HOURLY_SEGMENT_FEATURE_VERSION'
-    ':?HOURLY_SEGMENT_FEATURE_VERSION must be set}" '
-    '--bronze-input-path="${CLEANSING_BRONZE_INPUT_PATH:-data/local-lake/bronze/sensor-events}" '
-    '--quarantine-output-path="${CLEANSING_QUARANTINE_OUTPUT_PATH:-data/local-lake/silver/'
-    'sensor_event_quarantine}" '
-    '--road-segment-path="${HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH:-data/processed/'
-    'road_segment}" '
-    '--output-path="${HOURLY_SEGMENT_FEATURE_OUTPUT_PATH:-data/local-lake/silver/'
-    'hourly_segment_features}" '
-    "--run-id='{{ run_id }}'"
+# standard_score TaskGroup의 두 task가 공유하는 Postgres 자격증명 driver_env.
+# 모듈 docstring의 "임시 방편" 설명 참고.
+_POSTGRES_DRIVER_ENV = {
+    "POSTGRES_HOST": "{{ var.value.POSTGRES_HOST }}",
+    "POSTGRES_PORT": "{{ var.value.POSTGRES_PORT }}",
+    "POSTGRES_DB": "{{ var.value.POSTGRES_DB }}",
+    "POSTGRES_USER": "{{ var.value.POSTGRES_USER }}",
+    "POSTGRES_PASSWORD": "{{ var.value.POSTGRES_PASSWORD }}",
+}
+
+# 아래 경로 상수들은 run/validate task가 같은 파티션을 가리키도록 한 곳에서만
+# 정의해 공유한다(#220, ADR-0004) — sensor_processing/hourly_scoring 두
+# TaskGroup에서 재사용한다.
+_CLEANSING_BRONZE_INPUT_PATH = (
+    "{{ var.value.get('CLEANSING_BRONZE_INPUT_PATH', "
+    "'data/local-lake/bronze/sensor-events') }}"
 )
-
-# run_id 외 나머지 설정은 HourlyComfortJobConfig.from_env()가 환경변수에서 읽는다.
-_RUN_HOURLY_SCORING_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:/app/data/local-lake "
-    "-e HOURLY_COMFORT_INPUT_PATH -e HOURLY_COMFORT_OUTPUT_PATH "
-    "-e HOURLY_COMFORT_REJECTED_OUTPUT_PATH -e HOURLY_COMFORT_SCORING_CONFIG_PATH "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "score-hourly-comfort --run-id={{ run_id }}"
+_CLEANSING_QUARANTINE_OUTPUT_PATH = (
+    "{{ var.value.get('CLEANSING_QUARANTINE_OUTPUT_PATH', "
+    "'data/local-lake/silver/sensor_event_quarantine') }}"
 )
-
-# validate_sensor_processing은 run_sensor_processing이 방금 쓴 hourly_segment_features/
-# quarantine 파티션만 읽으므로(:ro), 같은 env var(HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
-# CLEANSING_QUARANTINE_OUTPUT_PATH)를 재사용해 항상 같은 경로를 가리키게 한다(#220,
-# ADR-0004). GX가 통계적/선언적 규칙(물리량 범위, quarantine 비율)을 검증하고
-# 실패하면 이 task가 실패해 scoring으로 넘어가지 않는다(hard fail). 스키마/필수값/
-# PK 중복 같은 하드 인바리언트는 run_sensor_processing이 쓰기 시점에 이미 강제하므로
-# 여기서 다시 다루지 않는다.
-_VALIDATE_SENSOR_PROCESSING_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
-    "/app/data/local-lake:ro "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "validate-sensor-processing "
-    "--target-hour='{{ data_interval_start.isoformat() }}' "
-    '--output-path="${HOURLY_SEGMENT_FEATURE_OUTPUT_PATH:-data/local-lake/silver/'
-    'hourly_segment_features}" '
-    '--quarantine-output-path="${CLEANSING_QUARANTINE_OUTPUT_PATH:-data/local-lake/silver/'
-    'sensor_event_quarantine}"'
+_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH = (
+    "{{ var.value.get('HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH', "
+    "'data/processed/road_segment') }}"
 )
-
-# validate_hourly_scoring은 run_hourly_scoring이 방금 overwrite한 hourly_comfort_score
-# 전체(풀 리컴퓨트 결과)를 읽으므로(#249, ADR-0004), 같은 env var(HOURLY_COMFORT_OUTPUT_PATH)를
-# 재사용해 항상 같은 경로를 가리키게 한다. sensor_processing과 달리 hour 파티션이
-# 없어 --target-hour는 필요 없다.
-_VALIDATE_HOURLY_SCORING_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
-    "/app/data/local-lake:ro "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "validate-hourly-scoring "
-    '--output-path="${HOURLY_COMFORT_OUTPUT_PATH:-data/local-lake/silver/'
-    'hourly_comfort_score}"'
+_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH = (
+    "{{ var.value.get('HOURLY_SEGMENT_FEATURE_OUTPUT_PATH', "
+    "'data/local-lake/silver/hourly_segment_features') }}"
 )
-
-# standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 PostgreSQL에 UPSERT한다.
-# local-lake는 읽기만 하고(:ro) 쓰는 대상은 PostgreSQL이라 쓰기 마운트가 필요 없다.
-# as_of는 `[as_of - window_hours, as_of)` 윈도우의 끝을 의미하므로, 방금 끝난 데이터
-# 구간의 끝인 data_interval_end를 쓴다. 설정은 STANDARD_COMFORT_SCORE_*에서 읽는다.
-_RUN_STANDARD_SCORE_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-v ${HOST_PROJECT_DIR:?HOST_PROJECT_DIR must be set}/data/local-lake:"
-    "/app/data/local-lake:ro "
-    "-e STANDARD_COMFORT_SCORE_DATA_LAKE_URI -e STANDARD_COMFORT_SCORE_WINDOW_HOURS "
-    "-e STANDARD_COMFORT_SCORE_CONFIG_PATH "
-    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "load-standard-segment-comfort-score --as-of='{{ data_interval_end.isoformat() }}'"
+# hourly_scoring의 입력 경로다. sensor_processing이 방금 쓴 것과 물리적으로
+# 같은 위치를 가리키지만(로컬 기본값도 동일), CLI/설정상 별개의 Airflow
+# Variable이라 별도 상수로 둔다 — 위 _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH와
+# 혼동하지 않는다.
+_HOURLY_COMFORT_INPUT_PATH = (
+    "{{ var.value.get('HOURLY_COMFORT_INPUT_PATH', "
+    "'data/local-lake/silver/hourly_segment_features') }}"
 )
-
-
-# validate_standard_score는 run_standard_score가 이번 실행에 UPSERT한 행만
-# (score_as_of=as_of) Postgres에서 직접 조회해 검증한다(#249, ADR-0004:
-# Gold/Postgres는 Spark가 아니라 SqlAlchemy 경로). local-lake 마운트가 필요
-# 없다 — Postgres에만 붙는다.
-_VALIDATE_STANDARD_SCORE_BASH_COMMAND = (
-    "docker run --rm --network de4-local "
-    "-e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD "
-    "batch-jobs:${BATCH_JOBS_IMAGE_TAG:?BATCH_JOBS_IMAGE_TAG must be set} "
-    "uv run --no-sync --package batch-jobs batch-jobs "
-    "validate-standard-score --as-of='{{ data_interval_end.isoformat() }}'"
+_HOURLY_COMFORT_OUTPUT_PATH = (
+    "{{ var.value.get('HOURLY_COMFORT_OUTPUT_PATH', "
+    "'data/local-lake/silver/hourly_comfort_score') }}"
+)
+_HOURLY_COMFORT_REJECTED_OUTPUT_PATH = (
+    "{{ var.value.get('HOURLY_COMFORT_REJECTED_OUTPUT_PATH', "
+    "'data/local-lake/quarantine/hourly_comfort_score') }}"
 )
 
 
@@ -173,37 +106,119 @@ with DAG(
     tags=["standard-score-pipeline", "comfort-score"],
 ) as dag:
     with TaskGroup(group_id="sensor_processing") as sensor_processing:
-        run_sensor_processing = BashOperator(
+        # T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
+        # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
+        run_sensor_processing = submit_batch_jobs_command(
             task_id="run_sensor_processing",
-            bash_command=_RUN_SENSOR_PROCESSING_BASH_COMMAND,
+            entry_point_arguments=[
+                "cleanse-sensor-events",
+                "--run-id",
+                "{{ run_id }}",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
+                "--road-snapshot-date",
+                "{{ var.value.HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE }}",
+                "--feature-version",
+                "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}",
+                "--bronze-input-path",
+                _CLEANSING_BRONZE_INPUT_PATH,
+                "--quarantine-output-path",
+                _CLEANSING_QUARANTINE_OUTPUT_PATH,
+                "--road-segment-path",
+                _HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH,
+                "--output-path",
+                _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+            ],
         )
-        validate_sensor_processing = BashOperator(
+        # validate_sensor_processing은 run_sensor_processing이 방금 쓴
+        # hourly_segment_features/quarantine 파티션만 읽으므로, 같은 Airflow
+        # Variable(HOURLY_SEGMENT_FEATURE_OUTPUT_PATH, CLEANSING_QUARANTINE_OUTPUT_PATH)을
+        # 재사용해 항상 같은 경로를 가리키게 한다(#220, ADR-0004). GX가 통계적/
+        # 선언적 규칙(물리량 범위, quarantine 비율)을 검증하고 실패하면 이 task가
+        # 실패해 scoring으로 넘어가지 않는다(hard fail). 스키마/필수값/PK 중복 같은
+        # 하드 인바리언트는 run_sensor_processing이 쓰기 시점에 이미 강제하므로
+        # 여기서 다시 다루지 않는다.
+        validate_sensor_processing = submit_batch_jobs_command(
             task_id="validate_sensor_processing",
-            bash_command=_VALIDATE_SENSOR_PROCESSING_BASH_COMMAND,
+            entry_point_arguments=[
+                "validate-sensor-processing",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
+                "--output-path",
+                _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+                "--quarantine-output-path",
+                _CLEANSING_QUARANTINE_OUTPUT_PATH,
+            ],
         )
         run_sensor_processing >> validate_sensor_processing
 
     with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
-        run_hourly_scoring = BashOperator(
+        run_hourly_scoring = submit_batch_jobs_command(
             task_id="run_hourly_scoring",
-            bash_command=_RUN_HOURLY_SCORING_BASH_COMMAND,
+            entry_point_arguments=[
+                "score-hourly-comfort",
+                "--run-id",
+                "{{ run_id }}",
+                "--input-path",
+                _HOURLY_COMFORT_INPUT_PATH,
+                "--output-path",
+                _HOURLY_COMFORT_OUTPUT_PATH,
+                "--rejected-output-path",
+                _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
+            ],
         )
-        validate_hourly_scoring = BashOperator(
+        # validate_hourly_scoring은 run_hourly_scoring이 방금 overwrite한
+        # hourly_comfort_score 전체(풀 리컴퓨트 결과)를 읽으므로(#249, ADR-0004),
+        # 같은 Airflow Variable(HOURLY_COMFORT_OUTPUT_PATH)을 재사용해 항상 같은
+        # 경로를 가리키게 한다. sensor_processing과 달리 hour 파티션이 없어
+        # --target-hour는 필요 없다.
+        validate_hourly_scoring = submit_batch_jobs_command(
             task_id="validate_hourly_scoring",
-            bash_command=_VALIDATE_HOURLY_SCORING_BASH_COMMAND,
+            entry_point_arguments=[
+                "validate-hourly-scoring",
+                "--output-path",
+                _HOURLY_COMFORT_OUTPUT_PATH,
+            ],
         )
         run_hourly_scoring >> validate_hourly_scoring
 
     with TaskGroup(group_id="standard_score") as standard_score:
-        run_standard_score = BashOperator(
+        # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해
+        # PostgreSQL에 UPSERT한다. as_of는 `[as_of - window_hours, as_of)`
+        # 윈도우의 끝을 의미하므로, 방금 끝난 데이터 구간의 끝인
+        # data_interval_end를 쓴다. STANDARD_COMFORT_SCORE_*/POSTGRES_*는
+        # CLI 플래그가 없어(from_env() 전용) driver_env로 넘긴다.
+        run_standard_score = submit_batch_jobs_command(
             task_id="run_standard_score",
-            bash_command=_RUN_STANDARD_SCORE_BASH_COMMAND,
+            entry_point_arguments=[
+                "load-standard-segment-comfort-score",
+                "--as-of",
+                "{{ data_interval_end.isoformat() }}",
+            ],
+            driver_env={
+                **_POSTGRES_DRIVER_ENV,
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": (
+                    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', "
+                    "'data/local-lake') }}"
+                ),
+                "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
+                    "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
+                ),
+            },
         )
-        # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
-        # run_standard_score가 아니라 validate_standard_score에 둔다(#249).
-        validate_standard_score = BashOperator(
+        # validate_standard_score는 run_standard_score가 이번 실행에 UPSERT한
+        # 행만(score_as_of=as_of) Postgres에서 직접 조회해 검증한다(#249,
+        # ADR-0004: Gold/Postgres는 Spark가 아니라 SqlAlchemy 경로). 검증을
+        # 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
+        # run_standard_score가 아니라 여기 둔다(#249).
+        validate_standard_score = submit_batch_jobs_command(
             task_id="validate_standard_score",
-            bash_command=_VALIDATE_STANDARD_SCORE_BASH_COMMAND,
+            entry_point_arguments=[
+                "validate-standard-score",
+                "--as-of",
+                "{{ data_interval_end.isoformat() }}",
+            ],
+            driver_env=_POSTGRES_DRIVER_ENV,
             outlets=[STANDARD_SCORE_ASSET],
         )
         run_standard_score >> validate_standard_score

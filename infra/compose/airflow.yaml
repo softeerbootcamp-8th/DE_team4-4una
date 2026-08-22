@@ -4,34 +4,45 @@ x-airflow-env: &airflow-env
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
     AIRFLOW_HOME: ${AIRFLOW_HOME}
-    # hourly_pipeline의 sensor_processing task가 host에 batch-jobs 컨테이너를
-    # 직접 띄우기 위한 임시(로컬 전용) 배선. EMR Serverless 연결(ADR 0001,
-    # 후속 이슈) 시 HOST_PROJECT_DIR/BATCH_JOBS_IMAGE_TAG와 docker socket 마운트를
+    # standard_score_pipeline(#292)이 EMR Serverless Job Run에 넘길 Application
+    # ID·실행 역할 ARN·entry point. AIRFLOW_VAR_* 환경변수는 Airflow가 Variable로
+    # 자동 인식한다(DB에 따로 안 넣어도 됨) — entry point는 batch-jobs의 EMR
+    # Serverless 커스텀 이미지가 준비되기 전까지 플레이스홀더다.
+    AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID: ${AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID}
+    AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN: ${AIRFLOW_VAR_EMR_SERVERLESS_EXECUTION_ROLE_ARN}
+    AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT: ${AIRFLOW_VAR_BATCH_JOBS_EMR_ENTRY_POINT}
+    # sensor_processing task의 실행 설정(entry_point_arguments로 그대로 전달됨).
+    # target_hour와 run_id는 Airflow 실행 컨텍스트에서 직접 전달한다
+    # (standard_score_pipeline.py 참고).
+    AIRFLOW_VAR_CLEANSING_BRONZE_INPUT_PATH: ${AIRFLOW_VAR_CLEANSING_BRONZE_INPUT_PATH}
+    AIRFLOW_VAR_CLEANSING_QUARANTINE_OUTPUT_PATH: ${AIRFLOW_VAR_CLEANSING_QUARANTINE_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
+    AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_VERSION: ${AIRFLOW_VAR_HOURLY_SEGMENT_FEATURE_VERSION}
+    # hourly_scoring task가 쓰는 값. run_id는 여기 포함하지 않고
+    # Airflow의 `{{ run_id }}` 템플릿으로 직접 전달한다(standard_score_pipeline.py 참고).
+    AIRFLOW_VAR_HOURLY_COMFORT_INPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_INPUT_PATH}
+    AIRFLOW_VAR_HOURLY_COMFORT_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_OUTPUT_PATH}
+    AIRFLOW_VAR_HOURLY_COMFORT_REJECTED_OUTPUT_PATH: ${AIRFLOW_VAR_HOURLY_COMFORT_REJECTED_OUTPUT_PATH}
+    # standard_score task가 쓰는 값. as_of는 여기 포함하지 않고 Airflow의
+    # `{{ data_interval_end.isoformat() }}` 템플릿으로 직접 전달한다
+    # (standard_score_pipeline.py 참고). 이 값들은 CLI 플래그가 없어 EMR Serverless
+    # job의 driver_env(spark.emr-serverless.driverEnv.*)로 넘긴다 — POSTGRES_*는
+    # Job Run 설정에 평문으로 남는 임시 방편이다(#292 논의, Secrets Manager
+    # 도입 전까지).
+    AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI: ${AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI}
+    AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS: ${AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS}
+    AIRFLOW_VAR_POSTGRES_HOST: ${AIRFLOW_VAR_POSTGRES_HOST}
+    AIRFLOW_VAR_POSTGRES_PORT: ${AIRFLOW_VAR_POSTGRES_PORT}
+    AIRFLOW_VAR_POSTGRES_DB: ${AIRFLOW_VAR_POSTGRES_DB}
+    AIRFLOW_VAR_POSTGRES_USER: ${AIRFLOW_VAR_POSTGRES_USER}
+    AIRFLOW_VAR_POSTGRES_PASSWORD: ${AIRFLOW_VAR_POSTGRES_PASSWORD}
+    # data_quality_audit(#253)이 아직 docker-outside-of-docker로 도는 동안 쓰는
+    # 값 — #295에서 EMR Serverless로 옮기면 이 블록과 docker socket 마운트를
     # 통째로 제거한다.
     HOST_PROJECT_DIR: ${PWD}
     BATCH_JOBS_IMAGE_TAG: ${BATCH_JOBS_IMAGE_TAG}
-    CLEANSING_BRONZE_INPUT_PATH: ${CLEANSING_BRONZE_INPUT_PATH}
-    CLEANSING_QUARANTINE_OUTPUT_PATH: ${CLEANSING_QUARANTINE_OUTPUT_PATH}
-    CLEANSING_CONFIG_PATH: ${CLEANSING_CONFIG_PATH}
-    HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH: ${HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH}
-    HOURLY_SEGMENT_FEATURE_OUTPUT_PATH: ${HOURLY_SEGMENT_FEATURE_OUTPUT_PATH}
-    HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH: ${HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH}
-    HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH: ${HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH}
-    HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH: ${HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH}
-    # sensor_processing task의 필수 실행 설정. target_hour와 run_id는 Airflow 실행
-    # 컨텍스트에서 직접 전달한다(hourly_pipeline.py 참고).
-    HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
-    HOURLY_SEGMENT_FEATURE_VERSION: ${HOURLY_SEGMENT_FEATURE_VERSION}
-    # hourly_pipeline의 scoring task가 쓰는 값. run_id는 여기 포함하지 않고
-    # Airflow의 `{{ run_id }}` 템플릿으로 직접 전달한다(hourly_pipeline.py 참고).
-    HOURLY_COMFORT_INPUT_PATH: ${HOURLY_COMFORT_INPUT_PATH}
-    HOURLY_COMFORT_OUTPUT_PATH: ${HOURLY_COMFORT_OUTPUT_PATH}
-    HOURLY_COMFORT_REJECTED_OUTPUT_PATH: ${HOURLY_COMFORT_REJECTED_OUTPUT_PATH}
-    HOURLY_COMFORT_SCORING_CONFIG_PATH: ${HOURLY_COMFORT_SCORING_CONFIG_PATH}
-    # hourly_pipeline의 publish task가 쓰는 값. as_of는 여기 포함하지 않고
-    # Airflow의 `{{ data_interval_end.isoformat() }}` 템플릿으로 직접 전달한다
-    # (hourly_pipeline.py 참고). POSTGRES_*는 SegmentComfortScoreJobConfig.from_env()가
-    # 필수로 요구한다(빈 값이면 즉시 실패, 조용한 기본값 대체 없음).
     POSTGRES_HOST: ${POSTGRES_HOST}
     POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_DB: ${POSTGRES_DB}
