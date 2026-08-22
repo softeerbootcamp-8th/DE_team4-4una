@@ -256,21 +256,28 @@ jobs:
 
   # CI가 통과한 main 커밋만 배포한다.
   #
-  # 배포를 별도 워크플로로 두고 workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가
-  # 되어, main으로 제한한 OIDC trust policy와 어긋난다. 여기서 호출하면 main push
-  # 컨텍스트를 그대로 물려준다.
+  # 선택적 CI job(test, workspace)이 skipped되어도
+  # CI Passed가 성공했다면 deploy job은 실행한다.
   deploy-serving-api:
     needs: ci-passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-serving-api.yml
     permissions:
       contents: read
       id-token: write
     secrets: inherit
-  
+
   deploy-sensor-producer:
     needs: ci-passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-sensor-producer.yml
     permissions:
       contents: read
@@ -279,7 +286,11 @@ jobs:
 
   deploy-batch-jobs:
     needs: ci-passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-batch-jobs.yml
     permissions:
       contents: read
@@ -288,16 +299,24 @@ jobs:
 
   deploy-orchestration:
     needs: ci-passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-orchestration.yml
     permissions:
       contents: read
       id-token: write
     secrets: inherit
-  
+
   deploy-stream-processor:
     needs: ci-passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-stream-processor.yml
     permissions:
       contents: read
