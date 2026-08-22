@@ -17,6 +17,10 @@ dependencies = [
     # current_score_pipeline 행 단위 격리(#251)의 GX PandasExecutionEngine 검증에 쓴다.
     "great-expectations>=1.21.0",
     "pandas>=2.0.0",
+    # bronze_compaction(#271)이 s3:// 경로를 압축할 때 ObjectStore가 쓰는 실제 S3
+    # 클라이언트. de4-core도 이미 의존하지만, orchestration 자체 실행 환경(로컬
+    # pytest, Airflow 컨테이너)에도 명시적으로 선언한다.
+    "boto3>=1.40,<2.0",
 ]
 
 [dependency-groups]

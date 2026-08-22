@@ -180,3 +180,14 @@ acceleration, and discomfort flags first appear here with `scoring_version`.
 A Spark job derives stable features and a versioned score. Publication must be
 atomic at the score-period level so the API never serves a partially loaded
 monthly result.
+
+### Bronze compaction
+
+Bronze `zone_weather_snapshot` accumulates small files from its 15-minute writer. An
+independent, low-frequency `bronze_compaction` DAG (no outlets, does not block or gate
+other DAGs) merges same-partition objects once they are old enough that no further
+writes are expected, verifying row counts before discarding the originals.
+`sensor-events` was dropped from this DAG's scope after discovering that in-place
+compaction of a Structured Streaming FileStreamSink directory is unsafe (the sink's
+`_spark_metadata/` commit log would go stale); its backlog cleanup is deferred to a
+follow-up issue. See [ADR-0009](../docs/adr/0009-bronze-compaction-dag.md).
