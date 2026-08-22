@@ -1,10 +1,11 @@
 """standard_score_pipeline DAG의 구조를 docker 없이 검증하는 테스트.
 
-실제 task 실행(batch-jobs 컨테이너 기동)은 로컬 Airflow에서 수동으로 확인하고,
-여기서는 DAG가 정상 파싱되는지와 sensor_processing/hourly_scoring/
-standard_score TaskGroup의 골격이 의도대로 구성됐는지, current_score와 publish
-TaskGroup이 제거됐는지, standard_score에 STANDARD_SCORE_ASSET outlet이
-붙어 있는지를 확인한다(#229 ADR-0007, #227).
+실제 task 실행(EMR Serverless Job Run 제출)은 로컬 Airflow에서 수동으로
+확인하고(README 참고, Airflow의 EC2 이전 이후 별도 검증 — #292), 여기서는
+DAG가 정상 파싱되는지와 sensor_processing/hourly_scoring/standard_score
+TaskGroup의 골격이 의도대로 구성됐는지, 각 task가 EmrServerlessStartJobOperator로
+올바른 entry point arguments를 전달하는지, standard_score에 STANDARD_SCORE_ASSET
+outlet이 붙어 있는지를 확인한다(#229 ADR-0007, #227, #292 ADR-0001).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pendulum
+from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
@@ -23,8 +25,9 @@ DAG_PATH = (
 )
 
 # Airflow의 DagBag은 dags 폴더 자체를 sys.path에 넣어서 그 안의 sibling 모듈
-# (comfort_score_assets.py)을 top-level import로 가져올 수 있게 해준다. 여기서는
-# DagBag을 안 쓰고 파일을 직접 로드하므로, 같은 동작을 수동으로 재현한다.
+# (comfort_score_assets.py, emr_serverless.py)을 top-level import로 가져올 수
+# 있게 해준다. 여기서는 DagBag을 안 쓰고 파일을 직접 로드하므로, 같은 동작을
+# 수동으로 재현한다.
 _DAGS_DIR = str(DAG_PATH.parent)
 if _DAGS_DIR not in sys.path:
     sys.path.insert(0, _DAGS_DIR)
@@ -38,6 +41,15 @@ def _load_dag_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _entry_point_arguments(task) -> list[str]:
+    assert isinstance(task, EmrServerlessStartJobOperator)
+    return task.job_driver["sparkSubmit"]["entryPointArguments"]
+
+
+def _driver_env(task) -> str:
+    return task.job_driver["sparkSubmit"].get("sparkSubmitParameters", "")
 
 
 def test_dag_parses_with_expected_schedule():
@@ -79,6 +91,22 @@ def test_dag_preserves_retry_policy():
         assert task.retry_delay == datetime.timedelta(minutes=5)
 
 
+def test_all_tasks_submit_to_emr_serverless_with_the_shared_variables():
+    module = _load_dag_module()
+
+    for task in module.dag.tasks:
+        assert isinstance(task, EmrServerlessStartJobOperator)
+        assert task.application_id == "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
+        assert (
+            task.execution_role_arn
+            == "{{ var.value.EMR_SERVERLESS_EXECUTION_ROLE_ARN }}"
+        )
+        assert (
+            task.job_driver["sparkSubmit"]["entryPoint"]
+            == "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
+        )
+
+
 def test_sensor_processing_task_group_contains_the_combined_job_and_its_validation():
     module = _load_dag_module()
 
@@ -98,65 +126,70 @@ def test_hourly_scoring_task_group_contains_the_scoring_job_and_its_validation()
 def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     module = _load_dag_module()
 
-    run_sensor_processing = module.dag.get_task(
-        "sensor_processing.run_sensor_processing"
+    args = _entry_point_arguments(
+        module.dag.get_task("sensor_processing.run_sensor_processing")
     )
-    command = run_sensor_processing.bash_command
-    assert "cleanse-sensor-events" in command
-    assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
-    assert "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE" in command
-    assert "HOURLY_SEGMENT_FEATURE_VERSION" in command
-    assert "--bronze-input-path=" in command
-    assert "CLEANSING_BRONZE_INPUT_PATH" in command
-    assert "--quarantine-output-path=" in command
-    assert "CLEANSING_QUARANTINE_OUTPUT_PATH" in command
-    assert "--road-segment-path=" in command
-    assert "HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH" in command
-    assert "--output-path=" in command
-    assert "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH" in command
-    assert "-e CLEANSING_CONFIG_PATH" in command
-    assert "-e HOURLY_SEGMENT_FEATURE_EVENT_CONFIG_PATH" in command
-    assert "-e HOURLY_SEGMENT_FEATURE_STEERING_CONFIG_PATH" in command
-    assert "-e HOURLY_SEGMENT_FEATURE_MAP_MATCHING_CONFIG_PATH" in command
-    assert "--run-id='{{ run_id }}'" in command
-    assert "build-hourly-segment-features" not in command
-    assert "CLEANSING_SILVER_OUTPUT_PATH" not in command
-    assert "HOURLY_SEGMENT_FEATURE_INPUT_PATH" not in command
+    assert args[0] == "cleanse-sensor-events"
+    assert "--target-hour" in args
+    assert "{{ data_interval_start.isoformat() }}" in args
+    assert "--road-snapshot-date" in args
+    assert "{{ var.value.HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE }}" in args
+    assert "--feature-version" in args
+    assert "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}" in args
+    assert "--bronze-input-path" in args
+    assert "--quarantine-output-path" in args
+    assert "--road-segment-path" in args
+    assert "--output-path" in args
+    assert "--run-id" in args
+    assert "{{ run_id }}" in args
 
 
 def test_validate_sensor_processing_invokes_gx_validation_with_matching_paths():
     module = _load_dag_module()
 
-    validate_sensor_processing = module.dag.get_task(
-        "sensor_processing.validate_sensor_processing"
+    args = _entry_point_arguments(
+        module.dag.get_task("sensor_processing.validate_sensor_processing")
     )
-    command = validate_sensor_processing.bash_command
-    assert "validate-sensor-processing" in command
-    assert "--target-hour='{{ data_interval_start.isoformat() }}'" in command
-    # run_sensor_processing과 같은 env var를 참조해야 같은 파티션을 가리킨다.
-    assert "--output-path=" in command
-    assert "HOURLY_SEGMENT_FEATURE_OUTPUT_PATH" in command
-    assert "--quarantine-output-path=" in command
-    assert "CLEANSING_QUARANTINE_OUTPUT_PATH" in command
+    assert args[0] == "validate-sensor-processing"
+    assert "--target-hour" in args
+    assert "{{ data_interval_start.isoformat() }}" in args
+    # run_sensor_processing과 같은 Variable을 참조해야 같은 파티션을 가리킨다.
+    run_args = _entry_point_arguments(
+        module.dag.get_task("sensor_processing.run_sensor_processing")
+    )
+    assert args[args.index("--output-path") + 1] == run_args[
+        run_args.index("--output-path") + 1
+    ]
+    assert args[args.index("--quarantine-output-path") + 1] == run_args[
+        run_args.index("--quarantine-output-path") + 1
+    ]
 
 
 def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id():
     module = _load_dag_module()
 
-    run_hourly_scoring = module.dag.get_task("hourly_scoring.run_hourly_scoring")
-    assert "score-hourly-comfort" in run_hourly_scoring.bash_command
-    assert "--run-id={{ run_id }}" in run_hourly_scoring.bash_command
+    args = _entry_point_arguments(
+        module.dag.get_task("hourly_scoring.run_hourly_scoring")
+    )
+    assert args[0] == "score-hourly-comfort"
+    assert "--run-id" in args
+    assert "{{ run_id }}" in args
 
 
 def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path():
     module = _load_dag_module()
 
-    validate_hourly_scoring = module.dag.get_task("hourly_scoring.validate_hourly_scoring")
-    command = validate_hourly_scoring.bash_command
-    assert "validate-hourly-scoring" in command
-    # run_hourly_scoring과 같은 env var를 참조해야 같은 output을 가리킨다.
-    assert "--output-path=" in command
-    assert "HOURLY_COMFORT_OUTPUT_PATH" in command
+    args = _entry_point_arguments(
+        module.dag.get_task("hourly_scoring.validate_hourly_scoring")
+    )
+    assert args[0] == "validate-hourly-scoring"
+    run_args = _entry_point_arguments(
+        module.dag.get_task("hourly_scoring.run_hourly_scoring")
+    )
+    # run_hourly_scoring과 같은 Variable을 참조해야 같은 output을 가리킨다.
+    assert args[args.index("--output-path") + 1] == run_args[
+        run_args.index("--output-path") + 1
+    ]
 
 
 def test_dag_contains_expected_pipeline_tasks_so_far():
@@ -230,22 +263,27 @@ def test_task_groups_follow_standard_score_pipeline_order():
 def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     module = _load_dag_module()
 
-    command = module.dag.get_task("standard_score.run_standard_score").bash_command
+    task = module.dag.get_task("standard_score.run_standard_score")
+    args = _entry_point_arguments(task)
 
-    assert "load-standard-segment-comfort-score" in command
-    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
-    assert "STANDARD_COMFORT_SCORE_DATA_LAKE_URI" in command
-    assert "POSTGRES_PASSWORD" in command
+    assert args[0] == "load-standard-segment-comfort-score"
+    assert "--as-of" in args
+    assert "{{ data_interval_end.isoformat() }}" in args
+    driver_env = _driver_env(task)
+    assert "STANDARD_COMFORT_SCORE_DATA_LAKE_URI" in driver_env
+    assert "POSTGRES_PASSWORD" in driver_env
 
 
 def test_validate_standard_score_invokes_gx_validation_with_templated_as_of():
     module = _load_dag_module()
 
-    command = module.dag.get_task("standard_score.validate_standard_score").bash_command
+    task = module.dag.get_task("standard_score.validate_standard_score")
+    args = _entry_point_arguments(task)
 
-    assert "validate-standard-score" in command
-    assert "--as-of='{{ data_interval_end.isoformat() }}'" in command
-    assert "POSTGRES_PASSWORD" in command
+    assert args[0] == "validate-standard-score"
+    assert "--as-of" in args
+    assert "{{ data_interval_end.isoformat() }}" in args
+    assert "POSTGRES_PASSWORD" in _driver_env(task)
 
 
 def test_run_standard_score_does_not_emit_standard_score_asset():

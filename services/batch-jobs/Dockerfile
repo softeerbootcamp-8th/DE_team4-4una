@@ -1,15 +1,40 @@
-FROM python:3.12-slim
+FROM public.ecr.aws/emr-serverless/spark4/emr-spark-8.0.0:latest
 
-# pyspark 4.x는 JVM(Java 17+)이 필요하다. python:3.12-slim은 기본적으로 Java가 없어
-# 이게 빠지면 컨테이너 안에서 SparkSession 생성 시 JAVA_GATEWAY_EXITED로 실패한다.
-# python:3.12-slim 베이스(Debian trixie)에는 openjdk-17 패키지가 없어 21을 쓴다.
-RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
-    && rm -rf /var/lib/apt/lists/*
+USER root
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+# uv 설치
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /usr/local/bin/
+
 WORKDIR /app
 COPY . .
 
-RUN uv sync --locked --package batch-jobs --no-dev --no-editable
+# Batch Jobs의 외부 의존성 설치
+# pyspark/py4j는 EMR Serverless 기본 제공 버전을 사용한다.
+RUN uv export \
+    --frozen \
+    --package batch-jobs \
+    --no-dev \
+    --no-emit-project \
+    --no-emit-package de4-core \
+    --no-emit-package pyspark \
+    --no-emit-package py4j \
+    -o /tmp/batch-jobs-requirements.txt \
+    && uv pip install \
+        --system \
+        --python /usr/bin/python3.12 \
+        -r /tmp/batch-jobs-requirements.txt \
+    && uv pip install \
+        --system \
+        --python /usr/bin/python3.12 \
+        --no-deps \
+        ./libs/de4-core \
+        ./services/batch-jobs \
+    && rm -f /tmp/batch-jobs-requirements.txt
 
-CMD ["uv", "run", "--no-sync", "--package", "batch-jobs", "batch-jobs"]
+# PostgreSQL JDBC Driver
+RUN curl -fL \
+    https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar \
+    -o "${SPARK_HOME}/jars/postgresql-42.7.4.jar"
+
+# EMR Serverless는 hadoop 사용자로 실행
+USER hadoop:hadoop

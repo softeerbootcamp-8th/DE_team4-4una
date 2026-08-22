@@ -21,6 +21,9 @@ dependencies = [
     # 클라이언트. de4-core도 이미 의존하지만, orchestration 자체 실행 환경(로컬
     # pytest, Airflow 컨테이너)에도 명시적으로 선언한다.
     "boto3>=1.40,<2.0",
+    # standard_score_pipeline/data_quality_audit(#292, #295)이 EMR Serverless에
+    # Job Run을 제출하는 EmrServerlessStartJobOperator를 여기서 가져온다(ADR-0001).
+    "apache-airflow-providers-amazon>=9.0.0,<10.0.0",
 ]
 
 [dependency-groups]
