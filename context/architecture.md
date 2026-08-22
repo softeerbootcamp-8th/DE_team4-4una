@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 ---
 
 # Target Architecture
@@ -211,11 +211,27 @@ code (`terraform/envs/` is currently empty) — it is a manual prerequisite
 documented in `infra/monitoring/README.md`, not something this diagram or
 ADR-0010 settles.
 
-Grafana auto-provisions a `Project Infrastructure` dashboard
-(`infra/monitoring/grafana/dashboards/project-infrastructure.json`, registered
-through `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml`)
-covering Project EC2 host metrics (CPU/memory/disk/network from
-`node_exporter`) and per-container CPU/memory/network (from cAdvisor). The
-dashboard JSON is the source of truth (`allowUiUpdates: false`); manual
-Grafana UI edits are not persisted. Alerting and metrics for the other
-services (Kafka, Spark, Airflow, `serving-api`) remain outside this scope.
+Grafana auto-provisions three dashboards from the same `Infrastructure`
+provider (file-based, reads every JSON under
+`infra/monitoring/grafana/dashboards/`): `Project Infrastructure`
+(`project-infrastructure.json`, Project EC2 host metrics from `node_exporter`
+and per-container metrics from cAdvisor), `Serving API`
+(`serving-api.json`, HTTP request rate/status/latency from
+`serving_api.metrics` — a dedicated metrics port, `SERVING_API_METRICS_PORT`
+default `9101`, separate from the API port so `/metrics` never joins the
+public API surface), and `Kafka` (`kafka.json`, broker/topic/consumer-group
+metrics from a `danielqsj/kafka-exporter` sidecar reading the broker's
+`localhost:9092`). Every dashboard JSON is the source of truth
+(`allowUiUpdates: false` in `dashboards.yml`); manual Grafana UI edits are not
+persisted.
+
+Kafka clients that run as separate Project EC2 containers — `sensor-producer`,
+`stream-processor`, and now `kafka-exporter` — all use `network_mode: host`
+and connect to `localhost:9092` rather than a compose network hostname like
+`kafka:9092`. On the default bridge network, a client container's own
+`localhost` refers to itself, not the sibling `kafka` container, so a
+same-network hostname connection fails past the initial bootstrap request.
+This was discovered and fixed independently for `sensor-producer` (issue
+#316) and `stream-processor` (issue #323); `kafka-exporter` follows the same
+pattern for consistency. Alerting and metrics for the remaining services
+(Spark, Airflow) remain outside this scope.
