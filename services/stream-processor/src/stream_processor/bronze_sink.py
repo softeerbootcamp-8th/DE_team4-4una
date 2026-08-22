@@ -1,4 +1,4 @@
-"""Prepare Kafka records and persist them to the local Bronze Parquet sink."""
+"""Prepare Kafka records and persist them to a Bronze Parquet sink."""
 
 from __future__ import annotations
 
@@ -9,32 +9,55 @@ from pyspark.sql.streaming import StreamingQuery
 from stream_processor.config import StreamConfig
 from stream_processor.schemas import SENSOR_EVENT_VALUE_SCHEMA
 
+EVENT_DATE_PARTITION = "event_date"
+EVENT_HOUR_PARTITION = "hour"
 
-def add_ingestion_time_to_value(
+
+def prepare_bronze_records(
     records: DataFrame,
     ingestion_time: Column | None = None,
 ) -> DataFrame:
-    """Add the Spark-owned Bronze load time inside each valid JSON value."""
-    # 적재 시각은 Producer가 아닌 Bronze sink 실행 시점에 생성한다.
+    """Add Bronze load metadata and UTC event-time partition columns."""
     loaded_at = ingestion_time if ingestion_time is not None else F.current_timestamp()
-    # value를 구조체로 변환해 센서 필드와 같은 레벨에 적재 시각을 추가한다.
     parsed = F.from_json("value", SENSOR_EVENT_VALUE_SCHEMA)
+    source_timestamp = F.col("timestamp") if "timestamp" in records.columns else loaded_at
+    # 정상 이벤트는 센서 측정 시각으로 나누고, 파싱 불가 원문은 Kafka 시각으로 보존한다
+    partition_time = F.coalesce(
+        F.try_to_timestamp(parsed["event_time"]),
+        source_timestamp,
+        loaded_at,
+    )
     enriched = F.struct(
         *(parsed[field.name].alias(field.name) for field in SENSOR_EVENT_VALUE_SCHEMA),
         loaded_at.alias("_ingested_at"),
     )
     enriched_json = F.to_json(enriched, options={"ignoreNullFields": "false"})
 
-    # 파싱 불가능한 원문은 손상시키지 않고 후속 quarantine 처리를 위해 그대로 둔다.
-    return records.withColumn(
-        "value",
-        F.when(F.try_parse_json("value").isNotNull(), enriched_json).otherwise(F.col("value")),
+    return (
+        records.withColumn(
+            "value",
+            F.when(F.try_parse_json("value").isNotNull(), enriched_json).otherwise(
+                F.col("value")
+            ),
+        )
+        .withColumn(EVENT_DATE_PARTITION, F.to_date(partition_time))
+        .withColumn(EVENT_HOUR_PARTITION, F.date_format(partition_time, "HH"))
+    )
+
+
+def add_ingestion_time_to_value(
+    records: DataFrame,
+    ingestion_time: Column | None = None,
+) -> DataFrame:
+    """Add the Spark-owned Bronze load time inside each valid JSON value."""
+    return prepare_bronze_records(records, ingestion_time).drop(
+        EVENT_DATE_PARTITION, EVENT_HOUR_PARTITION
     )
 
 
 def write_bronze_stream(records: DataFrame, config: StreamConfig) -> StreamingQuery:
-    """Start the append-only local Parquet sink with a dedicated checkpoint."""
-    bronze_records = add_ingestion_time_to_value(records)
+    """Start the append-only partitioned Parquet sink with a checkpoint."""
+    bronze_records = prepare_bronze_records(records)
     # Kafka partition마다 task가 하나씩 생겨 그대로 쓰면 배치당 파일이 partition 수만큼
     # 쏟아진다. trigger를 키워도 이걸 안 하면 파일 크기는 그대로라 쓰기 직전에 합친다.
     bronze_records = bronze_records.coalesce(config.bronze_output_partitions)
@@ -44,6 +67,7 @@ def write_bronze_stream(records: DataFrame, config: StreamConfig) -> StreamingQu
         .outputMode("append")
         .option("path", config.bronze_output_path)
         .option("checkpointLocation", config.bronze_checkpoint_location)
+        .partitionBy(EVENT_DATE_PARTITION, EVENT_HOUR_PARTITION)
         .trigger(processingTime=f"{config.trigger_interval_seconds} seconds")
         .start()
     )

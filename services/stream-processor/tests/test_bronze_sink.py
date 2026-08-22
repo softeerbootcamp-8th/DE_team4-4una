@@ -15,6 +15,7 @@ from pyspark.sql.types import (
 )
 from stream_processor.bronze_sink import (
     add_ingestion_time_to_value,
+    prepare_bronze_records,
     write_bronze_stream,
 )
 from stream_processor.config import StreamConfig
@@ -96,6 +97,39 @@ def test_malformed_value_is_preserved_for_later_quarantine(spark) -> None:
     assert result.value == '{"event_id":'
 
 
+def test_partition_columns_use_event_time_before_kafka_timestamp(spark) -> None:
+    records = spark.createDataFrame(
+        [
+            Row(
+                value=json.dumps(SENSOR_VALUE),
+                timestamp=datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+            )
+        ]
+    )
+
+    result = prepare_bronze_records(records).collect()[0]
+
+    assert str(result.event_date) == "2026-08-14"
+    assert result.hour == "05"
+
+
+def test_malformed_value_uses_kafka_timestamp_for_partition(spark) -> None:
+    records = spark.createDataFrame(
+        [
+            Row(
+                value='{"event_id":',
+                timestamp=datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+            )
+        ]
+    )
+
+    result = prepare_bronze_records(records).collect()[0]
+
+    assert result.value == '{"event_id":'
+    assert str(result.event_date) == "2026-08-15"
+    assert result.hour == "10"
+
+
 def test_parquet_sink_resumes_from_checkpoint_without_rewriting_input(spark, tmp_path) -> None:
     input_path = tmp_path / "input"
     output_path = tmp_path / "bronze"
@@ -142,7 +176,10 @@ def test_parquet_sink_resumes_from_checkpoint_without_rewriting_input(spark, tmp
         "partition",
         "offset",
         "timestamp",
+        "event_date",
+        "hour",
     ]
+    assert (output_path / "event_date=2026-08-14" / "hour=05").is_dir()
 
 
 def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -> None:
@@ -183,5 +220,5 @@ def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -
         spark.conf.unset("spark.sql.files.openCostInBytes")
 
     assert config.bronze_output_partitions == 1
-    assert len(list(output_path.glob("*.parquet"))) == 1
+    assert len(list(output_path.rglob("*.parquet"))) == 1
     assert spark.read.parquet(str(output_path)).count() == 5

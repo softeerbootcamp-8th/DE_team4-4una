@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 ---
 
 # Table Schema Catalog
@@ -209,7 +209,8 @@ version.
 | Trip ID | `trip_id` | Generated | STRING | N |  | Simulated journey identifier |
 | Trip sequence | `trip_seq` | Generated | BIGINT | N |  | Zero-based sample order within a trip |
 | Event time | `event_time` | Generated | TIMESTAMP | N |  | Sensor measurement time |
-| Event date | `event_date` | Derived from `event_time` | DATE | N | Partition key | S3 daily partitioning and period queries |
+| Event date | `event_date` | Derived from `event_time` | DATE | N | Partition key | UTC S3 daily partitioning and period queries |
+| Event hour | `hour` | Derived from `event_time` | STRING | N | Partition key | UTC hour (`00` through `23`) |
 | Latitude | `latitude` | Generated | DOUBLE | N |  | GPS latitude |
 | Longitude | `longitude` | Generated | DOUBLE | N |  | GPS longitude |
 | Speed | `speed_mps` | Generated | DOUBLE | N |  | Meters per second |
@@ -225,6 +226,12 @@ version.
 | Steering angle | `steering_angle` | Generated | DOUBLE | Y |  | Steering-wheel angle in degrees; left (−) / right (+) |
 | Ingested time | `_ingested_at` | Derived | TIMESTAMP | N |  | Bronze load time |
 | Run ID | `_run_id` | Derived | STRING | N |  | Simulation and ingestion run identifier |
+
+The Stream Processor stores Kafka envelopes under
+`event_date=YYYY-MM-DD/hour=HH/`. These physical partition columns remain
+outside the sensor `value` JSON and are reconstructed by Spark when the
+partitioned dataset is read. An unparseable payload falls back to its Kafka
+record timestamp so the raw record remains available for cleansing quarantine.
 
 `event_id` is the declared primary key. `(trip_id, trip_seq)` is the proposed
 deterministic idempotency and ordering key, subject to the multi-vehicle trip-ID

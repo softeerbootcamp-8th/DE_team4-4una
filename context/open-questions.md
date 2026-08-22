@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 ---
 
 # Open Questions and Decision Register
@@ -15,7 +15,7 @@ ADR when the choice affects multiple components.
 | ID | Question | Why it matters | Status |
 | --- | --- | --- | --- |
 | OQ-001 | Are LION IDs or Street Pavement Rating IDs canonical? | Resolved: LION source `SegmentID`, stored as `segment_id`, is canonical | Accepted 2026-08-10 |
-| OQ-002 | Which S3 file/table format and local development access pattern will be used? | S3 is confirmed for Bronze, but Spark read/write and local execution still depend on these choices (ADR-0009 adds a Parquet-preserving compaction maintenance DAG on top of the existing assumption, without settling the format itself) | Open |
+| OQ-002 | Which S3 file/table format and local development access pattern will be used? | The prototype writes Kafka envelopes as Parquet through Spark S3A and partitions them by UTC `event_date/hour`; local paths use the same Parquet sink. A production table format/catalog policy remains undecided (ADR-0009 only adds Parquet-preserving compaction). | Prototype implemented 2026-08-22; production policy remains open |
 | OQ-003 | Which Kafka implementation, topics, partitions, and serialization format will be used locally? | Prototype uses Apache Kafka 4.3.1, configurable topic, trip-ID key, and JSON values; production partition count remains open | Prototype accepted 2026-08-10 |
 | OQ-004 | Which database will serve latest scores? | Controls gold loading, indexing, and API implementation | Open |
 | OQ-005 | Which routing engine or algorithm will operate on the canonical segment network? | Prototype uses deterministic Dijkstra routing over directed LION nodes and SegmentIDs | Prototype accepted 2026-08-10 |
