@@ -294,3 +294,12 @@ jobs:
       contents: read
       id-token: write
     secrets: inherit
+  
+  deploy-stream-processor:
+    needs: ci-passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-stream-processor.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
