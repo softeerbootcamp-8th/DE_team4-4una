@@ -211,7 +211,7 @@ code (`terraform/envs/` is currently empty) — it is a manual prerequisite
 documented in `infra/monitoring/README.md`, not something this diagram or
 ADR-0010 settles.
 
-Grafana auto-provisions three dashboards from the same `Infrastructure`
+Grafana auto-provisions four dashboards from the same `Infrastructure`
 provider (file-based, reads every JSON under
 `infra/monitoring/grafana/dashboards/`): `Project Infrastructure`
 (`project-infrastructure.json`, Project EC2 host metrics from `node_exporter`
@@ -219,19 +219,38 @@ and per-container metrics from cAdvisor), `Serving API`
 (`serving-api.json`, HTTP request rate/status/latency from
 `serving_api.metrics` — a dedicated metrics port, `SERVING_API_METRICS_PORT`
 default `9101`, separate from the API port so `/metrics` never joins the
-public API surface), and `Kafka` (`kafka.json`, broker/topic/consumer-group
+public API surface), `Kafka` (`kafka.json`, broker/topic/consumer-group
 metrics from a `danielqsj/kafka-exporter` sidecar reading the broker's
-`localhost:9092`). Every dashboard JSON is the source of truth
-(`allowUiUpdates: false` in `dashboards.yml`); manual Grafana UI edits are not
-persisted.
+`localhost:9092`), and `Airflow` (`airflow.json`, scheduler/dag-processor
+heartbeats, task and DAG-run state and duration). Every dashboard JSON is the
+source of truth (`allowUiUpdates: false` in `dashboards.yml`); manual Grafana
+UI edits are not persisted.
 
 Kafka clients that run as separate Project EC2 containers — `sensor-producer`,
-`stream-processor`, and now `kafka-exporter` — all use `network_mode: host`
+`stream-processor`, and `kafka-exporter` — all use `network_mode: host`
 and connect to `localhost:9092` rather than a compose network hostname like
 `kafka:9092`. On the default bridge network, a client container's own
 `localhost` refers to itself, not the sibling `kafka` container, so a
 same-network hostname connection fails past the initial bootstrap request.
 This was discovered and fixed independently for `sensor-producer` (issue
 #316) and `stream-processor` (issue #323); `kafka-exporter` follows the same
-pattern for consistency. Alerting and metrics for the remaining services
-(Spark, Airflow) remain outside this scope.
+pattern for consistency.
+
+Airflow does not expose `/metrics` itself. `infra/compose/airflow.yaml` adds
+an `airflow-statsd-exporter` sidecar (`prom/statsd-exporter`) on the same
+`de4-local` compose network as the Airflow components — no host-networking
+workaround is needed here, since StatsD is a one-way UDP send from Airflow to
+the exporter's service-name hostname, not a request/response protocol where
+the broker's self-reported address matters. Airflow is configured for
+DogStatsD-tagged StatsD (`statsd_datadog_enabled`) so `dag_id`/`task_id`
+survive as Prometheus labels instead of being baked into legacy dotted metric
+names; that code path needs the separate `datadog` PyPI package (not the
+`apache-airflow[statsd]` extra's `statsd` package), installed via
+`_PIP_ADDITIONAL_REQUIREMENTS` like the service's other non-image
+dependencies. A small `statsd_exporter` mapping
+(`infra/monitoring/statsd/airflow-mapping.yml`) converts exactly the three
+Airflow timer metrics the dashboard uses into Prometheus histograms, because
+the exporter's default (a fixed-quantile Summary) can't produce a p95.
+
+Alerting and metrics for the remaining services (Spark) remain outside this
+scope.

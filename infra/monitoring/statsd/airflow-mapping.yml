@@ -1,0 +1,28 @@
+# statsd_exporter는 매핑 없이도 모든 metric을 노출하지만(dot -> underscore, DogStatsD
+# tag는 자동 label), timer는 기본값이 고정 분위수(0.5/0.9/0.99) Summary라 p95를 못
+# 구한다. 그래서 Airflow 공식 문서에 실제 있는 timer 3개만 histogram으로 바꾼다.
+# AIRFLOW__METRICS__STATSD_PREFIX=airflow라 wire 이름은 "airflow."로 시작한다.
+#
+# Airflow는 StatsD timer(|ms)로 값을 보내지만, statsd_exporter가 노출 시 자동으로
+# seconds로 변환한다 — 그래서 metric 이름과 bucket 모두 seconds 기준이고, 별도
+# scale 변환을 추가하지 않는다.
+mappings:
+  - match: "airflow.task.duration"
+    name: "airflow_task_duration_seconds"
+    observer_type: histogram
+    histogram_options:
+      # 1초~30분. 실제 분포를 보고 나중에 조정할 수 있다.
+      buckets: [1, 5, 15, 30, 60, 120, 300, 600, 900, 1800]
+
+  - match: "airflow.dagrun.duration.success"
+    name: "airflow_dagrun_duration_success_seconds"
+    observer_type: histogram
+    histogram_options:
+      # 30초~2시간. DAG run은 task보다 오래 걸릴 수 있어 상한을 더 넓게 잡았다.
+      buckets: [30, 60, 120, 300, 600, 900, 1800, 3600, 7200]
+
+  - match: "airflow.dagrun.duration.failed"
+    name: "airflow_dagrun_duration_failed_seconds"
+    observer_type: histogram
+    histogram_options:
+      buckets: [30, 60, 120, 300, 600, 900, 1800, 3600, 7200]

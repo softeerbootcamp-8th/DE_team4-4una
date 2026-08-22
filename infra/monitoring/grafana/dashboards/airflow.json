@@ -1,0 +1,516 @@
+{
+  "id": null,
+  "uid": "airflow",
+  "title": "Airflow",
+  "tags": ["airflow", "monitoring"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Target Status",
+      "description": "statsd_exporter가 살아있는지만 본다. scheduler/dag-processor가 실제로 metric을 보내는지는 아래 Heartbeat 패널로 확인한다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "up{job=\"airflow\"}",
+          "legendFormat": "{{job}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red", "index": 0 },
+                "1": { "text": "UP", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Scheduler Heartbeat",
+      "description": "최근 5분간 scheduler_heartbeat 증가량. 0이면 scheduler가 metric을 안 보내고 있다는 뜻 — 컨테이너가 죽었거나 exporter로 가는 UDP가 막혔을 수 있다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(increase(airflow_scheduler_heartbeat{job=\"airflow\"}[5m]))",
+          "legendFormat": "heartbeats",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DAG Processor Heartbeat",
+      "description": "최근 5분간 dag_processor_heartbeat 증가량. 0이면 dag-processor가 죽었거나 metric이 안 오고 있다는 뜻이다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 8, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(increase(airflow_dag_processor_heartbeat{job=\"airflow\"}[5m]))",
+          "legendFormat": "heartbeats",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "DAG Import Errors",
+      "description": "0이 정상이다. DAG 파일이 파싱 에러가 있으면 dag-processor가 이 값을 올린다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 16, "y": 5, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "airflow_dag_processing_import_errors{job=\"airflow\"}",
+          "legendFormat": "import errors",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "DAG / Task State",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Running DAG Runs",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(airflow_scheduler_dagruns_running{job=\"airflow\"})",
+          "legendFormat": "running dagruns",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Scheduled Tasks",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 6, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(airflow_ti_scheduled{job=\"airflow\"})",
+          "legendFormat": "scheduled",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Queued Tasks",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 12, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(airflow_ti_queued{job=\"airflow\"})",
+          "legendFormat": "queued",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Running Tasks",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 18, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(airflow_ti_running{job=\"airflow\"})",
+          "legendFormat": "running",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "Task Result",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Task Success Rate",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 15, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(airflow_ti_successes{job=\"airflow\"}[5m]))",
+          "legendFormat": "successes/sec",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "fixedColor": "green", "mode": "fixed" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Task Failure Rate",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 12, "y": 15, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
+          "legendFormat": "failures/sec",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "fixedColor": "red", "mode": "fixed" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Failures by DAG",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (dag_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
+          "legendFormat": "{{dag_id}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Failures by Task",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (dag_id, task_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
+          "legendFormat": "{{dag_id}}/{{task_id}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 103,
+      "type": "row",
+      "title": "Duration",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Task Duration",
+      "description": "airflow_task_duration_seconds는 statsd/airflow-mapping.yml로 histogram으로 바꾼 metric이다(기본값은 Summary라 p95를 못 구함). Airflow는 StatsD timer(|ms)로 보내지만 statsd_exporter가 노출 시 seconds로 자동 변환한다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 36, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(airflow_task_duration_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(airflow_task_duration_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(airflow_task_duration_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "DAG Run Success Duration",
+      "description": "성공한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 44, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(airflow_dagrun_duration_success_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(airflow_dagrun_duration_success_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(airflow_dagrun_duration_success_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "DAG Run Failed Duration",
+      "description": "실패한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 52, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(airflow_dagrun_duration_failed_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(airflow_dagrun_duration_failed_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(airflow_dagrun_duration_failed_seconds_bucket{job=\"airflow\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    }
+  ]
+}
