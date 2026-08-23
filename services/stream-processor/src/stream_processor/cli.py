@@ -10,18 +10,23 @@ from pathlib import Path
 from threading import Event
 
 import pyspark
+from prometheus_client import start_http_server
 from pyspark.sql import SparkSession
 from pyspark.sql.streaming import StreamingQuery
 
 from stream_processor.bronze_sink import write_bronze_stream
 from stream_processor.config import StreamConfig
 from stream_processor.kafka_source import read_kafka_stream
+from stream_processor.metrics import StreamMetrics
 from stream_processor.progress import ProgressLogger
 
 # Kafka 커넥터는 pip 패키지가 아니라 Maven jar라서, 최초 실행 시 이 좌표로 내려받는다.
 # pyspark 버전과 정확히 맞아야 해서 하드코딩 대신 설치된 버전을 그대로 사용한다.
 KAFKA_PACKAGE = f"org.apache.spark:spark-sql-kafka-0-10_2.13:{pyspark.__version__}"
 _HADOOP_CLIENT_JAR = re.compile(r"hadoop-client-api-(?P<version>[0-9.]+)\.jar$")
+
+# Prometheus metrics 노출 포트. Serving API의 9101과 겹치지 않게 잡았다.
+DEFAULT_METRICS_PORT = 9103
 
 
 def bundled_hadoop_version() -> str:
@@ -81,8 +86,13 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     config = StreamConfig.from_env()
+
+    metrics = StreamMetrics()
+    metrics_port = int(os.getenv("STREAM_METRICS_PORT", str(DEFAULT_METRICS_PORT)))
+    start_http_server(metrics_port, registry=metrics.registry)
+
     spark = build_spark_session()
-    spark.streams.addListener(ProgressLogger())
+    spark.streams.addListener(ProgressLogger(metrics=metrics))
 
     stream_df = read_kafka_stream(spark, config)
     query = write_bronze_stream(stream_df, config)

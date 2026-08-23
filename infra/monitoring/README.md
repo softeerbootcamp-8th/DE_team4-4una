@@ -9,18 +9,27 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
 [Project EC2]                                   [Monitoring EC2]
 - node_exporter    :9100  --- private VPC --->   - Prometheus (scrape)
 - cAdvisor         :8081  --- private VPC --->     127.0.0.1:9090 (host 내부 전용)
-- Serving API      :8000                         - Grafana :3000 (Prometheus를 datasource로 사용)
-- API metrics      :9101  --- private VPC --->
+- Serving API      :8000                         - Grafana :3000 (Prometheus/CloudWatch를
+- API metrics      :9101  --- private VPC --->                    datasource로 사용)
 - Kafka            :9092  (Project EC2 안에서만 접근)
 - Kafka Exporter   :9308  --- private VPC --->
 - Airflow (scheduler/dag-processor/api-server)
     ↓ StatsD UDP 9125 (de4-local 네트워크 내부)
 - StatsD Exporter  :9102  --- private VPC --->
+- Stream Processor
+  metrics           :9103  --- private VPC --->
+
+[EMR Serverless] --- CloudWatch API (AWS) ---> Grafana (CloudWatch datasource, IAM Role)
 ```
 
 - Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100),
   cAdvisor(8081), Serving API 애플리케이션 metrics(9101), Kafka Exporter
-  metrics(9308), StatsD Exporter를 통한 Airflow metrics(9102)를 scrape한다.
+  metrics(9308), StatsD Exporter를 통한 Airflow metrics(9102), Stream
+  Processor(Spark Structured Streaming) metrics(9103)를 scrape한다.
+- EMR Serverless는 Project EC2와 별개로 AWS가 관리하는 서비스라 scrape 대상이
+  아니다. Grafana가 CloudWatch datasource로 CloudWatch API를 직접 조회한다.
+  자세한 내용은 아래 [EMR Serverless dashboard 지표](#emr-serverless-dashboard-지표)
+  참고.
 - Serving API는 요청을 처리하는 API port(8000)와 metrics를 노출하는
   port(9101)를 분리한다 — `/metrics`가 공개 API 표면에 섞이지 않는다.
 - Kafka Exporter는 Kafka broker(9092) 자체를 외부에 새로 공개하지 않고,
@@ -55,11 +64,41 @@ Project EC2 Security Group (inbound):
 | 9101 | TCP | Monitoring EC2 Security Group |
 | 9308 | TCP | Monitoring EC2 Security Group |
 | 9102 | TCP | Monitoring EC2 Security Group |
+| 9103 | TCP | Monitoring EC2 Security Group |
 
 Kafka broker(9092)는 Monitoring EC2에 새로 공개할 필요가 없다 — Kafka
 Exporter가 Project EC2 안에서 `localhost:9092`로 붙어 9308로 metrics를
 대신 노출한다. StatsD UDP 9125도 마찬가지로 Docker network(`de4-local`)
 내부 통신에만 쓰이므로 Security Group에 열 필요가 없다.
+
+### EMR Serverless / CloudWatch datasource 사전 준비
+
+CloudWatch datasource는 `authType: default`를 쓴다 — Access Key/Secret Key를
+`cloudwatch.yml`이나 `.env`에 넣지 않고, Monitoring EC2에 IAM Role(instance
+profile)을 붙여 자격증명을 받는다. 이 Role에는 최소한 다음 권한이 필요하다
+(EMR Serverless CloudWatch metric 조회 전용이면 `cloudwatch:GetMetricData`,
+`cloudwatch:ListMetrics`, `cloudwatch:GetMetricStatistics`로 충분하다).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+이 Role/instance profile 생성은 이번 작업 범위에서 실제로 적용하지 않았다
+(Terraform에 Monitoring EC2 리소스 자체가 없다) — Monitoring EC2를 실제
+운영할 때 별도로 준비해야 한다.
 
 Monitoring EC2 Security Group (inbound):
 
@@ -106,6 +145,13 @@ Serving API metrics 확인(Serving API 컨테이너가 이 EC2에서 같이 떠 
 
 ```bash
 curl http://localhost:9101/metrics
+```
+
+Stream Processor metrics 확인(Stream Processor 컨테이너가 이 EC2에서 같이 떠
+있을 때):
+
+```bash
+curl http://localhost:9103/metrics
 ```
 
 ### cAdvisor에 privileged/device 설정을 쓰는 이유
@@ -229,6 +275,7 @@ Prometheus Targets(`http://localhost:9090/targets`)에서 다음 job이 모두
 - `serving-api`
 - `kafka`
 - `airflow`
+- `stream-processor`
 
 Monitoring EC2에서 Project EC2의 애플리케이션 metrics endpoint에 직접
 접근되는지 확인하려면(문제가 생겼을 때만 필요):
@@ -237,6 +284,7 @@ Monitoring EC2에서 Project EC2의 애플리케이션 metrics endpoint에 직�
 curl http://<PROJECT_EC2_PRIVATE_IP>:9101/metrics
 curl http://<PROJECT_EC2_PRIVATE_IP>:9308/metrics
 curl http://<PROJECT_EC2_PRIVATE_IP>:9102/metrics
+curl http://<PROJECT_EC2_PRIVATE_IP>:9103/metrics
 ```
 
 StatsD Exporter가 Airflow metric을 실제로 받고 있는지는 9102 응답 안에서
@@ -266,25 +314,37 @@ http://<MONITORING_EC2_PUBLIC_IP>:3000
 ## Grafana Dashboard
 
 Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`, `Serving API`,
-`Kafka`, `Airflow` dashboard가 자동으로 provisioning된다. 네 dashboard 모두
-같은 provider(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`)가
-디렉터리 전체를 읽어서 등록하므로, dashboard를 추가할 때
-provider(`dashboards.yml`)를 새로 만들 필요는 없다 — JSON 파일만 그
-디렉터리에 추가하면 된다.
+`Kafka`, `Airflow`, `Spark Streaming`, `EMR Serverless` dashboard가 자동으로
+provisioning된다. 여섯 dashboard 모두 같은 provider(`Infrastructure` 폴더,
+`/var/lib/grafana/dashboards`)가 디렉터리 전체를 읽어서 등록하므로, dashboard를
+추가할 때 provider(`dashboards.yml`)를 새로 만들 필요는 없다 — JSON 파일만 그
+디렉터리에 추가하면 된다. Datasource는 Prometheus(스크랩 기반)와
+CloudWatch(AWS API 직접 조회) 두 개가
+[grafana/provisioning/datasources/](grafana/provisioning/datasources/)로
+자동 등록된다.
 
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
 - 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → Project Infrastructure**
-  / **Serving API** / **Kafka** / **Airflow**
+  / **Serving API** / **Kafka** / **Airflow** / **Spark Streaming** / **EMR Serverless**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
     파일 기반으로 읽음)
+  - `infra/monitoring/grafana/provisioning/datasources/prometheus.yml` — Prometheus
+    datasource 정의
+  - `infra/monitoring/grafana/provisioning/datasources/cloudwatch.yml` — CloudWatch
+    datasource 정의(`authType: default`로 EC2 IAM Role만 사용, Access/Secret Key
+    없음)
   - `infra/monitoring/grafana/dashboards/project-infrastructure.json` — host/
     container dashboard 본문(패널, PromQL, 임계값)
   - `infra/monitoring/grafana/dashboards/serving-api.json` — Serving API
     dashboard 본문
   - `infra/monitoring/grafana/dashboards/kafka.json` — Kafka dashboard 본문
   - `infra/monitoring/grafana/dashboards/airflow.json` — Airflow dashboard 본문
+  - `infra/monitoring/grafana/dashboards/spark-streaming.json` — Stream Processor
+    (Project EC2에서 Prometheus로 scrape) dashboard 본문
+  - `infra/monitoring/grafana/dashboards/emr-serverless.json` — EMR Serverless
+    (CloudWatch datasource) dashboard 본문
   - `infra/monitoring/statsd/airflow-mapping.yml` — Airflow timer metric
     3개를 Prometheus histogram으로 바꾸는 statsd_exporter 매핑 설정
 
@@ -436,6 +496,91 @@ DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이
   scheduler/dag-processor가 떠 있기만 하면 DAG 실행과 무관하게 값이
   나와야 한다.
 
+### Stream Processor dashboard 지표
+
+`services/stream-processor/src/stream_processor/metrics.py`가 노출하는 metric
+이름을 그대로 PromQL에 쓴다. `ProgressLogger`가 Spark의
+`QueryProgressEvent`/`QueryStartedEvent`/`QueryTerminatedEvent`를 받아 이
+metric들을 갱신한다.
+
+| Metric | 종류 | 설명 |
+| --- | --- | --- |
+| `stream_processor_query_running` | Gauge | 쿼리가 실행 중이면 1, 종료되면 0 |
+| `stream_processor_input_rows_total` | Counter | 마이크로배치마다 읽은 `numInputRows` 누적 |
+| `stream_processor_input_rows_per_second` | Gauge | 최근 배치의 `inputRowsPerSecond` |
+| `stream_processor_processed_rows_per_second` | Gauge | 최근 배치의 `processedRowsPerSecond` |
+| `stream_processor_batch_duration_seconds` | Histogram | `durationMs.triggerExecution` 기준 배치 전체 소요 시간(초) |
+| `stream_processor_last_progress_timestamp_seconds` | Gauge | 마지막 progress 이벤트의 Unix epoch 초 |
+| `stream_processor_query_failures_total` | Counter | 예외로 종료된 횟수(`QueryTerminatedEvent.exception`이 있을 때만 증가) |
+
+패널별 PromQL:
+
+| Panel | PromQL |
+| --- | --- |
+| Target Status | `up{job="stream-processor"}` |
+| Query Running | `stream_processor_query_running{job="stream-processor"}` |
+| Input Rows/sec | `stream_processor_input_rows_per_second{job="stream-processor"}` |
+| Processed Rows/sec | `stream_processor_processed_rows_per_second{job="stream-processor"}` |
+| Micro-batch Duration (p50/p95) | `histogram_quantile(0.50, sum by (le) (rate(stream_processor_batch_duration_seconds_bucket{job="stream-processor"}[5m])))` (p95는 quantile 값만 교체) |
+| Last Progress Age | `time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}` |
+| Total Input Rows | `stream_processor_input_rows_total{job="stream-processor"}` |
+| Query Failures | `stream_processor_query_failures_total{job="stream-processor"}` |
+
+몇 가지 명확히 해 둘 점:
+
+- **`Query Running`은 프로세스 생존 여부(`up`)와 다르다.** 컨테이너는
+  떠 있지만(`up == 1`) 쿼리가 예외로 죽어 재시작 대기 중인 짧은 순간에는
+  `up == 1`, `stream_processor_query_running == 0`일 수 있다.
+- **`Last Progress Age`가 `STREAM_MAX_TRIGGER_DELAY`(기본 5분/300초) 근처까지
+  올라가는 것은 트래픽이 적을 때 정상이다.** `STREAM_MIN_OFFSETS_PER_TRIGGER`
+  (기본 600,000건)가 쌓이기 전에는 이 지연 시간이 지나야 배치가 실행된다.
+  Threshold를 300초보다 조금 더 여유 있는 330초로 잡은 것도 이 때문이다 —
+  실제로 값이 계속 커지기만 하고 꺾이지 않아야 장애로 본다.
+- **`Micro-batch Duration`은 배치가 5초~5분 간격으로만 발생해 데이터 포인트가
+  희소하다.** `rate(...[5m])` 윈도우 안에 샘플이 아예 없으면 `No data`가
+  정상이다 — Kafka Exporter의 `Consumer Lag`류 패널과 같은 이유다.
+
+### EMR Serverless dashboard 지표
+
+Prometheus가 아니라 CloudWatch datasource로 AWS `AWS/EMRServerless` 네임스페이스
+metric을 직접 조회한다 — EMR Serverless 자체를 새로 계측하는 코드는 이번 작업에서
+추가하지 않았다(AWS가 1분 주기로 자동 발행하는 값을 그대로 쓴다).
+
+dashboard 상단의 `Application ID` 변수(텍스트 입력)에 조회할 EMR Serverless
+application id를 입력해야 값이 나온다 — Airflow에서 쓰는
+`EMR_SERVERLESS_APPLICATION_ID` 변수와 같은 값이다
+(`services/orchestration/dags/emr_serverless.py` 참고). 기본값을 비워 뒀으므로
+처음 열면 모든 패널이 `No data`로 보이는 게 정상이다.
+
+| Metric | Statistic | Dimension | 설명 |
+| --- | --- | --- | --- |
+| `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId | 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
+| `RunningWorkerCount` | Maximum | ApplicationId, WorkerType, CapacityAllocationType | worker 조합 전체를 `SUM()` 식으로 합산 |
+| `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, WorkerType, CapacityAllocationType | application에 할당된 capacity, `SUM()`으로 합산 |
+| `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `SUM()`으로 합산 |
+
+각 패널은 CloudWatch 쿼리를 두 개씩 쓴다 — `matchExact: false`(search)로 실제
+dimension 조합을 전부 찾는 숨겨진 쿼리 하나와, 그 결과를 `SUM(...)` 수식으로
+더하는 쿼리 하나. Application/Job 수준 metric은 `WorkerType`/
+`CapacityAllocationType`(Used는 `JobId`까지) 조합별로 별도 시계열이 발행되므로,
+이렇게 합산해야 application 전체 값이 나온다.
+
+몇 가지 명확히 해 둘 점:
+
+- **이 dashboard는 실제 AWS 계정/EMR Serverless application으로 검증하지
+  못했다.** [AWS 공식 문서](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/app-job-metrics.html)에
+  있는 metric 이름과 dimension만 근거로 작성했다 — 배포 후 실제 값이
+  기대대로 나오는지, 특히 `SUM()` 식이 원하는 조합만 더하는지 확인이
+  필요하다.
+- **Statistic 선택은 문서 근거가 있는 것(WorkerCpuUsed/WorkerMemoryUsed의
+  Sum)과 그렇지 않은 것(나머지의 Maximum)이 섞여 있다.** 나머지 metric은
+  1분마다 한 값만 찍히는 상태값 성격이라 Maximum/Average/Sum이 숫자상
+  같아야 정상이지만, 실제로 여러 데이터 포인트가 겹쳐 발행되는 경우를
+  발견하면 이 값을 조정해야 한다.
+- **CloudWatch datasource가 `authType: default`(EC2 IAM Role)를 쓰므로,
+  Monitoring EC2에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)의
+  IAM 권한이 없으면 모든 패널이 permission 오류로 `No data`가 된다.**
+
 ### Source of truth와 `allowUiUpdates`
 
 `dashboards.yml`의 `allowUiUpdates: false`는 Grafana UI에서 이 dashboard를
@@ -536,6 +681,34 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   9. 위가 다 정상인데 특정 패널만 `No data`라면 PromQL 자체를 의심한다 —
      Grafana Explore에서 해당 metric 이름을 직접 조회해 실제로 존재하는지,
      `dag_id`/`task_id` label이 붙어 있는지 확인한다.
+
+- Spark Streaming(Stream Processor) 패널: `up{job="stream-processor"}`가 `0`이거나
+  값이 없으면 아래를 순서대로 확인한다.
+  1. Stream Processor 컨테이너 상태 — `docker inspect stream-processor`,
+     떠 있지 않으면 `docker logs stream-processor --tail 100`.
+  2. Project EC2에서 `curl http://localhost:9103/metrics`가 응답하는지.
+  3. Monitoring EC2에서
+     `curl http://<PROJECT_EC2_PRIVATE_IP>:9103/metrics`가 응답하는지.
+  4. Project EC2 Security Group에 9103(source: Monitoring EC2 Security
+     Group) inbound 규칙이 있는지.
+  5. `up`은 `1`인데 특정 패널만 `No data`라면, 해당 metric이 아직 한 번도
+     갱신되지 않았을 수 있다 — `stream_processor_*` metric은 Kafka에 실제로
+     메시지가 들어와 마이크로배치가 최소 한 번 실행돼야 값이 생긴다.
+
+- EMR Serverless 패널: CloudWatch datasource 자체가 문제인지, 쿼리가
+  문제인지부터 구분한다.
+  1. dashboard 상단 `Application ID` 변수에 값을 입력했는지 확인한다 — 비어
+     있으면 모든 패널이 `No data`다.
+  2. Grafana 컨테이너 로그에 `AccessDenied`/`UnrecognizedClientException` 같은
+     CloudWatch API 오류가 없는지 확인한다 — 있다면 Monitoring EC2의 IAM
+     Role에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)
+     권한이 없는 것이다.
+  3. Grafana **Connections → Data sources → CloudWatch**에서 **Save & test**를
+     눌러 자격증명 자체가 유효한지 확인한다.
+  4. 위가 다 정상인데 특정 metric만 `No data`라면, 그 시간대에 실제로 job이나
+     worker가 없었을 수 있다(예: `RunningJobs`/`RunningWorkerCount`는 애초에
+     실행 중인 게 없으면 0에 가까운 게 정상이다) — CloudWatch 콘솔에서 같은
+     namespace/metric/dimension을 직접 조회해 데이터 유무를 먼저 확인한다.
 
 ### Dashboard 변경 배포
 

@@ -31,3 +31,8 @@ scrape_configs:
     static_configs:
       - targets:
           - project-ec2:9102
+
+  - job_name: stream-processor
+    static_configs:
+      - targets:
+          - project-ec2:9103
