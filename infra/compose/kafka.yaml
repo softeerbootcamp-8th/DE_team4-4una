@@ -1,8 +1,17 @@
 services:
   kafka:
     image: apache/kafka:4.3.1
+    restart: unless-stopped
     ports:
       - "9092:9092"
+    # 기본 log.dirs(/tmp/kraft-combined-logs)는 컨테이너 파일시스템 안이라 recreate 시
+    # 사라진다. 이미지 Dockerfile이 VOLUME으로 선언한 /var/lib/kafka/data로
+    # log.dirs를 옮겨 named volume에 담는다(KAFKA_ 접두사 env var는 KafkaDockerWrapper가
+    # '_'를 '.'로 바꿔 그대로 server.properties 키에 반영한다 — KAFKA_LOG_DIRS -> log.dirs).
+    environment:
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.9.0
@@ -16,3 +25,9 @@ services:
       - --kafka.server=localhost:9092
     depends_on:
       - kafka
+
+volumes:
+  # 실제 이름을 고정한다 — 안 그러면 Compose project 이름(배포 디렉터리명, -p 옵션)에 따라
+  # <project>_kafka-data로 달라져서, 그 값이 바뀌면 기존 데이터를 못 찾고 새 빈 volume이 생긴다.
+  kafka-data:
+    name: de4-kafka-data
