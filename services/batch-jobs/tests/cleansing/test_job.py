@@ -86,6 +86,24 @@ def test_job_passes_typed_rows_directly_to_features(spark, tmp_path, monkeypatch
     assert not (tmp_path / "processed_sensor_event").exists()
 
 
+def test_missing_bronze_partition_yields_zero_processed_and_quarantined(
+    spark, tmp_path, monkeypatch
+):
+    # target_hour에 해당하는 Bronze 파티션 자체가 없는 경우(그 시간에 이벤트가
+    # 전혀 없었던 경우) — 예외 없이 0건 처리로 끝나야 한다(#345 완료 조건).
+    bronze = write_bronze_parquet(
+        spark,
+        tmp_path,
+        valid_value(event_time=(TARGET_HOUR + timedelta(hours=3)).isoformat()),
+    )
+
+    summary, rows = run_job(spark, tmp_path, bronze, monkeypatch)
+
+    assert summary.processed_count == 0
+    assert summary.quarantined_count == 0
+    assert rows == []
+
+
 def test_job_conserves_target_hour_rows(spark, tmp_path, monkeypatch):
     bronze = write_bronze_parquet(
         spark,
