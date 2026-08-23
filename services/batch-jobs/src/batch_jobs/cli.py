@@ -173,14 +173,6 @@ def run_cleansing(arguments: argparse.Namespace) -> None:
                 sort_keys=True,
             )
         )
-    except Exception as exc:
-        # #377 임시 진단: pyspark deco()가 raise ... from None으로 버리는 원본
-        # Py4JJavaError(Java 스택트레이스 포함)를 로그로 남긴다. 원인 확정 후 이 블록은 제거한다.
-        if exc.__context__ is not None:
-            logging.getLogger(__name__).error(
-                "raw JVM exception before pyspark wrapping: %s", exc.__context__
-            )
-        raise
     finally:
         spark.stop()
 
