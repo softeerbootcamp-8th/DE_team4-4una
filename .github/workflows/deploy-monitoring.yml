@@ -104,18 +104,22 @@ jobs:
           ssh "${EC2_USER}@${EC2_HOST}" "HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
           set -euo pipefail
 
+          # 반복 횟수가 아니라 시계로 제한한다. 횟수로 세면 curl이 max-time까지 물릴 때
+          # 전체 대기가 HEALTH_TIMEOUT를 몇 배로 넘긴다.
           wait_for() {
             name="$1"
             url="$2"
-            remaining=$((HEALTH_TIMEOUT / 3))
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
 
-            while [ "$remaining" -gt 0 ]; do
-              if curl --fail --silent "$url" >/dev/null 2>&1; then
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
                 printf '[health] %s 정상\n' "$name"
                 return 0
               fi
-              remaining=$((remaining - 1))
-              sleep 3
+              sleep "$interval"
             done
 
             printf '[health] %s 실패 (%s)\n' "$name" "$url"
@@ -172,7 +176,6 @@ jobs:
 
           if [ -n "$missing" ]; then
             echo "::error::필수 설정값이 비어 있습니다:$missing"
-            echo "MONITORING_EC2_HOST variable과 MONITORING_EC2_SSH_PRIVATE_KEY secret이 필요합니다."
             exit 1
           fi
 
@@ -235,6 +238,16 @@ jobs:
             exit 1
           fi
 
+          # 필수 변수는 monitoring.yaml이 ${VAR:?...}로 이미 선언하고 있다. config로
+          # 해석해 보면 값이 비어 있을 때 여기서 걸리므로 별도 검증 로직을 두지 않는다.
+          if ! ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$TARGET_DIR' \
+            && docker compose --env-file infra/monitoring/.env \
+                 -f infra/compose/monitoring.yaml config >/dev/null"; then
+            echo "::error::.env에 필수 변수가 비어 있습니다."
+            exit 1
+          fi
+
       - name: Start monitoring stack
         env:
           EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
@@ -268,18 +281,22 @@ jobs:
           ssh "${EC2_USER}@${EC2_HOST}" "HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
           set -euo pipefail
 
+          # 반복 횟수가 아니라 시계로 제한한다. 횟수로 세면 curl이 max-time까지 물릴 때
+          # 전체 대기가 HEALTH_TIMEOUT를 몇 배로 넘긴다.
           wait_for() {
             name="$1"
             url="$2"
-            remaining=$((HEALTH_TIMEOUT / 3))
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
 
-            while [ "$remaining" -gt 0 ]; do
-              if curl --fail --silent "$url" >/dev/null 2>&1; then
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
                 printf '[health] %s 정상\n' "$name"
                 return 0
               fi
-              remaining=$((remaining - 1))
-              sleep 3
+              sleep "$interval"
             done
 
             printf '[health] %s 실패 (%s)\n' "$name" "$url"
