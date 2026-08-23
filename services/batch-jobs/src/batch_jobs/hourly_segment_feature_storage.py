@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -48,13 +46,11 @@ def write_hourly_segment_features(
     final_path = hour_output_path(output_root, target_hour)
     staging_path = f"{output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
 
-    _recover_stale_backup(Path(final_path))
+    _recover_stale_backup(spark, final_path)
+    # 직전 실행이 죽어 staging_path에 잔여물이 남아있을 수 있다(#380) — 이 write는
+    # mode("overwrite") 없이 하므로(#377) 미리 지워야 PATH_ALREADY_EXISTS로 막히지 않는다.
+    _delete_path(spark, staging_path)
     try:
-        # staging_path는 run_id별로 고유하고 finally에서 정리되므로 원래 overwrite가
-        # 필요 없었다. mode("overwrite")를 쓰면, 이 경로가 이미 존재할 때(#377: S3에서는
-        # 위 finally의 shutil.rmtree가 s3:// 경로를 못 지워 직전 실행의 staging이 남을 수
-        # 있다) Spark가 삭제 대상 경로를 Path.suffix()로 계산하다가 콜론이 있는 run_id를
-        # URI scheme으로 오인해 URISyntaxException을 던진다.
         result.write.parquet(staging_path)
         staged = spark.read.parquet(staging_path)
         validate_hourly_segment_features(staged)
@@ -64,9 +60,9 @@ def write_hourly_segment_features(
         if row_count != result.count():
             raise ValueError("staged row count does not match the computed result")
 
-        _replace_hour_path(final_path, staging_path)
+        _replace_hour_path(spark, final_path, staging_path)
     finally:
-        shutil.rmtree(staging_path, ignore_errors=True)
+        _delete_path(spark, staging_path)
 
     return HourlySegmentFeatureWriteResult(output_path=final_path, row_count=row_count)
 
@@ -87,36 +83,83 @@ def _require_single_target_hour(result: DataFrame, target_hour: datetime) -> Non
         raise ValueError("result contains rows outside the requested target_hour")
 
 
-def _backup_path(final: Path) -> Path:
-    return final.with_name(final.name + _BACKUP_SUFFIX)
+def _backup_path(final_path: str) -> str:
+    parent, name = final_path.rsplit("/", maxsplit=1)
+    return f"{parent}/{name}{_BACKUP_SUFFIX}"
 
 
-def _recover_stale_backup(final: Path) -> None:
+def _recover_stale_backup(spark: SparkSession, final_path: str) -> None:
     # 직전 실행이 final -> backup 이동 직후 죽었다면, backup이 유일한 정상본이니 복구한다.
-    backup = _backup_path(final)
-    if not backup.exists():
+    backup_path = _backup_path(final_path)
+    if not _path_exists(spark, backup_path):
         return
-    if final.exists():
-        shutil.rmtree(backup, ignore_errors=True)
+    if _path_exists(spark, final_path):
+        _delete_path(spark, backup_path)
     else:
-        shutil.move(str(backup), str(final))
+        _rename_path(spark, backup_path, final_path)
 
 
-def _replace_hour_path(final_path: str, staging_path: str) -> None:
-    final = Path(final_path)
-    backup = _backup_path(final)
+def _replace_hour_path(spark: SparkSession, final_path: str, staging_path: str) -> None:
+    """백업 후 rename으로 스왑하고, 실패 시 백업에서 되돌린다.
 
-    had_existing = final.exists()
-    if had_existing:
-        shutil.move(str(final), str(backup))
+    **S3(EMRFS) 주의**: 로컬/HDFS의 rename은 메타데이터만 바꾸는 원자적
+    연산이지만, EMRFS의 `FileSystem.rename()`은 내부적으로 디렉터리의 각
+    객체를 copy 후 delete하는 방식이라 원자적이지 않다(`cleansing/hourly_storage.py`의
+    `_replace_partition`과 동일한 위험을 그대로 감수한다).
+    """
+    backup_path = _backup_path(final_path)
+    had_existing = False
+    promoted = False
     try:
-        final.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staging_path), str(final))
+        if _path_exists(spark, final_path):
+            _rename_path(spark, final_path, backup_path)
+            had_existing = True
+
+        _make_parent_directory(spark, final_path)
+        _rename_path(spark, staging_path, final_path)
+        promoted = True
     except Exception:
+        if promoted:
+            _delete_path(spark, final_path)
         if had_existing:
-            shutil.rmtree(final, ignore_errors=True)
-            shutil.move(str(backup), str(final))
+            _rename_path(spark, backup_path, final_path)
         raise
     else:
         if had_existing:
-            shutil.rmtree(backup, ignore_errors=True)
+            _delete_path(spark, backup_path)
+
+
+def _hadoop_path(spark: SparkSession, path: str):
+    return spark._jvm.org.apache.hadoop.fs.Path(path)
+
+
+def _filesystem(spark: SparkSession, path: str):
+    hadoop_path = _hadoop_path(spark, path)
+    return hadoop_path.getFileSystem(spark._jsc.hadoopConfiguration())
+
+
+def _path_exists(spark: SparkSession, path: str) -> bool:
+    return bool(_filesystem(spark, path).exists(_hadoop_path(spark, path)))
+
+
+def _delete_path(spark: SparkSession, path: str) -> None:
+    filesystem = _filesystem(spark, path)
+    hadoop_path = _hadoop_path(spark, path)
+    if filesystem.exists(hadoop_path):
+        filesystem.delete(hadoop_path, True)
+
+
+def _rename_path(spark: SparkSession, source: str, destination: str) -> None:
+    filesystem = _filesystem(spark, source)
+    renamed = filesystem.rename(
+        _hadoop_path(spark, source), _hadoop_path(spark, destination)
+    )
+    if not renamed:
+        raise OSError(f"failed to rename {source!r} to {destination!r}")
+
+
+def _make_parent_directory(spark: SparkSession, path: str) -> None:
+    parent = _hadoop_path(spark, path).getParent()
+    filesystem = parent.getFileSystem(spark._jsc.hadoopConfiguration())
+    if not filesystem.mkdirs(parent) and not filesystem.exists(parent):
+        raise OSError(f"failed to create output directory {parent}")

@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 import shapely
+from batch_jobs import hourly_segment_feature_storage
 from batch_jobs.hourly_segment_feature_job import (
     HourlySegmentFeatureJobConfig,
     run_hourly_segment_feature_job,
 )
 from batch_jobs.hourly_segment_feature_storage import (
+    _backup_path,
     hour_output_path,
     write_hourly_segment_features,
 )
@@ -1625,6 +1627,16 @@ class TestHourlySegmentFeatureStorage:
         assert path_10 == "out/data_period_date=2026-08-16/hour=10"
         assert path_10 != path_11
 
+    def test_backup_path_derives_a_sibling_key_under_an_s3_root(self) -> None:
+        # _backup_path는 순수 문자열 조립이라 s3:// URI에서도 그대로 동작해야 한다(#380).
+        final_path = "s3://de4-silver/hourly_segment_features/data_period_date=2026-08-16/hour=10"
+
+        backup_path = _backup_path(final_path)
+
+        assert backup_path == (
+            "s3://de4-silver/hourly_segment_features/data_period_date=2026-08-16/hour=10.bak"
+        )
+
     def test_write_creates_data_at_the_expected_path(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
         df = self.feature_rows_df(spark, [self.feature_row(), self.feature_row(segment_id="S2")])
@@ -1801,15 +1813,13 @@ class TestHourlySegmentFeatureStorage:
 
         assert result.row_count == 1
 
-    def test_stale_staging_directory_fails_clearly_instead_of_uri_syntax_error(
+    def test_write_succeeds_despite_a_stale_staging_directory_left_by_a_crashed_run(
         self, spark, tmp_path
     ) -> None:
-        # S3에서는 finally의 shutil.rmtree가 s3:// 경로에 안 먹혀서, 직전 실행이 죽으면
-        # staging 디렉터리가 지워지지 않고 남는다(#377). run_id에 슬래시 없이 콜론만 있는
-        # 채로(Airflow 기본 형식) 그 디렉터리에 mode("overwrite")로 다시 쓰면, Spark의
-        # InsertIntoHadoopFsRelationCommand가 삭제 대상 경로를 Path.suffix()로 계산하다가
-        # run_id를 URI scheme으로 오인해 알아보기 힘든 URISyntaxException을 던졌다.
-        # 이제는 그 대신 "경로가 이미 있다"는 명확한 오류로 실패해야 한다.
+        # S3에서는 예전에 finally의 shutil.rmtree가 s3:// 경로에 안 먹혀서, 직전 실행이
+        # 죽으면 staging 디렉터리가 지워지지 않고 남았다(#377, #380). 이제는 write 전에
+        # Hadoop FileSystem API로 staging_path를 먼저 지우므로, 잔여물이 있어도 정상
+        # 처리되어야 한다.
         run_id = "scheduled__2026-08-23T12:00:00+00:00"
         output_root = str(tmp_path / "hourly_segment_features")
         stale_staging = Path(output_root) / "_staging" / run_id
@@ -1818,11 +1828,10 @@ class TestHourlySegmentFeatureStorage:
 
         df = self.feature_rows_df(spark, [self.feature_row()])
 
-        with pytest.raises(Exception) as exc_info:
-            write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, run_id)
+        result = write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, run_id)
 
-        assert "URISyntaxException" not in str(exc_info.value)
-        assert "already exists" in str(exc_info.value).lower()
+        assert result.row_count == 1
+        self.assert_staging_is_empty(output_root)
 
     def test_recovers_from_a_stale_backup_before_writing(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
@@ -1850,16 +1859,18 @@ class TestHourlySegmentFeatureStorage:
         original = self.feature_rows_df(spark, [self.feature_row(segment_id="ORIGINAL")])
         write_hourly_segment_features(spark, original, output_root, self.TARGET_HOUR, "run-1")
 
-        real_move = shutil.move
+        real_rename_path = hourly_segment_feature_storage._rename_path
         calls = {"count": 0}
 
-        def failing_move(source, destination):
+        def failing_rename_path(spark_arg, source, destination):
             calls["count"] += 1
-            if calls["count"] == 2:  # 두 번째 move(staging -> final)만 실패시킨다
+            if calls["count"] == 2:  # 두 번째 rename(staging -> final)만 실패시킨다
                 raise OSError("simulated failure")
-            return real_move(source, destination)
+            return real_rename_path(spark_arg, source, destination)
 
-        monkeypatch.setattr(shutil, "move", failing_move)
+        monkeypatch.setattr(
+            "batch_jobs.hourly_segment_feature_storage._rename_path", failing_rename_path
+        )
 
         broken = self.feature_rows_df(spark, [self.feature_row(segment_id="BROKEN")])
         with pytest.raises(OSError, match="simulated failure"):
