@@ -104,11 +104,14 @@ def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
 
 
 def test_driver_and_executor_sizes_fit_within_application_max_capacity():
-    # Application의 maximumCapacity가 4 vCPU / 16 GB로 고정돼 있다(#372). Spark
-    # 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을
-    # 전부 써버려 executor가 하나도 못 뜬다 — 실제 Job Run에서
+    # Application의 maximumCapacity가 8 vCPU / 32 GB로 고정돼 있다(#372, #386).
+    # Spark 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU
+    # 예산을 전부 써버려 executor가 하나도 못 뜬다 — 실제 Job Run에서
     # ApplicationMaxCapacityExceededException으로 재현됨. driver를 작게 고정해
     # executor 1개(기본 크기 유지)가 항상 같이 들어가도록 상한을 코드에 못박는다.
+    # memoryOverhead=6g는 Map Matching mapInPandas의 Python worker(STRtree)
+    # 메모리용이다(#386) — driver(1c/2g) + executor(2c/8g+6g=14g) = 3 vCPU/16GB로
+    # 8 vCPU/32GB 한도 안에 여유 있게 들어간다.
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
@@ -116,6 +119,7 @@ def test_driver_and_executor_sizes_fit_within_application_max_capacity():
     assert "spark.driver.memory=2g" in params
     assert "spark.executor.cores=2" in params
     assert "spark.executor.memory=8g" in params
+    assert "spark.executor.memoryOverhead=6g" in params
     assert "spark.executor.instances=1" in params
 
 
