@@ -1801,6 +1801,29 @@ class TestHourlySegmentFeatureStorage:
 
         assert result.row_count == 1
 
+    def test_stale_staging_directory_fails_clearly_instead_of_uri_syntax_error(
+        self, spark, tmp_path
+    ) -> None:
+        # S3에서는 finally의 shutil.rmtree가 s3:// 경로에 안 먹혀서, 직전 실행이 죽으면
+        # staging 디렉터리가 지워지지 않고 남는다(#377). run_id에 슬래시 없이 콜론만 있는
+        # 채로(Airflow 기본 형식) 그 디렉터리에 mode("overwrite")로 다시 쓰면, Spark의
+        # InsertIntoHadoopFsRelationCommand가 삭제 대상 경로를 Path.suffix()로 계산하다가
+        # run_id를 URI scheme으로 오인해 알아보기 힘든 URISyntaxException을 던졌다.
+        # 이제는 그 대신 "경로가 이미 있다"는 명확한 오류로 실패해야 한다.
+        run_id = "scheduled__2026-08-23T12:00:00+00:00"
+        output_root = str(tmp_path / "hourly_segment_features")
+        stale_staging = Path(output_root) / "_staging" / run_id
+        stale_staging.mkdir(parents=True)
+        (stale_staging / "stale.parquet").write_text("stale")
+
+        df = self.feature_rows_df(spark, [self.feature_row()])
+
+        with pytest.raises(Exception) as exc_info:
+            write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, run_id)
+
+        assert "URISyntaxException" not in str(exc_info.value)
+        assert "already exists" in str(exc_info.value).lower()
+
     def test_recovers_from_a_stale_backup_before_writing(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
         original = self.feature_rows_df(spark, [self.feature_row(segment_id="ORIGINAL")])

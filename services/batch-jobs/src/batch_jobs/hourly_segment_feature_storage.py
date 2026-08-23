@@ -50,7 +50,12 @@ def write_hourly_segment_features(
 
     _recover_stale_backup(Path(final_path))
     try:
-        result.write.mode("overwrite").parquet(staging_path)
+        # staging_path는 run_id별로 고유하고 finally에서 정리되므로 원래 overwrite가
+        # 필요 없었다. mode("overwrite")를 쓰면, 이 경로가 이미 존재할 때(#377: S3에서는
+        # 위 finally의 shutil.rmtree가 s3:// 경로를 못 지워 직전 실행의 staging이 남을 수
+        # 있다) Spark가 삭제 대상 경로를 Path.suffix()로 계산하다가 콜론이 있는 run_id를
+        # URI scheme으로 오인해 URISyntaxException을 던진다.
+        result.write.parquet(staging_path)
         staged = spark.read.parquet(staging_path)
         validate_hourly_segment_features(staged)
         row_count = staged.count()
