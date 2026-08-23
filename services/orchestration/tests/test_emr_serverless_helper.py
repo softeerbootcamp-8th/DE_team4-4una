@@ -66,6 +66,12 @@ def test_without_driver_env_only_pyspark_python_confs_are_set():
     # 아니라 정확히 일치하는지, 따옴표가 섞이지 않았는지 함께 검증한다.
     assert "spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
     assert "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    # driverEnv/executorEnv는 컨테이너 환경변수만 세팅할 뿐, entryPoint 스크립트를
+    # 실제로 어떤 인터프리터로 실행할지는 EMR Serverless가 반영하지 않는 것으로
+    # 확인됐다(#368 재발 조사) — Spark가 직접 읽는 spark.pyspark.python/
+    # spark.pyspark.driver.python conf를 병행한다.
+    assert "spark.pyspark.python=/usr/bin/python3.12" in params
+    assert "spark.pyspark.driver.python=/usr/bin/python3.12" in params
     assert '"' not in params
     assert "POSTGRES_HOST" not in params
 
@@ -92,4 +98,6 @@ def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
     assert "spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
     assert "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    assert "spark.pyspark.python=/usr/bin/python3.12" in params
+    assert "spark.pyspark.driver.python=/usr/bin/python3.12" in params
     assert '"' not in params
