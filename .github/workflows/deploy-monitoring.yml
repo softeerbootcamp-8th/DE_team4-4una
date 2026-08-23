@@ -1,0 +1,325 @@
+# 모니터링 설정을 두 EC2에 배포한다.
+#
+# ci.yml이 변경된 경로를 보고 호출하며, 필요한 쪽만 배포된다.
+#   exporters  -> Project EC2    (node-exporter, cAdvisor)
+#   monitoring -> Monitoring EC2 (Prometheus, Grafana)
+#
+# 다른 배포 워크플로와 달리 빌드할 이미지가 없다. 모두 서드파티 이미지를 그대로 쓰므로
+# ECR도 AWS 자격증명도 필요하지 않고, 설정 파일을 보내 compose로 반영하는 것이 전부다.
+name: Deploy Monitoring
+
+on:
+  workflow_call:
+    inputs:
+      deploy-exporters:
+        type: boolean
+        default: false
+      deploy-monitoring-stack:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  exporters:
+    name: Exporters (Project EC2)
+    if: inputs.deploy-exporters
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: deploy-monitoring-exporters
+      cancel-in-progress: false
+    env:
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      # deploy-orchestration이 저장소 전체를 --delete로 미는 경로와 겹치지 않게
+      # 모니터링 전용 디렉터리를 쓴다.
+      TARGET_DIR: ${{ vars.MONITORING_TARGET_DIR || '/home/ec2-user/de4-monitoring' }}
+      HEALTH_TIMEOUT: "60"
+    steps:
+      - name: Check required variables
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in EC2_HOST SSH_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::필수 설정값이 비어 있습니다:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync compose file
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$TARGET_DIR/infra/compose'"
+
+          # exporters.yaml의 볼륨은 모두 호스트 절대 경로(/proc, /sys, ...)라 이 파일
+          # 하나만 있으면 동작한다.
+          rsync -az \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            infra/compose/exporters.yaml \
+            "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/compose/"
+
+      - name: Start exporters
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$TARGET_DIR' \
+            && docker compose -f infra/compose/exporters.yaml up -d"
+
+      # compose 명령이 성공했다고 컨테이너가 살아 있는 것은 아니다. 실제로 메트릭을
+      # 내놓는지 확인해야 "정상 기동"을 검증한 것이 된다.
+      - name: Wait for exporters
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
+          set -euo pipefail
+
+          # 반복 횟수가 아니라 시계로 제한한다. 횟수로 세면 curl이 max-time까지 물릴 때
+          # 전체 대기가 HEALTH_TIMEOUT를 몇 배로 넘긴다.
+          wait_for() {
+            name="$1"
+            url="$2"
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
+                printf '[health] %s 정상\n' "$name"
+                return 0
+              fi
+              sleep "$interval"
+            done
+
+            printf '[health] %s 실패 (%s)\n' "$name" "$url"
+            docker logs --tail 30 "$name" 2>&1 || true
+            return 1
+          }
+
+          wait_for node-exporter http://localhost:9100/metrics
+          wait_for cadvisor http://localhost:8081/metrics
+          EOF
+
+      - name: Job summary
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Exporters 배포 (Project EC2)"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  monitoring:
+    name: Monitoring stack (Monitoring EC2)
+    if: inputs.deploy-monitoring-stack
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: deploy-monitoring-stack
+      cancel-in-progress: false
+    env:
+      EC2_USER: ${{ vars.MONITORING_EC2_USER || vars.EC2_USER || 'ec2-user' }}
+      TARGET_DIR: ${{ vars.MONITORING_TARGET_DIR || '/home/ec2-user/de4-monitoring' }}
+      # Grafana 기동에 수 초가 걸린다.
+      HEALTH_TIMEOUT: "90"
+    steps:
+      - name: Check required variables
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+          # Project EC2와 다른 인스턴스이고 키페어도 다르다. EC2_SSH_PRIVATE_KEY로
+          # 대체하면 Permission denied만 나와서 원인을 찾기 어려우므로 전용 secret을
+          # 필수로 둔다.
+          SSH_PRIVATE_KEY: ${{ secrets.MONITORING_EC2_SSH_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in EC2_HOST SSH_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::필수 설정값이 비어 있습니다:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.MONITORING_EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync monitoring config
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$TARGET_DIR/infra/compose'"
+
+          # compose 파일은 monitoring.yaml만 보낸다. 이 호스트에서 실행하지 않는
+          # airflow/kafka/postgres compose까지 올려둘 이유가 없다.
+          rsync -az \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            infra/compose/monitoring.yaml \
+            "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/compose/"
+
+          # monitoring.yaml의 볼륨이 ../monitoring/... 상대 경로라 infra/ 구조를 그대로
+          # 유지해야 한다.
+          #
+          # .env를 제외하는 것이 중요하다. 이 파일은 저장소에 없고 인스턴스에만 있어서,
+          # --delete와 함께 제외하지 않으면 삭제되고 compose가 기동에 실패한다.
+          # statsd 매핑은 Project EC2의 Airflow StatsD Exporter가 쓰는 것이라 이 호스트
+          # 에는 필요 없다.
+          rsync -az --delete \
+            --exclude='.env' \
+            --exclude='statsd/' \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            infra/monitoring/ "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/monitoring/"
+
+      # .env는 저장소에 없고 인스턴스에서 사람이 만든다. 없으면 compose가
+      # "PROJECT_EC2_PRIVATE_IP is required"로 죽는데 원인이 바로 보이지 않으므로
+      # 여기서 먼저 잡는다.
+      - name: Check env file on instance
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          if ! ssh "${EC2_USER}@${EC2_HOST}" "test -f '$TARGET_DIR/infra/monitoring/.env'"; then
+            echo "::error::$TARGET_DIR/infra/monitoring/.env 가 없습니다."
+            echo "인스턴스에서 먼저 만들어야 합니다. infra/monitoring/.env.example을 참고하세요."
+            exit 1
+          fi
+
+          # 필수 변수는 monitoring.yaml이 ${VAR:?...}로 이미 선언하고 있다. config로
+          # 해석해 보면 값이 비어 있을 때 여기서 걸리므로 별도 검증 로직을 두지 않는다.
+          if ! ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$TARGET_DIR' \
+            && docker compose --env-file infra/monitoring/.env \
+                 -f infra/compose/monitoring.yaml config >/dev/null"; then
+            echo "::error::.env에 필수 변수가 비어 있습니다."
+            exit 1
+          fi
+
+      - name: Start monitoring stack
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          # up -d는 컨테이너 정의가 바뀐 것만 다시 만든다. prometheus.yml과 Grafana
+          # datasource provisioning은 볼륨으로 마운트된 파일이라 정의가 아니어서,
+          # 내용만 바뀌면 compose가 아무 일도 하지 않는다. 두 프로세스가 모두 기동
+          # 시점에 설정을 읽으므로 restart로 다시 읽게 한다.
+          #
+          # Grafana dashboard JSON은 예외다 — provisioning의 updateIntervalSeconds가
+          # 30초라 재기동 없이 반영된다.
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$TARGET_DIR' \
+            && docker compose \
+                 --env-file infra/monitoring/.env \
+                 -f infra/compose/monitoring.yaml up -d \
+            && docker compose \
+                 --env-file infra/monitoring/.env \
+                 -f infra/compose/monitoring.yaml restart prometheus grafana"
+
+      # 재기동 직후에는 아직 준비되지 않아 바로 curl하면 실패한다. Grafana는 특히 수 초
+      # 걸린다. compose 명령 성공만으로는 배포 성공이라 할 수 없어 여기서 확인한다.
+      - name: Wait for monitoring stack
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
+          set -euo pipefail
+
+          # 반복 횟수가 아니라 시계로 제한한다. 횟수로 세면 curl이 max-time까지 물릴 때
+          # 전체 대기가 HEALTH_TIMEOUT를 몇 배로 넘긴다.
+          wait_for() {
+            name="$1"
+            url="$2"
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
+                printf '[health] %s 정상\n' "$name"
+                return 0
+              fi
+              sleep "$interval"
+            done
+
+            printf '[health] %s 실패 (%s)\n' "$name" "$url"
+            docker logs --tail 30 "$name" 2>&1 || true
+            return 1
+          }
+
+          wait_for prometheus http://localhost:9090/-/ready
+          wait_for grafana http://localhost:3000/api/health
+          EOF
+
+      - name: Job summary
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Monitoring 스택 배포 (Monitoring EC2)"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

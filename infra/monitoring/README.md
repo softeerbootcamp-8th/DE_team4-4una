@@ -52,8 +52,8 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
 ## AWS prerequisite
 
 Project EC2와 Monitoring EC2는 같은 VPC에서 private IP로 통신 가능해야 한다.
-Security Group 생성/변경은 이번 작업 범위가 아니므로, 아래 규칙만 별도로
-설정해 둔다. **0.0.0.0/0으로 여는 규칙은 사용하지 않는다.**
+Security Group 생성/변경은 이번 작업 범위가 아니므로, 아래 규칙만 별도로 설정해 둔다.
+**metrics 포트는 0.0.0.0/0으로 열지 않고 상대 Security Group만 허용한다.**
 
 Project EC2 Security Group (inbound):
 
@@ -105,7 +105,15 @@ Monitoring EC2 Security Group (inbound):
 | Port | Protocol | Source |
 | --- | --- | --- |
 | 3000 | TCP | 관리자/팀원 IP |
-| 22 | TCP | 관리자 IP |
+| 22 | TCP | 0.0.0.0/0 |
+
+22번이 열려 있는 것은 [자동 배포](#자동-배포-cd)가 GitHub 러너에서 SSH로 접속하기
+때문이다. 러너는 실행마다 IP가 다르고 GitHub이 공개하는 Actions IP 대역은 수천 개라
+Security Group 규칙 수 한도에 걸려 특정 IP만 허용할 수 없다. 비밀번호 인증은 꺼져
+있고 키 인증만 허용된다. 노출을 줄이려면 배포할 때만 러너 IP를 규칙에 추가하고 끝나면
+지우는 방식이 필요한데, 아직 구현되어 있지 않다.
+
+Project EC2의 22번도 같은 이유로 열려 있다.
 
 Prometheus의 9090은 compose에서 `127.0.0.1:9090:9090`으로 바인딩해 Monitoring
 EC2 localhost에서만 접근 가능하므로, Security Group에 별도 inbound 규칙을 열
@@ -251,6 +259,106 @@ docker compose \
   -f infra/compose/monitoring.yaml \
   ps
 ```
+
+## 자동 배포 (CD)
+
+`develop`에 push되면 [.github/workflows/deploy-monitoring.yml](../../.github/workflows/deploy-monitoring.yml)이
+설정을 두 EC2에 반영한다. 위 수동 실행 절차는 최초 준비와 문제 확인용으로 남겨둔다.
+
+바뀐 경로에 따라 필요한 호스트만 배포한다.
+
+| 바뀐 경로 | 배포 대상 |
+| --- | --- |
+| `infra/compose/exporters.yaml` | Project EC2 |
+| `infra/compose/monitoring.yaml` | Monitoring EC2 |
+| `infra/monitoring/prometheus/**` | Monitoring EC2 |
+| `infra/monitoring/grafana/**` | Monitoring EC2 |
+| `infra/monitoring/statsd/**` | Project EC2 — orchestration 배포가 담당 |
+
+빌드하는 이미지가 없다. 모두 서드파티 이미지를 그대로 쓰므로 ECR과 AWS 자격증명을
+사용하지 않고, 설정 파일을 전달한 뒤 compose로 반영하는 것이 전부다.
+
+배포 대상 디렉터리는 `MONITORING_TARGET_DIR`(기본
+`/home/ec2-user/de4-monitoring`)이다. `deploy-orchestration`이 저장소 전체를
+`--delete`로 미는 경로와 겹치지 않도록 별도 디렉터리를 쓴다.
+
+### GitHub 설정
+
+| 종류 | 이름 | 비고 |
+| --- | --- | --- |
+| Variables | `MONITORING_EC2_HOST` | Monitoring EC2의 퍼블릭 IP 또는 DNS |
+| Secrets | `MONITORING_EC2_SSH_PRIVATE_KEY` | Monitoring EC2 키페어의 개인키 전문 |
+
+Project EC2와 키페어가 다르므로 secret을 따로 둔다. `EC2_SSH_PRIVATE_KEY`로 대체하면
+`Permission denied (publickey)`만 나와 원인을 찾기 어렵다.
+
+선택 항목은 `MONITORING_EC2_USER`(기본 `ec2-user`), `MONITORING_TARGET_DIR`이다.
+
+### 최초 1회 준비
+
+**1. `.env` 생성.** 배포는 이 파일을 만들지 않는다. 비밀값이 들어가 저장소에 없기
+때문이다. 배포 대상 디렉터리에 직접 만든다.
+
+```bash
+mkdir -p /home/ec2-user/de4-monitoring/infra/monitoring
+vi /home/ec2-user/de4-monitoring/infra/monitoring/.env
+```
+
+`.env.example`을 참고해 `PROJECT_EC2_PRIVATE_IP`와 `GRAFANA_ADMIN_PASSWORD`를
+채운다. 없으면 배포가 `Check env file on instance` 스텝에서 중단한다.
+
+rsync는 `.env`를 제외하므로 이후 배포가 이 파일을 덮어쓰거나 지우지 않는다.
+
+**2. 기존 수동 컨테이너 정리.** 다른 디렉터리에서 compose를 띄웠다면 프로젝트가 달라
+같은 `container_name`을 다시 만들려다 `container name already in use`로 실패한다.
+
+```bash
+# Monitoring EC2
+docker rm -f prometheus grafana
+
+# Project EC2
+docker rm -f node-exporter cadvisor
+```
+
+### 배포가 하는 일
+
+Monitoring EC2:
+
+1. `infra/compose/monitoring.yaml`과 `infra/monitoring/`을 전송 (`.env`, `statsd/` 제외)
+2. `.env` 존재 확인
+3. `docker compose ... up -d`
+4. `docker compose ... restart prometheus grafana`
+5. `/-/ready`와 `/api/health`로 기동 확인 (최대 90초)
+
+4단계가 필요한 이유는 `prometheus.yml`과 Grafana datasource provisioning이 볼륨으로
+마운트된 파일이기 때문이다. 컨테이너 정의가 아니어서 내용만 바뀌면 `up -d`가 아무
+일도 하지 않고, 두 프로세스는 기동 시점에만 설정을 읽는다. 재기동하지 않으면 파일만
+새 것이고 동작은 예전 설정 그대로다.
+
+Grafana dashboard JSON은 예외다 — `updateIntervalSeconds: 30`으로 재기동 없이 반영된다.
+
+Project EC2:
+
+1. `infra/compose/exporters.yaml` 전송
+2. `docker compose ... up -d`
+3. `:9100/metrics`, `:8081/metrics`로 기동 확인 (최대 60초)
+
+`exporters.yaml`은 마운트된 설정 파일이 없어 파일이 바뀌면 컨테이너 정의가 바뀌므로
+`up -d`가 재생성한다. 별도 재기동이 필요 없다.
+
+### 실패했을 때
+
+워크플로 로그에 인스턴스가 남긴 출력이 그대로 찍힌다. health 실패 시에는 해당 컨테이너
+로그도 함께 출력된다.
+
+| 증상 | 원인 |
+| --- | --- |
+| `필수 설정값이 비어 있습니다` | variables 또는 secret 미설정 |
+| SSH 연결 시간 초과 | 22번 인바운드, 또는 퍼블릭 주소 없음 |
+| `Permission denied (publickey)` | 키페어 불일치, 또는 `MONITORING_EC2_USER` 틀림 |
+| `.env 가 없습니다` | 위 최초 1회 준비 1번 |
+| `container name already in use` | 위 최초 1회 준비 2번 |
+| health 실패 | 함께 출력되는 컨테이너 로그를 본다 |
 
 ## Validation
 

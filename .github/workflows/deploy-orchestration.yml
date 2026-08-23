@@ -139,10 +139,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          # statsd exporter의 매핑 파일(infra/monitoring/statsd/airflow-mapping.yml)은
+          # bind mount라 컨테이너 정의가 아니다. 내용만 바뀌면 up -d가 아무 일도 하지
+          # 않고, exporter는 기동 시점에 읽은 예전 매핑으로 계속 돈다. 그래서 재기동한다.
+          # DAG와 jobs, de4_core는 Airflow가 주기적으로 재파싱하므로 해당 없다.
           ssh "${EC2_USER}@${EC2_HOST}" \
             "cd '$REPO_DIR' \
             && AWS_REGION='$AWS_REGION' AWS_DEFAULT_REGION='$AWS_REGION' \
-            docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d"
+            docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d \
+            && docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml \
+                 restart airflow-statsd-exporter"
 
       - name: Wait for Airflow health
         env:
