@@ -33,6 +33,9 @@ jobs:
       # test matrix가 그대로 쓰는 {name, pkg, paths} 배열
       targets: ${{ steps.select.outputs.targets }}
       workspace: ${{ steps.filter.outputs.workspace }}
+      # 모니터링 배포는 호스트가 둘로 갈리므로 각각 따로 판정한다.
+      monitoring-stack: ${{ steps.filter.outputs.monitoring-stack }}
+      exporters: ${{ steps.filter.outputs.exporters }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +83,18 @@ jobs:
             # 모든 Python 변경이 승격되어 버린다.
             python:
               - '**/*.py'
+            # 모니터링 배포 대상. Prometheus/Grafana는 Monitoring EC2, exporter는
+            # Project EC2로 가므로 필터를 나눠 필요한 쪽만 배포한다. 워크플로 자신이
+            # 양쪽에 다 들어간 것은, 워크플로를 고쳤으면 두 배포가 다 돌아야 그 변경이
+            # 검증되기 때문이다.
+            monitoring-stack:
+              - 'infra/compose/monitoring.yaml'
+              - 'infra/monitoring/prometheus/**'
+              - 'infra/monitoring/grafana/**'
+              - '.github/workflows/deploy-monitoring.yml'
+            exporters:
+              - 'infra/compose/exporters.yaml'
+              - '.github/workflows/deploy-monitoring.yml'
 
       # 필터 이름을 (uv 패키지, pytest 경로) 쌍으로 바꾼다.
       #
@@ -320,4 +335,22 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    secrets: inherit
+
+  # 다른 배포와 달리 경로 판정 결과가 필요해 select에 의존한다. 바깥 if는 job 자체를
+  # 띄울지 정하고, with로 넘긴 두 값이 안쪽에서 어느 호스트에 배포할지 정한다.
+  # 서드파티 이미지만 쓰므로 id-token(OIDC) 권한은 필요하지 않다.
+  deploy-monitoring:
+    needs: select
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/develop' &&
+      (needs.select.outputs.monitoring-stack == 'true' ||
+       needs.select.outputs.exporters == 'true')
+    uses: ./.github/workflows/deploy-monitoring.yml
+    with:
+      deploy-exporters: ${{ needs.select.outputs.exporters == 'true' }}
+      deploy-monitoring-stack: ${{ needs.select.outputs.monitoring-stack == 'true' }}
+    permissions:
+      contents: read
     secrets: inherit
