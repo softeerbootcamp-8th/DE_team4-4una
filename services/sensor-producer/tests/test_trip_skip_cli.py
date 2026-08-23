@@ -1,12 +1,12 @@
 import argparse
+from pathlib import Path
 
 import pytest
 from sensor_producer.cli import (
     build_parser,
     enforce_trip_skip_ratio,
-    limit_trips,
+    local_parquet,
     ratio,
-    resolve_trips,
 )
 from sensor_producer.simulation import ReplayResult
 
@@ -40,24 +40,19 @@ def test_ratio_rejects_values_outside_unit_interval(value: str) -> None:
         ratio(value)
 
 
-def test_limit_trips_does_not_consume_beyond_maximum() -> None:
-    consumed: list[object] = []
+def test_local_parquet_accepts_an_existing_parquet_file(tmp_path: Path) -> None:
+    path = tmp_path / "input.parquet"
+    path.touch()
 
-    def source():
-        for value in (object(), object(), object()):
-            consumed.append(value)
-            yield value
-
-    selected = list(limit_trips(source(), 2))  # type: ignore[arg-type]
-
-    assert selected == consumed
-    assert len(consumed) == 2
+    assert local_parquet(str(path)) == path.resolve()
 
 
-def test_parquet_trip_uri_requires_source_date() -> None:
-    arguments = build_parser().parse_args(
-        ["run", "--trips-uri", "s3://bucket/fhvhv.parquet"]
-    )
+@pytest.mark.parametrize("value", ["missing.parquet", "input.json"])
+def test_local_parquet_rejects_missing_or_non_parquet_input(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="local Parquet"):
+        local_parquet(value)
 
-    with pytest.raises(SystemExit, match="--source-date is required"):
-        resolve_trips(arguments, input_dir=None)
+
+def test_run_requires_all_local_parquet_inputs() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["run"])

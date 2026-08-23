@@ -154,6 +154,74 @@ class TestLoadRoadSegments:
 
 
 class TestRoadEnvironment:
+    def test_loads_prepared_local_parquet_files(self, tmp_path):
+        road_path = tmp_path / "simulation_road_environment.parquet"
+        taxi_zone_path = tmp_path / "taxi_zone.parquet"
+        pq.write_table(
+            pa.Table.from_pylist(
+                [
+                    {
+                        "segment_id": "s1",
+                        "road_snapshot_date": date(2026, 8, 19),
+                        "from_node_id": "n1",
+                        "to_node_id": "n2",
+                        "traffic_direction": "W",
+                        "street_name": "TEST ST",
+                        "geometry_wkt": "LINESTRING (-74 40.7, -73.999 40.701)",
+                        "length_m": 142.3,
+                        "posted_speed_mph": 25,
+                        "curve_radius_m": None,
+                        "pavement_rating": 7.5,
+                        "hump_fractions_json": "[0.5]",
+                    }
+                ]
+            ),
+            road_path,
+        )
+        pq.write_table(
+            pa.Table.from_pylist(
+                [
+                    {
+                        "location_id": 181,
+                        "geometry_wkt": (
+                            "POLYGON ((-74 40.7, -73.9 40.7, -73.9 40.8, "
+                            "-74 40.8, -74 40.7))"
+                        ),
+                    }
+                ]
+            ),
+            taxi_zone_path,
+        )
+
+        environment = RoadEnvironment.from_parquet(road_path, taxi_zone_path)
+
+        assert environment.road_segment_snapshot_date == date(2026, 8, 19)
+        assert environment.segments[0].pavement_rating == 7.5
+        assert environment.segments[0].hump_fractions == [0.5]
+        assert set(environment.taxi_zones) == {181}
+
+    def test_rejects_a_local_environment_with_missing_columns(self, tmp_path):
+        road_path = tmp_path / "simulation_road_environment.parquet"
+        taxi_zone_path = tmp_path / "taxi_zone.parquet"
+        pq.write_table(pa.table({"segment_id": ["s1"]}), road_path)
+        pq.write_table(
+            pa.table(
+                {
+                    "location_id": [181],
+                    "geometry_wkt": [
+                        (
+                            "POLYGON ((-74 40.7, -73.9 40.7, -73.9 40.8, "
+                            "-74 40.8, -74 40.7))"
+                        )
+                    ],
+                }
+            ),
+            taxi_zone_path,
+        )
+
+        with pytest.raises(ValueError, match="missing required columns"):
+            RoadEnvironment.from_parquet(road_path, taxi_zone_path)
+
     def test_records_the_road_segment_snapshot_date_it_was_built_from(self):
         segment = RoadSegment(
             segment_id="s1",

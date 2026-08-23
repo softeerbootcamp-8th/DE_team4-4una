@@ -1,7 +1,7 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 ---
 
 # Deterministic Trip Simulation
@@ -37,14 +37,13 @@ simulation offsets.
 
 ## Implemented prototype pipeline
 
-At startup, the producer can follow a published `active.json` pointer or pin an
-immutable environment manifest through `file://` or `s3://`. Runtime Parquet
-artifacts are cached only after their size and SHA-256 checksum are verified.
-The trip reader accepts one exact monthly HVFHV Parquet object through `file://`
-or `s3://`; S3 objects are materialized in the EC2-local cache through the
-instance IAM role. It selects one `source_date`, filters invalid rows, applies
-`max_trips` in DuckDB, and yields `TripRecord` objects in bounded batches rather
-than building a Python list.
+At startup, the local producer opens three explicit files: one monthly TLC HVFHV
+Parquet, one prepared `simulation_road_environment` Parquet, and one prepared
+`taxi_zone` Parquet. It does not resolve S3 URIs, active pointers, manifests, or
+AWS credentials. The trip reader selects one `source_date`, filters invalid rows,
+applies `max_trips` in DuckDB, and yields `TripRecord` objects in bounded batches
+rather than building a Python list. Removing that date and row limit is tracked
+separately in issue #352.
 
 1. Validate the chosen HVFHV source day and remove rows that cannot support a
    passenger-trip simulation.

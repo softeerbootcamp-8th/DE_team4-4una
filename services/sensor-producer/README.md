@@ -51,54 +51,34 @@ treated as driver behaviour, so `accel_x` and `jerk_x` do not vary by profile.
 
 ## Quick start
 
-From the repository root, install the workspace and fetch a deterministic sample
-from official NYC sources:
+The replay process runs locally and reads three prepared local Parquet files:
+
+- one TLC HVFHV monthly source file;
+- the `simulation_road_environment` artifact (published as
+  `road_environment.parquet`), containing the routable LION network
+  enriched with pavement ratings and speed humps;
+- the `taxi_zone` artifact (published as `taxi_zones.parquet`), containing TLC
+  taxi-zone geometries.
+
+The two environment files are outputs of `batch-jobs build-road-environment`.
+Copy one immutable build to the local machine before starting the replay. The
+producer does not resolve S3 URIs, active pointers, manifests, or AWS credentials.
+
+From the repository root, install the workspace:
 
 ```bash
 uv sync --all-packages
-uv run --package sensor-producer sensor-producer fetch-nyc-sample \
-  --output-dir data/nyc-sensor \
-  --source-date 2024-02-01 \
-  --zone-id 181 \
-  --max-trips 1000
 ```
-
-The bounded sample uses trips whose pickup and drop-off are both inside the
-selected taxi zone. This keeps the reference-data download and local routing
-graph small while still using real TLC rows.
-
-The local sample bundle uses fixed filenames: `lion.geojson`,
-`pavement.geojson`, `speed_humps.geojson`, `taxi_zones.zip`, `trips.json`, and
-`manifest.json`. The original monthly HVFHV source follows
-`fhvhv_tripdata_YYYY-MM.parquet`; `trips.json` is the bounded replay input derived
-from that Parquet file.
-
-The producer no longer parses `lion.geojson` directly (#225) — it routes over
-the canonical `road_segment` Parquet instead: a single-`snapshot_date`
-Parquet file (`segment_id`, `from_node_id`, `to_node_id`, `traffic_direction`,
-`street_name`, `geometry_wkb` in EPSG:32118, `length_m`, `posted_speed_mph`,
-`curve_radius_m`), the same contract Transform 2's
-`cleanse-sensor-events --road-segment-path` reads
-(`batch_jobs.road_segment.persist.write_road_segment_snapshot`'s
-`<dir>/snapshot_date=<date>/data.parquet` layout). Point `--road-segment-path`
-at that exact file — the same one given to Transform 2 — so both stages route
-against the identical road reference.
-
-> Producing this file for local dev currently has to be done by hand (see
-> `data/processed/road_segment/snapshot_date=.../data.parquet` under
-> "통합 테스트" in `services/orchestration/README.md`): `build-road-environment`
-> only publishes the versioned `normalized/road_segment/snapshot_date=.../
-> build_id=.../part-00000.parquet` layout today, nothing yet copies that into
-> this simple single-file shape. That gap is unrelated to #225 and out of
-> scope here.
 
 Start Kafka and replay in wall-clock time:
 
 ```bash
 docker compose -f infra/compose/kafka.yaml up -d
 uv run --package sensor-producer sensor-producer run \
-  --input-dir data/nyc-sensor \
-  --road-segment-path data/processed/road_segment/snapshot_date=2026-08-19/data.parquet \
+  --trips-path data/tlc/fhvhv_tripdata_2024-02.parquet \
+  --source-date 2024-02-01 \
+  --road-environment-path data/environment/road_environment.parquet \
+  --taxi-zone-path data/environment/taxi_zones.parquet \
   --publisher kafka \
   --bootstrap-servers localhost:9092 \
   --topic sensor-events \
@@ -106,6 +86,11 @@ uv run --package sensor-producer sensor-producer run \
   --sample-hz 10 \
   --time-scale 1
 ```
+
+To publish from the local machine to the EC2 Kafka broker, replace the bootstrap
+address with the broker's external listener, for example
+`--bootstrap-servers <EC2_PUBLIC_HOST>:9094`. Keep the broker Security Group
+restricted to the producer machine's public IP.
 
 Use `--time-scale 0` to remove waits during automated smoke tests. Use
 `--publisher jsonl --output <path>` to inspect the exact Kafka value payload
@@ -119,36 +104,11 @@ the replay if its skipped-trip ratio is too high. The option is disabled by
 default. The producer still flushes published events and writes the run summary
 before enforcing the threshold.
 
-## S3 road environment
-
-On EC2, the producer can follow the monthly batch job's active environment pointer
-or pin one immutable manifest. Attach an instance role with read access to the
-pointer, manifest, and referenced artifacts; never put AWS keys in the image.
-
-```bash
-docker build -f services/sensor-producer/Dockerfile -t de4-sensor-producer .
-docker run --rm -v "$PWD/data/nyc-sensor:/data:ro" \
-  -e AWS_REGION=us-east-1 \
-  -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
-  -e SENSOR_ENVIRONMENT_POINTER_URI=s3://de4-lake/prepared/simulation_environment/active.json \
-  de4-sensor-producer run \
-    --trips-uri s3://de4-lake/raw/tlc/fhvhv_tripdata_2024-02.parquet \
-    --source-date 2024-02-01 \
-    --publisher kafka
-```
-
-The producer verifies the manifest and both runtime Parquet checksums before routing,
-then caches them under `SENSOR_CACHE_DIR`. Use `--environment-manifest-uri` to pin a
-specific build. `--trips-uri` accepts one exact `file://` or `s3://` Parquet object;
-it never discovers a prefix or selects a month automatically. S3 input is downloaded
-through the EC2 IAM role and reused from the local cache on later runs.
-
 `--source-date` selects one NYC source day. DuckDB reads only the timestamps, pickup
 and drop-off zone IDs, trip distance, and Parquet row number needed by the simulator;
 it applies validity filters, deterministic ordering, and `--max-trips` before yielding
 rows in batches. The physical row number is the final ordering tie-breaker and part of
-the deterministic `trip_id`, so the input object must be treated as immutable. The
-legacy `--trips-path <trips.json>` input remains available for local fixtures.
+the deterministic `trip_id`, so the input file must be treated as immutable.
 
 ## Timing and delivery contracts
 
