@@ -74,7 +74,6 @@ def run_cleansing_job(
     logger.info("  quarantine=%s", cleansing_config.quarantine_output_path)
     logger.info("  features=%s", feature_config.output_path)
 
-    bronze = read_bronze_sensor_events(spark, cleansing_config.bronze_input_path)
     rules = load_cleansing_config(cleansing_config.rules_config_path)
     window_start, window_end = feature_input_window(target_hour)
     processed_frames: list[DataFrame] = []
@@ -83,7 +82,10 @@ def run_cleansing_job(
     target_quarantined: DataFrame | None = None
 
     for hour in _overlapping_hours(window_start, window_end):
-        hourly_bronze = filter_bronze_sensor_events_for_hour(bronze, hour)
+        bronze_hour = read_bronze_sensor_events(
+            spark, cleansing_config.bronze_input_path, hour
+        )
+        hourly_bronze = filter_bronze_sensor_events_for_hour(bronze_hour, hour)
         cleansed = cleanse_bronze_sensor_events(
             hourly_bronze,
             rules,

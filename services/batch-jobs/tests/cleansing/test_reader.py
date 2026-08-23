@@ -1,3 +1,6 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 from batch_jobs.cleansing.reader import (
     SOURCE_TIMESTAMP_COLUMN,
     filter_bronze_sensor_events_for_hour,
@@ -15,6 +18,17 @@ from bronze_samples import (
     valid_value,
     write_bronze_parquet,
 )
+
+
+def _write_partition(spark, root: Path, target_hour: datetime, *values: str) -> None:
+    """stream-processor의 event_date=/hour= 파티션 레이아웃을 그대로 재현한다."""
+    path = f"{root}/event_date={target_hour.date().isoformat()}/hour={target_hour.hour:02d}"
+    rows = [(value, BRONZE_TIMESTAMP) for value in values]
+    (
+        spark.createDataFrame(rows, "value string, timestamp timestamp")
+        .write.mode("overwrite")
+        .parquet(path)
+    )
 
 
 def test_reads_every_row_with_the_declared_columns(spark, tmp_path):
@@ -83,3 +97,40 @@ def test_filters_valid_and_malformed_rows_to_one_target_hour(spark, tmp_path):
     ).collect()
 
     assert {row["event_id"] for row in result} == {"target", None}
+
+
+def test_target_hour_reads_only_the_matching_partition_directory(spark, tmp_path):
+    root = tmp_path / "bronze"
+    hour_5 = datetime(2024, 2, 1, 5, tzinfo=UTC)
+    hour_6 = datetime(2024, 2, 1, 6, tzinfo=UTC)
+    _write_partition(spark, root, hour_5, valid_value(event_id="in-hour-5"))
+    _write_partition(spark, root, hour_6, valid_value(event_id="in-hour-6"))
+
+    rows = read_bronze_sensor_events(spark, root, hour_5).collect()
+
+    assert {row["event_id"] for row in rows} == {"in-hour-5"}
+
+
+def test_target_hour_partition_is_read_even_if_event_time_disagrees(spark, tmp_path):
+    # 파티션 배정과 event_time이 어긋나는 경우(늦은 도착 등)에도 pruning 단계는
+    # 파티션 위치만으로 읽는다. 실제 시간 필터링은 이후 in-memory 필터가 맡는다.
+    root = tmp_path / "bronze"
+    hour_5 = datetime(2024, 2, 1, 5, tzinfo=UTC)
+    mismatched = valid_value(event_id="mismatched", event_time="2024-02-01T09:00:00+00:00")
+    _write_partition(spark, root, hour_5, mismatched)
+
+    rows = read_bronze_sensor_events(spark, root, hour_5).collect()
+
+    assert {row["event_id"] for row in rows} == {"mismatched"}
+
+
+def test_target_hour_returns_empty_when_partition_directory_is_missing(spark, tmp_path):
+    root = tmp_path / "bronze"
+    hour_5 = datetime(2024, 2, 1, 5, tzinfo=UTC)
+    hour_6 = hour_5 + timedelta(hours=1)
+    _write_partition(spark, root, hour_6, valid_value())
+
+    result = read_bronze_sensor_events(spark, root, hour_5)
+
+    assert result.count() == 0
+    assert result.columns == read_bronze_sensor_events(spark, root, hour_6).columns
