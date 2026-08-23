@@ -32,6 +32,17 @@ _SPARK_EXECUTOR_CORES = "2"
 _SPARK_EXECUTOR_MEMORY = "8g"
 _SPARK_EXECUTOR_INSTANCES = "1"
 
+# EMR Serverless는 dynamic allocation이 기본 켜져 있어서, 실제 목표 executor 수는
+# spark.executor.instances가 아니라 max(dynamicAllocation.initialExecutors,
+# minExecutors, executor.instances)로 계산된다. EMR 기본값이 1보다 커서 Spark가
+# 계속 여분 executor를 요청하다 ApplicationMaxCapacityExceededException을
+# 반복적으로 만나고, 실제 계산은 성공해도 이 이력만으로 Job Run이 FAILED
+# 처리되는 것이 확인됐다(#372 재발 조사). min/max/initial을 전부 executor.instances와
+# 맞춰 애초에 추가 요청이 발생하지 않게 한다.
+_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS = "1"
+_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS = "1"
+_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS = "1"
+
 
 def submit_batch_jobs_command(
     task_id: str,
@@ -75,6 +86,9 @@ def submit_batch_jobs_command(
         f"--conf spark.executor.cores={_SPARK_EXECUTOR_CORES}",
         f"--conf spark.executor.memory={_SPARK_EXECUTOR_MEMORY}",
         f"--conf spark.executor.instances={_SPARK_EXECUTOR_INSTANCES}",
+        f"--conf spark.dynamicAllocation.minExecutors={_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS}",
+        f"--conf spark.dynamicAllocation.maxExecutors={_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS}",
+        f"--conf spark.dynamicAllocation.initialExecutors={_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS}",
         *(
             f"--conf spark.emr-serverless.driverEnv.{key}={value}"
             for key, value in (driver_env or {}).items()
