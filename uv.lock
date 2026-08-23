@@ -2619,6 +2619,7 @@ version = "0.1.0"
 source = { editable = "services/stream-processor" }
 dependencies = [
     { name = "de4-core" },
+    { name = "prometheus-client" },
     { name = "pyspark" },
 ]
 
@@ -2630,6 +2631,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "de4-core", editable = "libs/de4-core" },
+    { name = "prometheus-client", specifier = ">=0.21" },
     { name = "pyspark", specifier = "==4.0.2" },
 ]
 

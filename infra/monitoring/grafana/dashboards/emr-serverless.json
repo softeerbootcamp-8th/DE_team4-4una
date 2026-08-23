@@ -1,0 +1,353 @@
+{
+  "id": null,
+  "uid": "emr-serverless",
+  "title": "EMR Serverless",
+  "tags": ["emr-serverless", "spark", "monitoring"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "application_id",
+        "label": "Application ID",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Jobs",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Running Jobs",
+      "description": "AWS/EMRServerless RunningJobs (Statistic: Maximum).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "RunningJobs",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "runningJobs",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(runningJobs)",
+          "id": "runningJobsTotal",
+          "region": "default"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Success Jobs",
+      "description": "AWS/EMRServerless SuccessJobs (Statistic: Maximum).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "SuccessJobs",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "successJobs",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(successJobs)",
+          "id": "successJobsTotal",
+          "region": "default"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "fixedColor": "green", "mode": "fixed" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failed Jobs",
+      "description": "AWS/EMRServerless FailedJobs (Statistic: Maximum).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "FailedJobs",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "failedJobs",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(failedJobs)",
+          "id": "failedJobsTotal",
+          "region": "default"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Workers",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Running Workers",
+      "description": "RunningWorkerCount 합계 (Statistic: Maximum).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "RunningWorkerCount",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "runningWorkers",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(runningWorkers)",
+          "id": "runningWorkersTotal",
+          "region": "default"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "Capacity",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 10, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "CPU Allocated / Used",
+      "description": "Allocated: CPUAllocated(Maximum). Used: WorkerCpuUsed(Sum, AWS 권장 statistic).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "CPUAllocated",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "cpuAllocated",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(cpuAllocated)",
+          "id": "cpuAllocatedTotal",
+          "region": "default"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "WorkerCpuUsed",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Sum",
+          "region": "default",
+          "matchExact": false,
+          "id": "cpuUsed",
+          "hide": true
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(cpuUsed)",
+          "id": "cpuUsedTotal",
+          "region": "default"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Memory Allocated / Used",
+      "description": "Allocated: MemoryAllocated(Maximum). Used: WorkerMemoryUsed(Sum). 단위 GB.",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "MemoryAllocated",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": false,
+          "id": "memoryAllocated",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(memoryAllocated)",
+          "id": "memoryAllocatedTotal",
+          "region": "default"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EMRServerless",
+          "metricName": "WorkerMemoryUsed",
+          "dimensions": { "ApplicationId": "$application_id" },
+          "statistic": "Sum",
+          "region": "default",
+          "matchExact": false,
+          "id": "memoryUsed",
+          "hide": true
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "expression": "SUM(memoryUsed)",
+          "id": "memoryUsedTotal",
+          "region": "default"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decgbytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    }
+  ]
+}
