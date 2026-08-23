@@ -19,6 +19,7 @@ from sensor_producer.domain import (
 from sensor_producer.environment import RoadEnvironment
 from sensor_producer.nyc_data import (
     DEFAULT_HVFHV_URL,
+    TLC_TRIP_READER_VERSION,
     fetch_nyc_sample,
     iter_hvfhv_parquet_trips,
 )
@@ -31,13 +32,6 @@ def ratio(value: str) -> float:
     parsed = float(value)
     if not 0 <= parsed <= 1:
         raise argparse.ArgumentTypeError("ratio must be between 0 and 1")
-    return parsed
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
 
@@ -63,7 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--trips-path", type=local_parquet, required=True)
-    run_parser.add_argument("--source-date", type=date.fromisoformat, required=True)
     run_parser.add_argument(
         "--road-environment-path",
         type=local_parquet,
@@ -88,7 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     assignment = run_parser.add_mutually_exclusive_group()
     assignment.add_argument("--vehicle-profile-id", type=int)
     assignment.add_argument("--vehicle-mix", choices=sorted(VEHICLE_MIXES))
-    run_parser.add_argument("--max-trips", type=positive_int)
     run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
     return parser
 
@@ -164,13 +156,12 @@ def resolve_trips(
     return (
         iter_hvfhv_parquet_trips(
             arguments.trips_path,
-            arguments.source_date,
-            arguments.max_trips,
         ),
         {
             "format": "parquet",
             "path": str(arguments.trips_path),
-            "source_date": arguments.source_date.isoformat(),
+            "reader_version": TLC_TRIP_READER_VERSION,
+            "selection": "all_valid_rows",
         },
     )
 

@@ -7,7 +7,7 @@ import json
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,8 @@ PAVEMENT_DATASET_ID = "6yyb-pb25"
 HUMP_DATASET_ID = "jknp-skuy"
 USER_AGENT = "DE4-sensor-producer/0.1 (+https://github.com/softeerbootcamp-8th/DE_team4-4una)"
 TLC_TRIP_FETCH_BATCH_SIZE = 1000
+TLC_TRIP_READER_VERSION = "tlc-hvfhv-parquet-v2"
+
 
 def fetch_nyc_sample(
     output_dir: Path,
@@ -146,18 +148,13 @@ def fetch_hvfhv_rows(
 
 def iter_hvfhv_parquet_trips(
     path: Path,
-    source_date: date,
-    maximum: int | None = None,
     *,
     batch_size: int = TLC_TRIP_FETCH_BATCH_SIZE,
 ) -> Iterator[TripRecord]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if maximum is not None and maximum <= 0:
-        raise ValueError("maximum must be positive")
 
-    limit_clause = " LIMIT ?" if maximum is not None else ""
-    query = f"""
+    query = """
         SELECT
             request_datetime,
             pickup_datetime,
@@ -167,9 +164,7 @@ def iter_hvfhv_parquet_trips(
             trip_miles,
             file_row_number
         FROM read_parquet(?, file_row_number = true)
-        WHERE request_datetime >= ?
-          AND request_datetime < ?
-          AND request_datetime IS NOT NULL
+        WHERE request_datetime IS NOT NULL
           AND pickup_datetime IS NOT NULL
           AND dropoff_datetime IS NOT NULL
           AND PULocationID IS NOT NULL
@@ -181,22 +176,14 @@ def iter_hvfhv_parquet_trips(
           AND isfinite(trip_miles)
         ORDER BY
             request_datetime,
-            pickup_datetime,
-            dropoff_datetime,
             file_row_number
-        {limit_clause}
     """
-    # 날짜 범위 조건을 사용해 Parquet row group predicate pushdown을 허용한다
-    period_start = datetime.combine(source_date, time.min)
-    period_end = period_start + timedelta(days=1)
-    parameters: list[object] = [str(path), period_start, period_end]
-    if maximum is not None:
-        parameters.append(maximum)
 
     connection = duckdb.connect()
     yielded = False
     try:
-        cursor = connection.execute(query, parameters)
+        cursor = connection.execute(query, [str(path)])
+        # Python 메모리에 전체 원천을 올리지 않고 정렬된 결과를 일정 건수씩 읽는다
         while rows := cursor.fetchmany(batch_size):
             for row in rows:
                 request_time = parse_nyc_datetime(row[0])
@@ -204,7 +191,6 @@ def iter_hvfhv_parquet_trips(
                 dropoff_time = parse_nyc_datetime(row[2])
                 trip = TripRecord(
                     trip_id=stable_trip_id(
-                        source_date,
                         int(row[6]),
                         request_time,
                         pickup_time,
@@ -223,13 +209,12 @@ def iter_hvfhv_parquet_trips(
                 yielded = True
                 yield trip
         if not yielded:
-            raise ValueError(f"no valid HVFHV trips found for {source_date}")
+            raise ValueError(f"no valid HVFHV trips found in {path}")
     finally:
         connection.close()
 
 
 def stable_trip_id(
-    source_date: date,
     file_row_number: int,
     request_datetime: datetime,
     pickup_datetime: datetime,
@@ -239,8 +224,7 @@ def stable_trip_id(
     trip_miles: float,
 ) -> str:
     values = (
-        "tlc-hvfhv-parquet-v1",
-        source_date.isoformat(),
+        TLC_TRIP_READER_VERSION,
         str(file_row_number),
         request_datetime.isoformat(),
         pickup_datetime.isoformat(),

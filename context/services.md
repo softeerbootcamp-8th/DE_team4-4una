@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-23
 ---
 
 # Service Map
@@ -13,8 +13,8 @@ and does not by itself settle those boundaries.
 | Workspace member | Proposed responsibility | Primary inputs | Primary outputs |
 | --- | --- | --- | --- |
 | `libs/de4-core` | Shared IDs, enums, event contracts, dataset contracts, configuration primitives | Accepted cross-service designs | Importable versioned contracts |
-| `services/batch-jobs` | Download, snapshot, validate, and normalize reference data; prepare deterministic TLC sample; run Spark map-matching and monthly score jobs if no separate Spark package is added | NYC/OSM reference sources, HVFHV data, S3 Bronze | Road environment, trip sample, Silver matches, monthly Gold dataset |
-| `services/sensor-producer` | Route trips and replay deterministic synthetic vehicle observations with `trip_seq` in wall-clock time | Road environment, trip sample, vehicle profiles | Kafka dispatch and Bronze-shape sensor events without `segment_id` |
+| `services/batch-jobs` | Download, snapshot, validate, and normalize reference data; run Spark map-matching and monthly score jobs if no separate Spark package is added | NYC/OSM reference sources, S3 Bronze | Road environment, Silver matches, monthly Gold dataset |
+| `services/sensor-producer` | Read one local monthly HVFHV Parquet, route every valid trip, and replay deterministic synthetic vehicle observations with `trip_seq` in wall-clock time | Road environment, monthly HVFHV Parquet, vehicle profiles | Kafka dispatch and Bronze-shape sensor events without `segment_id` |
 | `services/stream-processor` | Validate and persist Kafka sensor records without changing their raw meaning | Kafka events, shared contracts | Immutable S3 Bronze `sensor_event` records |
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance, and rank caller-supplied candidate routes by the comfort of their segments | Serving store | HTTP API responses |
 | `services/orchestration` | Coordinate monthly reference jobs, replay runs, score jobs, and publication | Schedules and run configuration | Workflow state and run metadata |
@@ -64,6 +64,4 @@ The following boundaries require an explicit decision before implementation:
   own workspace member.
 - Whether Spark GPS-to-LION map matching lives in `batch-jobs` or a separate
   workspace member. It must produce `sensor_events_matched` before Gold scoring.
-- Whether trip sampling belongs to the monthly orchestration workflow or to a
-  simulation-specific preparation command.
 - Whether the dashboard is required for the first end-to-end milestone.

@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-23
 ---
 
 # Project Definition
@@ -68,13 +68,14 @@ monthly batch pipeline.
 ### Simulation input and replay
 
 - Use NYC TLC High Volume For-Hire Vehicle trip records.
-- Treat every selected completed trip as a dispatch event.
+- Treat every valid completed trip in one pinned monthly Parquet as a dispatch event.
 - Use the source request timestamp for dispatch ordering when it is present; the
   passenger-motion simulation starts at pickup.
 - Simulate only the occupied passenger journey from pickup to drop-off.
 - Because records identify taxi zones rather than exact coordinates, choose
   deterministic valid road points inside the pickup and drop-off zones.
-- Select a deterministic sample of approximately 1,000 trips from one source day.
+- Replay the complete valid-row set from the configured monthly Parquet in
+  deterministic request-time and source-row order.
 - Replay dispatch gaps and movement in wall-clock time: one simulated second is
   one real second.
 - Find a reasonable road route between the chosen points.
@@ -122,7 +123,7 @@ score"); the request and response grain is in `context/data/contracts.md`.
 
 - A runnable local end-to-end demonstration
 - Monthly ingestion of road reference datasets
-- Deterministic FHV trip selection and replay
+- Deterministic full-file FHV trip replay
 - Synthetic vehicle-motion and comfort-related events at a configurable sampling
   frequency
 - Kafka transport and lake persistence
@@ -145,8 +146,8 @@ score"); the request and response grain is in `context/data/contracts.md`.
 The first end-to-end milestone is successful when the team can:
 
 1. Rebuild a versioned road environment from pinned source snapshots.
-2. Reproduce the same trip sample, endpoints, routes, and sensor events from the
-   same inputs and simulation configuration.
+2. Reproduce the same eligible-trip order, endpoints, routes, and sensor events
+   from the same immutable input file and simulation configuration.
 3. Observe selected trip events flowing through Kafka into the local data lake.
 4. Run a Spark job that produces one versioned monthly result for each observed
    segment x vehicle-type combination.

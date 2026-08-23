@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 ---
 
 # Data Lineage
@@ -25,8 +25,7 @@ the canonical identifier is selected.
 
 ```text
 HVFHV source snapshot
-  -> eligible rows
-  -> deterministic ~1000-trip sample
+  -> complete valid-row set in deterministic request/source-row order
   -> deterministic pickup/drop-off road points
   -> canonical-segment routes
   -> vehicle-profile assignment

@@ -1,5 +1,5 @@
-version: 0.2.2
-last_reviewed: 2026-08-22
+version: 0.2.3
+last_reviewed: 2026-08-23
 status: draft
 
 sources:
@@ -78,21 +78,19 @@ sources:
 
   - id: tlc_hvfhv_trip_records
     prototype_uri: https://d37ci6vzurychx.cloudfront.net/trip-data/fhvhv_tripdata_2024-02.parquet
-    prototype_source_day: 2024-02-01
     source_filename_pattern: fhvhv_tripdata_YYYY-MM.parquet
     file_format: Apache Parquet
     role: Passenger-trip simulation input
     expected_grain: One completed trip record
-    refresh_cadence: one pinned source day per demonstration run
+    refresh_cadence: one pinned monthly file per replay run
     required_uses:
       - Request-time dispatch ordering
       - Pickup and drop-off taxi zones
       - Pickup-to-drop-off passenger-trip duration and available distance signals
-      - Deterministic sampling of approximately 1000 trips
+      - Deterministic replay of every valid row in the configured file
     open_items:
-      - Eligible-row filters
       - Acceptance of the implemented physical Parquet row-number tie-breaker as the long-term stable row identity
-      - Sampling and vehicle-assignment algorithms
+      - Vehicle-assignment policy
       - Treatment of overlapping trips and long dispatch gaps
 
 source_snapshot_metadata:

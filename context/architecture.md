@@ -29,11 +29,8 @@ flowchart LR
     R[Monthly reference sources] --> B[batch-jobs]
     B --> RS[(Versioned road environment)]
 
-    T[TLC HVFHV source day] --> B
-    B --> TS[(Deterministic trip sample)]
-
     RS --> P[sensor-producer]
-    TS --> P
+    T[TLC HVFHV monthly Parquet] --> P
     V[Vehicle profiles] --> P
     P --> K[Kafka]
 
@@ -95,9 +92,10 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 
 ### Wall-clock replay
 
-The producer reads the pinned trip sample and road environment, chooses or loads
-a vehicle profile, computes a route, and emits time-ordered observations. It must
-be restartable without producing logically different events.
+The producer reads every valid trip from one pinned monthly Parquet and the road
+environment, chooses or loads a vehicle profile, computes a route, and emits
+time-ordered observations. It must be restartable without producing logically
+different events.
 
 The producer runtime is local-only. It receives exact local paths for the prepared
 road-environment Parquet, taxi-zone Parquet, and TLC HVFHV Parquet instead of
