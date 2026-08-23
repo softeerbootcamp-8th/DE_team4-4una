@@ -45,11 +45,14 @@ def submit_batch_jobs_command(
         "entryPoint": _ENTRY_POINT_TEMPLATE,
         "entryPointArguments": entry_point_arguments,
     }
+    # sparkSubmitParameters는 쉘을 거치지 않고 EMR Serverless API에 문자열
+    # 그대로 전달되므로, 값을 따옴표로 감싸면 그 문자가 값의 일부로 들어가
+    # 버린다(#368) — 값에 공백이 없는 한 따옴표 없이 그대로 이어붙인다.
     conf_flags = [
-        f'--conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON="{_PYSPARK_PYTHON_PATH}"',
-        f'--conf spark.executorEnv.PYSPARK_PYTHON="{_PYSPARK_PYTHON_PATH}"',
+        f"--conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
+        f"--conf spark.executorEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
         *(
-            f'--conf spark.emr-serverless.driverEnv.{key}="{value}"'
+            f"--conf spark.emr-serverless.driverEnv.{key}={value}"
             for key, value in (driver_env or {}).items()
         ),
     ]

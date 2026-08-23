@@ -61,8 +61,12 @@ def test_without_driver_env_only_pyspark_python_confs_are_set():
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
-    assert 'spark.emr-serverless.driverEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
-    assert 'spark.executorEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
+    # EMR Serverless는 sparkSubmitParameters를 쉘 없이 문자열 그대로 받으므로
+    # 따옴표를 감싸면 그 문자가 값의 일부가 돼 버린다(#368) — 부분 문자열 검사가
+    # 아니라 정확히 일치하는지, 따옴표가 섞이지 않았는지 함께 검증한다.
+    assert "spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    assert "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    assert '"' not in params
     assert "POSTGRES_HOST" not in params
 
 
@@ -73,10 +77,9 @@ def test_driver_env_is_rendered_as_spark_submit_parameters():
         driver_env={"POSTGRES_HOST": "db.example.com"},
     )
 
-    assert (
-        'spark.emr-serverless.driverEnv.POSTGRES_HOST="db.example.com"'
-        in operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
-    )
+    params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
+    assert "spark.emr-serverless.driverEnv.POSTGRES_HOST=db.example.com" in params
+    assert '"' not in params
 
 
 def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
@@ -87,5 +90,6 @@ def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
     )
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
-    assert 'spark.emr-serverless.driverEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
-    assert 'spark.executorEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
+    assert "spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    assert "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3.12" in params
+    assert '"' not in params
