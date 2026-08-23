@@ -17,6 +17,11 @@ _APPLICATION_ID_TEMPLATE = "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
 _EXECUTION_ROLE_ARN_TEMPLATE = "{{ var.value.EMR_SERVERLESS_EXECUTION_ROLE_ARN }}"
 _ENTRY_POINT_TEMPLATE = "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
 
+# batch-jobs 커스텀 이미지는 python3.12 전용 경로에만 설치되는데, base 이미지의
+# 기본 python3는 3.9라 PYSPARK_PYTHON을 명시하지 않으면 Spark driver/executor가
+# batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
+_PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
+
 
 def submit_batch_jobs_command(
     task_id: str,
@@ -26,6 +31,9 @@ def submit_batch_jobs_command(
     outlets: list[Any] | None = None,
 ) -> EmrServerlessStartJobOperator:
     """batch-jobs CLI 커맨드 하나를 EMR Serverless Job Run으로 제출하는 task를 만든다.
+
+    모든 Job Run에는 `driver_env` 유무와 무관하게 `PYSPARK_PYTHON` conf가
+    driver/executor 양쪽에 강제로 붙는다(#360).
 
     `driver_env`는 `spark.emr-serverless.driverEnv.<KEY>` conf로 변환돼 Spark
     driver 프로세스의 환경변수가 된다. **주의**: 여기 넘긴 값은 EMR Serverless
@@ -37,12 +45,15 @@ def submit_batch_jobs_command(
         "entryPoint": _ENTRY_POINT_TEMPLATE,
         "entryPointArguments": entry_point_arguments,
     }
-    spark_submit_parameters = " ".join(
-        f'--conf spark.emr-serverless.driverEnv.{key}="{value}"'
-        for key, value in (driver_env or {}).items()
-    )
-    if spark_submit_parameters:
-        spark_submit["sparkSubmitParameters"] = spark_submit_parameters
+    conf_flags = [
+        f'--conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON="{_PYSPARK_PYTHON_PATH}"',
+        f'--conf spark.executorEnv.PYSPARK_PYTHON="{_PYSPARK_PYTHON_PATH}"',
+        *(
+            f'--conf spark.emr-serverless.driverEnv.{key}="{value}"'
+            for key, value in (driver_env or {}).items()
+        ),
+    ]
+    spark_submit["sparkSubmitParameters"] = " ".join(conf_flags)
 
     return EmrServerlessStartJobOperator(
         task_id=task_id,
