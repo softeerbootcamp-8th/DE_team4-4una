@@ -57,10 +57,13 @@ def test_entry_point_arguments_are_passed_through_unchanged():
     assert operator.job_driver["sparkSubmit"]["entryPointArguments"] == args
 
 
-def test_without_driver_env_no_spark_submit_parameters_key_is_set():
+def test_without_driver_env_only_pyspark_python_confs_are_set():
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
-    assert "sparkSubmitParameters" not in operator.job_driver["sparkSubmit"]
+    params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
+    assert 'spark.emr-serverless.driverEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
+    assert 'spark.executorEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
+    assert "POSTGRES_HOST" not in params
 
 
 def test_driver_env_is_rendered_as_spark_submit_parameters():
@@ -74,3 +77,15 @@ def test_driver_env_is_rendered_as_spark_submit_parameters():
         'spark.emr-serverless.driverEnv.POSTGRES_HOST="db.example.com"'
         in operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
     )
+
+
+def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
+    operator = _build_operator(
+        task_id="run_thing",
+        entry_point_arguments=["cmd"],
+        driver_env={"POSTGRES_HOST": "db.example.com"},
+    )
+
+    params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
+    assert 'spark.emr-serverless.driverEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
+    assert 'spark.executorEnv.PYSPARK_PYTHON="/usr/bin/python3.12"' in params
