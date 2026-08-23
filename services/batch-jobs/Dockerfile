@@ -36,5 +36,10 @@ RUN curl -fL \
     https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar \
     -o "${SPARK_HOME}/jars/postgresql-42.7.4.jar"
 
+# batch_jobs는 python3.12 전용 경로에만 설치되는데 base 이미지 기본 python3는
+# 3.9라, PYSPARK_PYTHON을 명시하지 않으면 Spark driver/executor가 모듈을 못 찾는다(#360).
+# Job Run 제출 쪽 --conf(emr_serverless.py)와 병행해 이미지 레벨에서도 강제한다.
+ENV PYSPARK_PYTHON=/usr/bin/python3.12
+
 # EMR Serverless는 hadoop 사용자로 실행
 USER hadoop:hadoop
