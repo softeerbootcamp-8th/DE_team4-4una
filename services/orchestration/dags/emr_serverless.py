@@ -48,9 +48,18 @@ def submit_batch_jobs_command(
     # sparkSubmitParameters는 쉘을 거치지 않고 EMR Serverless API에 문자열
     # 그대로 전달되므로, 값을 따옴표로 감싸면 그 문자가 값의 일부로 들어가
     # 버린다(#368) — 값에 공백이 없는 한 따옴표 없이 그대로 이어붙인다.
+    #
+    # driverEnv/executorEnv(#360)는 컨테이너 환경변수만 세팅할 뿐이고, EMR
+    # Serverless가 local:// entryPoint 스크립트를 실제로 어떤 인터프리터로
+    # 부팅할지는 이 환경변수를 참조하지 않는 것으로 실제 Job Run 재현으로
+    # 확인됐다(#368 재발 조사 — entryPoint의 site-packages import가 line 1에서
+    # 바로 실패). Spark의 SparkSubmit/PythonRunner가 직접 읽는
+    # spark.pyspark.python/spark.pyspark.driver.python conf를 병행한다.
     conf_flags = [
         f"--conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.executorEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
+        f"--conf spark.pyspark.python={_PYSPARK_PYTHON_PATH}",
+        f"--conf spark.pyspark.driver.python={_PYSPARK_PYTHON_PATH}",
         *(
             f"--conf spark.emr-serverless.driverEnv.{key}={value}"
             for key, value in (driver_env or {}).items()
