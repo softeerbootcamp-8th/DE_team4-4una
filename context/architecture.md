@@ -226,15 +226,20 @@ heartbeats, task and DAG-run state and duration). Every dashboard JSON is the
 source of truth (`allowUiUpdates: false` in `dashboards.yml`); manual Grafana
 UI edits are not persisted.
 
-Kafka clients that run as separate Project EC2 containers — `sensor-producer`,
-`stream-processor`, and `kafka-exporter` — all use `network_mode: host`
-and connect to `localhost:9092` rather than a compose network hostname like
+Kafka is an EC2-hosted infrastructure service managed from
+`infra/compose/kafka.yaml`. Automatic CD reconciles that Compose definition and
+the `sensor-events` topic, while Sensor Producer replay runs locally rather than
+being deployed on every repository update. The local producer connects through
+the broker's external listener on port 9094. The listener is PLAINTEXT in the
+PoC, so its Security Group rule must be restricted to the producer host's public
+IP.
+
+Kafka clients that run as separate Project EC2 containers — `stream-processor`
+and `kafka-exporter` — use `network_mode: host` and connect to the internal
+listener at `localhost:9092` rather than a compose network hostname like
 `kafka:9092`. On the default bridge network, a client container's own
 `localhost` refers to itself, not the sibling `kafka` container, so a
 same-network hostname connection fails past the initial bootstrap request.
-This was discovered and fixed independently for `sensor-producer` (issue
-#316) and `stream-processor` (issue #323); `kafka-exporter` follows the same
-pattern for consistency.
 
 Airflow does not expose `/metrics` itself. `infra/compose/airflow.yaml` adds
 an `airflow-statsd-exporter` sidecar (`prom/statsd-exporter`) on the same

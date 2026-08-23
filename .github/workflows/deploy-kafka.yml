@@ -1,0 +1,146 @@
+# EC2에 Kafka Compose 설정을 동기화하고 broker와 필수 topic을 준비한다.
+# ci.yml이 자동 배포 시 호출하는 reusable workflow다.
+
+name: Deploy Kafka
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-kafka
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    env:
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      REPO_DIR: ${{ vars.ORCHESTRATION_REPO_DIR || '/home/ec2-user/DE_team4-4una' }}
+      COMPOSE_PROJECT_NAME: de4-kafka
+      TOPIC: ${{ vars.KAFKA_SENSOR_TOPIC || 'sensor-events' }}
+      TOPIC_PARTITIONS: ${{ vars.KAFKA_SENSOR_TOPIC_PARTITIONS || '3' }}
+
+    steps:
+      - name: Check required variables
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          missing=""
+          for name in EC2_HOST EC2_SSH_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::repository variables가 비어 있습니다:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Validate compose
+        env:
+          KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST || vars.EC2_HOST }}
+        run: docker compose -p "$COMPOSE_PROJECT_NAME" -f infra/compose/kafka.yaml config --quiet
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync compose file
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$REPO_DIR/infra/compose'"
+          scp infra/compose/kafka.yaml \
+            "${EC2_USER}@${EC2_HOST}:${REPO_DIR}/infra/compose/kafka.yaml"
+
+      - name: Deploy broker and topic
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST || vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "REPO_DIR='$REPO_DIR' \
+             COMPOSE_PROJECT_NAME='$COMPOSE_PROJECT_NAME' \
+             KAFKA_EXTERNAL_HOST='$KAFKA_EXTERNAL_HOST' \
+             TOPIC='$TOPIC' \
+             TOPIC_PARTITIONS='$TOPIC_PARTITIONS' \
+             bash -s" <<'EOF'
+          set -euo pipefail
+
+          cd "$REPO_DIR"
+          export KAFKA_EXTERNAL_HOST
+          compose=(docker compose -p "$COMPOSE_PROJECT_NAME" -f infra/compose/kafka.yaml)
+
+          # up은 선언 상태만 맞추므로 이미 같은 설정으로 실행 중이면 재시작하지 않는다.
+          "${compose[@]}" up -d --wait --wait-timeout 120
+
+          topic_command=("${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server localhost:9092)
+
+          if ! "${topic_command[@]}" --list | grep -Fxq "$TOPIC"; then
+            "${topic_command[@]}" --create \
+              --topic "$TOPIC" \
+              --partitions "$TOPIC_PARTITIONS" \
+              --replication-factor 1
+          else
+            current_partitions=$("${topic_command[@]}" --describe --topic "$TOPIC" \
+              | sed -n 's/.*PartitionCount: \([0-9][0-9]*\).*/\1/p' \
+              | head -n 1)
+
+            if [ -z "$current_partitions" ]; then
+              echo "Kafka topic partition count를 확인하지 못했습니다: $TOPIC"
+              exit 1
+            fi
+
+            # Kafka partition은 줄일 수 없으므로 필요한 경우에만 안전하게 늘린다.
+            if [ "$current_partitions" -lt "$TOPIC_PARTITIONS" ]; then
+              "${topic_command[@]}" --alter \
+                --topic "$TOPIC" \
+                --partitions "$TOPIC_PARTITIONS"
+            fi
+          fi
+
+          "${topic_command[@]}" --describe --topic "$TOPIC"
+          EOF
+
+      - name: Job summary
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST || vars.EC2_HOST }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Kafka 배포"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+            echo "| internal broker | \`localhost:9092\` |"
+            echo "| external broker | \`${KAFKA_EXTERNAL_HOST:-(미설정)}:9094\` |"
+            echo "| topic | \`$TOPIC\` |"
+            echo "| partitions | \`$TOPIC_PARTITIONS\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,11 +1,11 @@
-# main에 들어간 Sensor Producer 이미지를 ECR에 배포하고
+# 필요할 때 Sensor Producer 이미지를 ECR에 배포하고
 # EC2에서 리플레이 컨테이너를 새 이미지로 교체한다.
-# ci.yml이 CI 통과 후 호출하는 reusable workflow다.
+# 로컬 리플레이로 전환한 뒤에는 자동 CD에서 호출하지 않고 수동으로만 실행한다.
 
 name: Deploy Sensor Producer
 
 on:
-  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
