@@ -7,7 +7,13 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, StructField, StructType
+from pyspark.sql.types import (
+    BooleanType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 
 from batch_jobs.schemas import (
     BRONZE_SENSOR_EVENT_SCHEMA,
@@ -25,15 +31,48 @@ _PARSE_SCHEMA = StructType(
     ]
 )
 
+# target_hour 파티션 디렉터리가 아직 없을 때 반환하는 빈 DataFrame의 스키마.
+# read_bronze_sensor_events()의 최종 select 결과와 동일한 컬럼 구성을 유지한다.
+_EMPTY_BRONZE_SCHEMA = StructType(
+    [
+        *BRONZE_SENSOR_EVENT_SCHEMA.fields,
+        StructField(RAW_RECORD_COLUMN, StringType(), nullable=True),
+        StructField(PARSE_FAILED_COLUMN, BooleanType(), nullable=False),
+        StructField(SOURCE_TIMESTAMP_COLUMN, TimestampType(), nullable=True),
+    ]
+)
 
-def read_bronze_sensor_events(spark: SparkSession, path: str | Path) -> DataFrame:
-    """Read one Bronze sensor_event Parquet path into a DataFrame.
+
+def bronze_hour_partition_path(bronze_root: str | Path, target_hour: datetime) -> str:
+    """stream-processor bronze_sink의 event_date=/hour= 파티션 경로와 동일한 규칙."""
+    root = str(bronze_root).rstrip("/")
+    return f"{root}/event_date={target_hour.date().isoformat()}/hour={target_hour.hour:02d}"
+
+
+def read_bronze_sensor_events(
+    spark: SparkSession, path: str | Path, target_hour: datetime | None = None
+) -> DataFrame:
+    """Read Bronze sensor_event Parquet into a DataFrame.
 
     stream-processor는 Kafka 레코드를 Parquet으로 적재하며 센서 필드는
     value 컬럼의 JSON 문자열에 담겨 있다. 그 JSON을 Bronze 스키마로 풀고,
     원본 문자열과 파싱 실패 여부를 함께 남긴다.
+
+    target_hour가 주어지면 Bronze 전체가 아니라 그 시간의 event_date=/hour=
+    파티션 디렉터리만 읽는다. 해당 파티션이 아직 없으면(예: 그 시간에 이벤트가
+    없었거나 아직 도착하지 않음) 예외 대신 빈 DataFrame을 반환한다 — 파티션
+    부재를 "그 시간 이벤트 0건"과 동일하게 취급한다.
     """
-    envelope = spark.read.parquet(str(path))
+    if target_hour is not None:
+        _require_utc_hour(target_hour)
+        partition_path = bronze_hour_partition_path(path, target_hour)
+        if not _path_exists(spark, partition_path):
+            return spark.createDataFrame([], _EMPTY_BRONZE_SCHEMA)
+        read_path = partition_path
+    else:
+        read_path = str(path)
+
+    envelope = spark.read.parquet(read_path)
     # 부분 파싱이 켜져 있으면 깨진 JSON도 앞부분 필드가 채워져 결과가 NULL이 아니다.
     # 실패 여부는 원본이 담기는 corrupt record 컬럼으로만 확실히 알 수 있다.
     parsed = F.from_json(
@@ -83,6 +122,12 @@ def filter_bronze_sensor_events_for_window(
         (assigned_time >= F.lit(window_start))
         & (assigned_time < F.lit(window_end))
     )
+
+
+def _path_exists(spark: SparkSession, path: str) -> bool:
+    hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(path)
+    filesystem = hadoop_path.getFileSystem(spark._jsc.hadoopConfiguration())
+    return bool(filesystem.exists(hadoop_path))
 
 
 def _require_utc_hour(target_hour: datetime) -> None:
