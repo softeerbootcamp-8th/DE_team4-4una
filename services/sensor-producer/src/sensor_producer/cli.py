@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from sensor_producer.domain import (
@@ -25,7 +25,7 @@ from sensor_producer.nyc_data import (
 )
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
-from sensor_producer.simulation import ReplayCoordinator, ReplayResult
+from sensor_producer.simulation import TIMESTAMP_POLICY, ReplayCoordinator, ReplayResult
 
 
 def ratio(value: str) -> float:
@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return
 
+    execution_started_at = datetime.now(UTC)
     environment, sources, environment_summary = resolve_environment(arguments)
     trips, trip_source_summary = resolve_trips(arguments)
     use_mix = arguments.vehicle_mix is not None
@@ -123,6 +124,8 @@ def main(argv: list[str] | None = None) -> None:
     result = coordinator.replay(trips)
     summary = {
         "run_id": config.run_id,
+        "execution_started_at": execution_started_at.isoformat(),
+        "timestamp_policy": TIMESTAMP_POLICY,
         "road_segment_snapshot_date": environment.road_segment_snapshot_date.isoformat(),
         "publisher": arguments.publisher,
         "topic": arguments.topic if arguments.publisher == "kafka" else None,

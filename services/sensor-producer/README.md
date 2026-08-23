@@ -110,15 +110,22 @@ batches. Trips are ordered by request time and physical row number. The row numb
 also part of the deterministic `trip_id`, so the input file must be treated as
 immutable. Directory discovery and multi-file replay are not supported.
 
+When each Trip is actually dispatched, the producer captures that moment's UTC
+date. Published request, pickup, drop-off, and sensor timestamps combine that date
+with the original TLC clock time. TLC day offsets within the Trip are retained, so
+a passenger journey crossing midnight remains ordered. The source timestamps remain
+the separate wall-clock schedule used to preserve dispatch and movement gaps.
+
 ## Timing and delivery contracts
 
-- Dispatch actions are ordered by `request_datetime`; route planning happens in
-  that action.
-- Sensor event time starts at `pickup_datetime`, ends at `dropoff_datetime`, and
-  uses zero-based contiguous `trip_seq` values.
+- Dispatch actions are ordered and scheduled by the source `request_datetime`;
+  route planning happens in that action.
+- Sensor `event_time` uses the dispatch moment's UTC date and the TLC clock time,
+  starts at the rebased pickup, ends at the rebased drop-off, and uses zero-based
+  contiguous `trip_seq` values.
 - Kafka values follow `de4_core.SensorEvent`; the message key is `trip_id`, so
   one trip stays ordered within one partition.
-- Kafka assigns the record timestamp independently from the historical TLC
+- Kafka assigns the record timestamp independently from the logical sensor
   `event_time`. Spark adds `_ingested_at` only when the record enters Bronze.
 - Bronze contains GPS but intentionally omits `segment_id`. The later Spark job
   remains the authoritative GPS-to-LION map matcher.

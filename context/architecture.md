@@ -94,8 +94,9 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 
 The producer reads every valid trip from one pinned monthly Parquet and the road
 environment, chooses or loads a vehicle profile, computes a route, and emits
-time-ordered observations. It must be restartable without producing logically
-different events.
+time-ordered observations. Source timestamps schedule wall-clock work. Published
+sensor timestamps instead combine each Trip's actual UTC dispatch date with its
+TLC clock time and retain source day offsets within that Trip.
 
 The producer runtime is local-only. It receives exact local paths for the prepared
 road-environment Parquet, taxi-zone Parquet, and TLC HVFHV Parquet instead of

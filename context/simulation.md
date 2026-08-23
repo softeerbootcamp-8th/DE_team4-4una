@@ -31,9 +31,9 @@ A simulation run should record at least:
 - replay start time and time-scale value
 
 The same inputs and logical seeds must produce the same eligible trips, endpoints,
-routes, segment traversal order, and synthetic measurements. Wall-clock event
-timestamps may differ between runs, so events should also carry deterministic
-simulation offsets.
+routes, segment traversal order, and synthetic measurements. Event dates may differ
+because each Trip uses its actual UTC dispatch date, while TLC clock time and
+Trip-relative offsets remain stable.
 
 ## Implemented prototype pipeline
 
@@ -50,10 +50,10 @@ batches rather than building a Python list.
    The row number also participates in the versioned `trip_id`, so rewriting the
    input file in place is outside the reproducibility contract. The producer does
    not apply a source-date filter, row limit, or sampling policy.
-3. Use the source request time as the dispatch time and use pickup time as the
-   beginning of passenger motion. If the selected source schema does not provide
-   request time, require an accepted fallback policy rather than silently
-   substituting a different timestamp.
+3. Use source timestamps only for dispatch ordering and wall-clock scheduling. At
+   each actual dispatch, capture the current UTC date and combine it with the TLC
+   request clock time. Rebase pickup and drop-off the same way while retaining their
+   source-day offsets from request, so a Trip crossing midnight remains valid.
 4. Find valid canonical-road points inside pickup and drop-off taxi zones using a
    stable spatial ordering plus a deterministic seed derived from the trip ID.
 5. Route between endpoints over the canonical road graph.
@@ -137,6 +137,14 @@ and preserves idle gaps. It consumes input in non-decreasing `request_datetime`
 order and keeps only the next pending dispatch plus the next sample from each
 active trip in memory. `time_scale = 0` is an explicit no-wait verification
 mode; no implicit idle-gap cap is applied.
+
+Scheduling time and published event time are deliberately separate. Queue actions
+remain on the source TLC timeline so gaps are preserved, while published timestamps
+remain independent of the historical calendar year. Route `planned_at` and sensor
+`event_time` use timestamp policy `dispatch-utc-date-with-tlc-clock-v1`: capture the
+UTC date once per Trip when its
+dispatch action runs, combine it with TLC time-of-day, and retain only intra-Trip
+source date differences. The run summary records this policy and execution start.
 
 ## Prototype signal model
 
