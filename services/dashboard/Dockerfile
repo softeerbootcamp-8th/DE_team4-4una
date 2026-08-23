@@ -6,4 +6,6 @@ COPY . .
 
 RUN uv sync --locked --package dashboard --no-dev --no-editable
 
+EXPOSE 8501
+
 CMD ["uv", "run", "--no-sync", "--package", "dashboard", "dashboard"]
