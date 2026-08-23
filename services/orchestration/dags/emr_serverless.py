@@ -22,6 +22,16 @@ _ENTRY_POINT_TEMPLATE = "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
 # batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
 _PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
 
+# Application의 maximumCapacity가 4 vCPU / 16 GB로 고정돼 있다(#372). Spark
+# 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을 전부
+# 써버려 executor가 하나도 못 뜨고 20분 뒤 ApplicationMaxCapacityExceededException으로
+# 죽는다. driver를 작게 고정해 executor 1개가 항상 같이 들어가도록 상한을 못박는다.
+_SPARK_DRIVER_CORES = "1"
+_SPARK_DRIVER_MEMORY = "2g"
+_SPARK_EXECUTOR_CORES = "2"
+_SPARK_EXECUTOR_MEMORY = "8g"
+_SPARK_EXECUTOR_INSTANCES = "1"
+
 
 def submit_batch_jobs_command(
     task_id: str,
@@ -60,6 +70,11 @@ def submit_batch_jobs_command(
         f"--conf spark.executorEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.pyspark.python={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.pyspark.driver.python={_PYSPARK_PYTHON_PATH}",
+        f"--conf spark.driver.cores={_SPARK_DRIVER_CORES}",
+        f"--conf spark.driver.memory={_SPARK_DRIVER_MEMORY}",
+        f"--conf spark.executor.cores={_SPARK_EXECUTOR_CORES}",
+        f"--conf spark.executor.memory={_SPARK_EXECUTOR_MEMORY}",
+        f"--conf spark.executor.instances={_SPARK_EXECUTOR_INSTANCES}",
         *(
             f"--conf spark.emr-serverless.driverEnv.{key}={value}"
             for key, value in (driver_env or {}).items()
