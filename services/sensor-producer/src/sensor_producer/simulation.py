@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -31,6 +31,7 @@ from sensor_producer.publisher import EventPublisher
 from sensor_producer.routing import METERS_PER_MILE, RoadRouter
 
 EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
+TIMESTAMP_POLICY = "dispatch-utc-date-with-tlc-clock-v1"
 MPH_TO_MPS = 0.44704
 DEFAULT_SPEED_LIMIT_MPH = 25.0
 MAX_ACCELERATION_PHASE_SECONDS = 8.0
@@ -62,6 +63,44 @@ class ReplayResult:
         if self.trips_attempted == 0:
             return 0.0
         return self.trips_skipped / self.trips_attempted
+
+
+def rebase_trip_to_dispatch_date(
+    trip: TripRecord,
+    dispatched_at: datetime,
+) -> TripRecord:
+    if dispatched_at.utcoffset() is None:
+        raise ValueError("dispatched_at must be timezone-aware")
+
+    dispatch_date = dispatched_at.astimezone(UTC).date()
+    source_request_date = trip.request_datetime.date()
+
+    def rebase(source_time: datetime) -> datetime:
+        day_offset = source_time.date() - source_request_date
+        return datetime.combine(
+            dispatch_date + day_offset,
+            source_time.time(),
+            tzinfo=UTC,
+        )
+
+    return TripRecord(
+        trip_id=trip.trip_id,
+        request_datetime=rebase(trip.request_datetime),
+        pickup_datetime=rebase(trip.pickup_datetime),
+        dropoff_datetime=rebase(trip.dropoff_datetime),
+        pu_location_id=trip.pu_location_id,
+        do_location_id=trip.do_location_id,
+        trip_miles=trip.trip_miles,
+    )
+
+
+def source_sensor_schedule_time(
+    source_trip: TripRecord,
+    replay_trip: TripRecord,
+    event: SensorEvent,
+) -> datetime:
+    elapsed = event.event_time - replay_trip.pickup_datetime
+    return source_trip.pickup_datetime + elapsed
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +373,7 @@ class ReplayCoordinator:
         config: SimulationConfig,
         simulator: MotionSimulator | None = None,
         clock: ReplayClock | None = None,
+        utc_now: Callable[[], datetime] | None = None,
     ):
         self.router = router
         self.taxi_zones = taxi_zones
@@ -341,6 +381,7 @@ class ReplayCoordinator:
         self.config = config
         self.simulator = simulator or MotionSimulator()
         self.clock = clock or ReplayClock(config.time_scale)
+        self.utc_now = utc_now or (lambda: datetime.now(UTC))
 
     def replay(self, trips: Iterable[TripRecord]) -> ReplayResult:
         queue: list[tuple[datetime, int, str, object]] = []
@@ -379,29 +420,34 @@ class ReplayCoordinator:
             action_time, _, action, value = heapq.heappop(queue)
             self.clock.wait_until(action_time)
             if action == "dispatch":
-                trip = value
-                assert isinstance(trip, TripRecord)
+                source_trip = value
+                assert isinstance(source_trip, TripRecord)
+                # 실제 배차 시점의 UTC 날짜와 TLC 시각을 결합해 발행 시간을 만든다
+                replay_trip = rebase_trip_to_dispatch_date(
+                    source_trip,
+                    self.utc_now(),
+                )
                 enqueue_next_dispatch()
                 trips_attempted += 1
                 try:
                     pickup_zone = self._taxi_zone(
-                        trip.pu_location_id,
+                        source_trip.pu_location_id,
                         TripSkipReason.PICKUP_ZONE_NOT_FOUND,
                     )
                     dropoff_zone = self._taxi_zone(
-                        trip.do_location_id,
+                        source_trip.do_location_id,
                         TripSkipReason.DROPOFF_ZONE_NOT_FOUND,
                     )
                     route = self.router.plan_for_zones(
-                        trip.trip_id,
-                        trip.request_datetime,
+                        replay_trip.trip_id,
+                        replay_trip.request_datetime,
                         pickup_zone,
                         dropoff_zone,
-                        target_distance_m=trip.trip_miles * METERS_PER_MILE,
+                        target_distance_m=replay_trip.trip_miles * METERS_PER_MILE,
                     )
-                    profile = self._profile_for(trip)
+                    profile = self._profile_for(replay_trip)
                     event_iterator = self.simulator.generate(
-                        trip, route, profile, self.config
+                        replay_trip, route, profile, self.config
                     )
                     # 첫 샘플 생성 시 속도 프로파일까지 검증한다
                     first_event = next(event_iterator)
@@ -409,7 +455,7 @@ class ReplayCoordinator:
                     skip_reasons[error.reason] += 1
                     logger.warning(
                         "trip skipped trip_id=%s reason=%s detail=%s",
-                        trip.trip_id,
+                        replay_trip.trip_id,
                         error.reason,
                         error,
                     )
@@ -419,7 +465,7 @@ class ReplayCoordinator:
                     skip_reasons[reason] += 1
                     logger.warning(
                         "trip skipped trip_id=%s reason=%s detail=no sensor samples",
-                        trip.trip_id,
+                        replay_trip.trip_id,
                         reason,
                     )
                     continue
@@ -430,18 +476,29 @@ class ReplayCoordinator:
                 heapq.heappush(
                     queue,
                     (
-                        first_event.event_time,
+                        source_sensor_schedule_time(
+                            source_trip,
+                            replay_trip,
+                            first_event,
+                        ),
                         counter,
                         "sensor",
-                        (first_event, route, event_iterator, trip),
+                        (
+                            first_event,
+                            route,
+                            event_iterator,
+                            source_trip,
+                            replay_trip,
+                        ),
                     ),
                 )
                 counter += 1
             else:
-                event, route, event_iterator, trip = value
+                event, route, event_iterator, source_trip, replay_trip = value
                 assert isinstance(event, SensorEvent)
                 assert isinstance(route, RoutePlan)
-                assert isinstance(trip, TripRecord)
+                assert isinstance(source_trip, TripRecord)
+                assert isinstance(replay_trip, TripRecord)
                 self.publisher.publish(event)
                 events_published += 1
                 try:
@@ -452,16 +509,31 @@ class ReplayCoordinator:
                     heapq.heappush(
                         queue,
                         (
-                            next_event.event_time,
+                            source_sensor_schedule_time(
+                                source_trip,
+                                replay_trip,
+                                next_event,
+                            ),
                             counter,
                             "sensor",
-                            (next_event, route, event_iterator, trip),
+                            (
+                                next_event,
+                                route,
+                                event_iterator,
+                                source_trip,
+                                replay_trip,
+                            ),
                         ),
                     )
                     counter += 1
                 position = locate(
                     route,
-                    distance_for_event(event.trip_seq, route, self.config, trip),
+                    distance_for_event(
+                        event.trip_seq,
+                        route,
+                        self.config,
+                        replay_trip,
+                    ),
                 )
                 if position.leg.pavement_rating is not None:
                     rated_samples += 1

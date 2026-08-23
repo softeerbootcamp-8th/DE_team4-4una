@@ -22,7 +22,7 @@ live in `libs/de4-core`.
 | `trip_seq` | Zero-based deterministic sensor-sample order within a trip |
 | `vehicle_profile_id` | FK to the not-yet-supplied `vehicle_profile` contract |
 | `segment_id` | Canonical LION `SegmentID`; intentionally absent from Bronze sensor events |
-| `event_time` | Simulated sensor measurement time |
+| `event_time` | Timezone-aware UTC logical measurement time using the Trip's actual dispatch UTC date, TLC clock time, and any intra-Trip source-day offset |
 | `_ingested_at` | Wall-clock time at which Spark loaded a record into Bronze |
 | `_processed_at` | Wall-clock time at which a Silver record completed processing |
 

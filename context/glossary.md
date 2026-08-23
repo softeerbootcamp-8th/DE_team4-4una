@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-23
 ---
 
 # Glossary
@@ -10,7 +10,7 @@ last_reviewed: 2026-08-10
 | --- | --- |
 | Canonical road segment | A LION road segment keyed by source `SegmentID`, represented as `segment_id` |
 | Comfort score | A versioned monthly 0-100 summary of simulated ride-comfort features for a LION segment and vehicle profile; direction is not yet defined |
-| Dispatch event | A replay event created from a completed HVFHV row at its source request time; passenger motion begins at pickup |
+| Dispatch event | A replay action scheduled from an HVFHV request; when it runs, its UTC date anchors that Trip's published logical timestamps and passenger motion begins at pickup |
 | Gold dataset | Published monthly comfort-score records ready to load into the serving store |
 | HVFHV | NYC TLC High Volume For-Hire Vehicle trip records used as simulation inputs |
 | LION | NYC's street and address base map, considered as one source for road topology and segment identity |

@@ -45,6 +45,7 @@ ADR when the choice affects multiple components.
 | OQ-016 | Is each sampled trip simulated for one vehicle type or all supported vehicle types, and how does that affect `trip_id`? | Changes event volume and determines whether `(trip_id, trip_seq)` is unique | Open |
 | OQ-017 | Are overlapping trips replayed concurrently, and are long idle gaps preserved or capped? | Prototype interleaves overlapping trips and preserves gaps; explicit `time_scale=0` removes waits in tests | Prototype accepted 2026-08-10 |
 | OQ-018 | How is speed determined along each route: source average, road class, synthetic profile, or another source? | Prototype uses a smoothstep profile over route length and source passenger duration; calibration remains open | Prototype accepted 2026-08-10 |
+| OQ-043 | How are historical TLC timestamps mapped to replay `event_time`? | Source time schedules replay; each Trip captures its actual dispatch UTC date and combines it with TLC time-of-day while retaining intra-Trip source-day offsets | Prototype accepted 2026-08-23 by issue #353 |
 
 ## Product decisions
 

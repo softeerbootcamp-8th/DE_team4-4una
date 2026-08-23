@@ -69,8 +69,9 @@ monthly batch pipeline.
 
 - Use NYC TLC High Volume For-Hire Vehicle trip records.
 - Treat every valid completed trip in one pinned monthly Parquet as a dispatch event.
-- Use the source request timestamp for dispatch ordering when it is present; the
-  passenger-motion simulation starts at pickup.
+- Use the source request timestamp for dispatch ordering and wall-clock gaps when
+  it is present; the passenger-motion simulation starts at pickup. Published
+  timestamps use each Trip's actual UTC dispatch date with the TLC clock time.
 - Simulate only the occupied passenger journey from pickup to drop-off.
 - Because records identify taxi zones rather than exact coordinates, choose
   deterministic valid road points inside the pickup and drop-off zones.
