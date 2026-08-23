@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-24
 ---
 
 # Target Architecture
@@ -46,6 +46,7 @@ flowchart LR
     GO --> DB[(Serving store)]
     DB --> API[serving-api]
     API --> D[dashboard / clients]
+    RS --> D
 
     O[orchestration] -. schedules and observes .-> B
     O -. schedules and observes .-> S
@@ -89,6 +90,20 @@ They should be recorded in ADRs rather than assumed from this diagram.
 Reference sources are normalized into a versioned, routable segment network.
 Spatial joins attach pavement and speed-hump attributes to the canonical segment.
 Taxi-zone geometry is retained to choose valid deterministic endpoints.
+
+### Road comfort map dashboard
+
+The implemented Streamlit dashboard (issue #376) reads one configured
+`road_segment` snapshot Parquet object from S3 through the AWS default
+credential chain. It converts the stored `EPSG:32118` WKB geometry to
+`EPSG:4326`, then sends the snapshot's `segment_id` values to
+`POST /api/v1/comfort-scores/batch` in contract-sized chunks. The dashboard
+joins geometry and score responses by `segment_id` and visualizes score bands;
+segments absent from the API response remain visible as unavailable.
+
+The dashboard has no PostgreSQL configuration and never reimplements the
+serving API's current-to-standard fallback. Its long-lived geometry cache and
+short-lived score cache reduce S3 and API traffic independently.
 
 ### Wall-clock replay
 

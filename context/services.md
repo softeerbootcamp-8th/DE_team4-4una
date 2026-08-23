@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-24
 ---
 
 # Service Map
@@ -18,7 +18,7 @@ and does not by itself settle those boundaries.
 | `services/stream-processor` | Validate and persist Kafka sensor records without changing their raw meaning | Kafka events, shared contracts | Immutable S3 Bronze `sensor_event` records |
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance, and rank caller-supplied candidate routes by the comfort of their segments | Serving store | HTTP API responses |
 | `services/orchestration` | Coordinate monthly reference jobs, replay runs, score jobs, and publication | Schedules and run configuration | Workflow state and run metadata |
-| `services/dashboard` | Visualize coverage, latest scores, pipeline status, and possibly simulated movement | Serving API and operational metadata | Human-facing views |
+| `services/dashboard` | Visualize road coverage and latest comfort scores on an interactive NYC map | S3 `road_segment` snapshot and Serving API | Human-facing map view |
 
 ## Current `batch-jobs` packaging
 
@@ -44,6 +44,14 @@ is deliberately not route planning: the caller supplies the routes and their
 segment order, and the service only aggregates the segment scores it already
 serves. It holds no road graph and performs no routing, so the boundary
 against `services/batch-jobs` (which owns the road environment) is unchanged.
+
+## Current `dashboard` scope
+
+Issue #376 implements the dashboard as a Streamlit/Folium application. It reads
+the versioned `road_segment` geometry snapshot directly from S3, but reads
+comfort scores only through the serving API batch endpoint. It does not connect
+to PostgreSQL, calculate scores, or reproduce the serving API's
+current-to-standard fallback policy.
 
 ## Boundary rules
 
