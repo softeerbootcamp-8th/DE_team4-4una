@@ -28,6 +28,7 @@ from batch_jobs.comfort_score.loader import (
     load_hourly_comfort_score_for_gold,
 )
 from batch_jobs.comfort_score.standard_storage import (
+    read_active_standard_comfort_score_snapshot,
     write_standard_comfort_score_snapshot,
 )
 from batch_jobs.comfort_score.standard_writer import (
@@ -129,9 +130,10 @@ def run_standard_comfort_score_job(
     as_of: datetime,
     connection,
 ) -> StandardComfortScoreJobSummary:
-    """168h 윈도우를 읽어 standard 점수를 산출하고, S3 Gold snapshot에 저장한 뒤
-    그 결과를 다시 읽어 PostgreSQL에 UPSERT한다(#265). Gold 저장이 실패하면 예외가
-    그대로 올라가 PostgreSQL을 건드리지 않는다.
+    """168h 윈도우를 읽어 standard 점수를 산출하고, S3 Gold의 새 version에 저장한 뒤
+    manifest를 resolve해서 얻은 활성 snapshot을 다시 읽어 PostgreSQL에 UPSERT한다
+    (#265, #343). Gold 저장/검증이 실패하면 예외가 그대로 올라가 manifest와 PostgreSQL
+    모두 건드리지 않는다.
 
     `as_of`가 그대로 `score_as_of`가 된다 — 데이터에서 유도하지 않는 실행 식별자다.
     universe가 비어 있지 않은 한 산출 행 수는 입력 데이터가 아니라 도로망 크기로
@@ -172,7 +174,11 @@ def run_standard_comfort_score_job(
         gold_result = write_standard_comfort_score_snapshot(
             spark, scored, config.gold_output_uri, as_of,
         )
-        gold_df = spark.read.parquet(gold_result.output_uri)
+        # 방금 쓴 gold_result.version_uri를 직접 읽지 않는다 — manifest를 다시 resolve해서
+        # 얻은 활성 snapshot을 읽어야 manifest가 실제 source-of-truth pointer가 된다(#343).
+        gold_df = read_active_standard_comfort_score_snapshot(
+            spark, config.gold_output_uri, as_of,
+        )
 
         write_summary = write_standard_comfort_scores(
             gold_df, config.jdbc_url, config.postgres_user, config.postgres_password,
@@ -185,10 +191,12 @@ def run_standard_comfort_score_job(
             updated_count=write_summary.updated_count,
         )
         logger.info(
-            "standard comfort score job finished scored=%d inserted=%d updated=%d",
+            "standard comfort score job finished scored=%d inserted=%d updated=%d "
+            "gold_version=%s",
             summary.scored_count,
             summary.inserted_count,
             summary.updated_count,
+            gold_result.version_id,
         )
         return summary
     finally:

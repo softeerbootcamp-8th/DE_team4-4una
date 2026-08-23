@@ -1,22 +1,30 @@
-"""Tests for batch_jobs/comfort_score/standard_storage.py (#265).
+"""Tests for batch_jobs/comfort_score/standard_storage.py (#265, #343).
 
-같은 as_of는 같은 경로로 멱등 재실행되고, 다른 as_of는 별도 경로로 보존되며,
-read-back 불일치는 예외로 이어진다는 계약을 검증한다.
+같은 as_of로 재실행하면 새 version 경로에 쓰고 검증까지 끝난 뒤에만 manifest를
+전환한다는 계약을 검증한다: 기존 version은 절대 건드리지 않고(불변), write/검증
+실패 시 manifest와 활성 snapshot이 그대로 남고, manifest resolve는 명확히 실패해야
+할 때 명확히 실패한다.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from urllib.parse import unquote
 
 import pytest
 from batch_jobs.comfort_score.standard_storage import (
+    read_active_standard_comfort_score_snapshot,
+    resolve_active_standard_snapshot_uri,
+    standard_manifest_uri,
     standard_snapshot_uri,
+    standard_version_uri,
     write_standard_comfort_score_snapshot,
 )
+from de4_core import ObjectStore
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.readwriter import DataFrameReader
+from pyspark.sql.readwriter import DataFrameReader, DataFrameWriter
 
 BASE_SCHEMA = "segment_id string, vehicle_profile_id int, comfort_score double"
 
@@ -42,29 +50,36 @@ def rows_df(spark, as_of: datetime, *rows: tuple):
     )
 
 
-class TestStandardSnapshotUri:
-    def test_same_as_of_always_yields_the_same_uri(self):
-        as_of = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
+class TestUriHelpers:
+    AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
 
-        first = standard_snapshot_uri("out", as_of)
-        second = standard_snapshot_uri("out", as_of)
+    def test_same_as_of_always_yields_the_same_root_uri(self):
+        assert standard_snapshot_uri("out", self.AS_OF) == standard_snapshot_uri("out", self.AS_OF)
 
-        assert first == second
+    def test_different_as_of_yields_different_root_uris(self):
+        other = self.AS_OF.replace(hour=4)
+        assert standard_snapshot_uri("out", self.AS_OF) != standard_snapshot_uri("out", other)
 
-    def test_different_as_of_yields_different_uris(self):
-        uri_3am = standard_snapshot_uri("out", datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC))
-        uri_4am = standard_snapshot_uri("out", datetime(2026, 8, 23, 4, 0, 0, tzinfo=UTC))
-
-        assert uri_3am != uri_4am
-
-    def test_uri_encodes_score_as_of_date_and_score_as_of(self):
-        as_of = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
-
+    def test_root_uri_encodes_score_as_of_date_and_score_as_of(self):
         # 로컬 file:// 스킴은 join_uri()가 '='를 %3D로 인코딩하므로 unquote로 확인한다.
-        uri = unquote(standard_snapshot_uri("out", as_of))
+        uri = unquote(standard_snapshot_uri("out", self.AS_OF))
 
         assert "score_as_of_date=2026-08-23" in uri
         assert "score_as_of=2026-08-23T03-00-00Z" in uri
+
+    def test_version_uri_is_nested_under_versions_of_the_root(self):
+        root = standard_snapshot_uri("out", self.AS_OF)
+
+        assert unquote(standard_version_uri(root, "v1")) == f"{unquote(root)}/versions/v1"
+
+    def test_manifest_uri_is_named_manifest_json_under_the_root(self):
+        root = standard_snapshot_uri("out", self.AS_OF)
+
+        assert unquote(standard_manifest_uri(root)) == f"{unquote(root)}/manifest.json"
+
+
+class TestWriteStandardComfortScoreSnapshot:
+    AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
 
     def test_rejects_naive_as_of_when_writing(self, spark, tmp_path) -> None:
         naive_as_of = datetime(2026, 8, 23, 3, 0, 0)  # noqa: DTZ001
@@ -73,47 +88,6 @@ class TestStandardSnapshotUri:
         with pytest.raises(ValueError, match="timezone-aware"):
             write_standard_comfort_score_snapshot(spark, df, str(tmp_path), naive_as_of)
 
-
-class TestWriteStandardComfortScoreSnapshot:
-    AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
-
-    def test_write_creates_data_at_the_expected_path(self, spark, tmp_path) -> None:
-        output_root = str(tmp_path)
-        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0), ("seg-2", 1, 60.0))
-
-        result = write_standard_comfort_score_snapshot(spark, df, output_root, self.AS_OF)
-
-        assert result.output_uri == standard_snapshot_uri(output_root, self.AS_OF)
-        assert result.row_count == 2
-        assert spark.read.parquet(result.output_uri).count() == 2
-
-    def test_rerunning_the_same_as_of_replaces_the_snapshot(self, spark, tmp_path) -> None:
-        output_root = str(tmp_path)
-        first = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0))
-        second = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0), ("seg-3", 1, 70.0))
-
-        write_standard_comfort_score_snapshot(spark, first, output_root, self.AS_OF)
-        result = write_standard_comfort_score_snapshot(spark, second, output_root, self.AS_OF)
-
-        rows = spark.read.parquet(result.output_uri).collect()
-        assert {row["segment_id"] for row in rows} == {"seg-2", "seg-3"}
-
-    def test_other_as_of_snapshots_are_preserved_across_a_rerun(self, spark, tmp_path) -> None:
-        output_root = str(tmp_path)
-        earlier_as_of = datetime(2026, 8, 23, 2, 0, 0, tzinfo=UTC)
-        earlier_df = rows_df(spark, earlier_as_of, ("seg-9", 1, 10.0))
-        first = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0))
-        rerun = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
-
-        earlier_result = write_standard_comfort_score_snapshot(
-            spark, earlier_df, output_root, earlier_as_of
-        )
-        write_standard_comfort_score_snapshot(spark, first, output_root, self.AS_OF)
-        write_standard_comfort_score_snapshot(spark, rerun, output_root, self.AS_OF)
-
-        rows = spark.read.parquet(earlier_result.output_uri).collect()
-        assert [row["segment_id"] for row in rows] == ["seg-9"]
-
     def test_rejects_rows_whose_score_as_of_does_not_match(self, spark, tmp_path) -> None:
         other_as_of = self.AS_OF.replace(hour=4)
         df = rows_df(spark, other_as_of, ("seg-1", 1, 50.0))
@@ -121,10 +95,75 @@ class TestWriteStandardComfortScoreSnapshot:
         with pytest.raises(ValueError, match="score_as_of"):
             write_standard_comfort_score_snapshot(spark, df, str(tmp_path), self.AS_OF)
 
-    def test_rejects_a_schema_mismatched_read_back(self, spark, tmp_path, monkeypatch) -> None:
-        # spark.read는 매번 새 인스턴스를 만들어서 클래스 메서드를 patch해야 한다.
+    def test_first_write_creates_a_version_and_an_active_manifest(self, spark, tmp_path) -> None:
         output_root = str(tmp_path)
-        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0))
+        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0), ("seg-2", 1, 60.0))
+
+        result = write_standard_comfort_score_snapshot(spark, df, output_root, self.AS_OF)
+
+        root = standard_snapshot_uri(output_root, self.AS_OF)
+        assert result.version_uri == standard_version_uri(root, result.version_id)
+        assert result.row_count == 2
+        assert spark.read.parquet(result.version_uri).count() == 2
+        assert resolve_active_standard_snapshot_uri(output_root, self.AS_OF) == result.version_uri
+
+    def test_rerun_writes_a_new_version_without_touching_the_old_one(self, spark, tmp_path) -> None:
+        output_root = str(tmp_path)
+        first_df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0))
+        second_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0), ("seg-3", 1, 70.0))
+
+        first = write_standard_comfort_score_snapshot(spark, first_df, output_root, self.AS_OF)
+        second = write_standard_comfort_score_snapshot(spark, second_df, output_root, self.AS_OF)
+
+        assert second.version_id != first.version_id
+        assert second.version_uri != first.version_uri
+        old_rows = spark.read.parquet(first.version_uri).collect()
+        assert [row["segment_id"] for row in old_rows] == ["seg-1"]
+
+    def test_manifest_points_to_the_latest_version_after_a_successful_rerun(
+        self, spark, tmp_path
+    ) -> None:
+        output_root = str(tmp_path)
+        first_df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0))
+        second_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
+
+        write_standard_comfort_score_snapshot(spark, first_df, output_root, self.AS_OF)
+        second = write_standard_comfort_score_snapshot(spark, second_df, output_root, self.AS_OF)
+
+        active_uri = resolve_active_standard_snapshot_uri(output_root, self.AS_OF)
+        assert active_uri == second.version_uri
+        rows = spark.read.parquet(active_uri).collect()
+        assert [row["segment_id"] for row in rows] == ["seg-2"]
+
+    def test_write_failure_leaves_the_manifest_and_active_snapshot_untouched(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        output_root = str(tmp_path)
+        original = write_standard_comfort_score_snapshot(
+            spark, rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0)), output_root, self.AS_OF
+        )
+
+        def failing_parquet(self, *args, **kwargs):
+            raise RuntimeError("simulated s3 write failure")
+
+        monkeypatch.setattr(DataFrameWriter, "parquet", failing_parquet)
+
+        broken_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
+        with pytest.raises(RuntimeError, match="simulated s3 write failure"):
+            write_standard_comfort_score_snapshot(spark, broken_df, output_root, self.AS_OF)
+        monkeypatch.undo()
+
+        assert resolve_active_standard_snapshot_uri(output_root, self.AS_OF) == original.version_uri
+        rows = spark.read.parquet(original.version_uri).collect()
+        assert [row["segment_id"] for row in rows] == ["seg-1"]
+
+    def test_schema_mismatch_leaves_the_manifest_and_active_snapshot_untouched(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        output_root = str(tmp_path)
+        original = write_standard_comfort_score_snapshot(
+            spark, rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0)), output_root, self.AS_OF
+        )
         original_parquet = DataFrameReader.parquet
 
         def dropped_column_reader(self, *paths, **options):
@@ -132,18 +171,150 @@ class TestWriteStandardComfortScoreSnapshot:
 
         monkeypatch.setattr(DataFrameReader, "parquet", dropped_column_reader)
 
+        broken_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
         with pytest.raises(ValueError, match="schema"):
-            write_standard_comfort_score_snapshot(spark, df, output_root, self.AS_OF)
+            write_standard_comfort_score_snapshot(spark, broken_df, output_root, self.AS_OF)
+        monkeypatch.undo()
 
-    def test_rejects_a_row_count_mismatch_on_read_back(self, spark, tmp_path, monkeypatch) -> None:
+        assert resolve_active_standard_snapshot_uri(output_root, self.AS_OF) == original.version_uri
+        rows = spark.read.parquet(original.version_uri).collect()
+        assert [row["segment_id"] for row in rows] == ["seg-1"]
+
+    def test_row_count_mismatch_leaves_the_manifest_and_active_snapshot_untouched(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
         output_root = str(tmp_path)
-        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0), ("seg-2", 1, 60.0))
+        original = write_standard_comfort_score_snapshot(
+            spark, rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0)), output_root, self.AS_OF
+        )
         original_parquet = DataFrameReader.parquet
 
         def truncated_reader(self, *paths, **options):
-            return original_parquet(self, *paths, **options).filter(F.col("segment_id") == "seg-1")
+            return original_parquet(self, *paths, **options).limit(0)
 
         monkeypatch.setattr(DataFrameReader, "parquet", truncated_reader)
 
+        broken_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
         with pytest.raises(ValueError, match="row count"):
-            write_standard_comfort_score_snapshot(spark, df, output_root, self.AS_OF)
+            write_standard_comfort_score_snapshot(spark, broken_df, output_root, self.AS_OF)
+        monkeypatch.undo()
+
+        assert resolve_active_standard_snapshot_uri(output_root, self.AS_OF) == original.version_uri
+        rows = spark.read.parquet(original.version_uri).collect()
+        assert [row["segment_id"] for row in rows] == ["seg-1"]
+
+    def test_manifest_write_failure_leaves_the_existing_manifest_untouched(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        output_root = str(tmp_path)
+        original = write_standard_comfort_score_snapshot(
+            spark, rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0)), output_root, self.AS_OF
+        )
+
+        def failing_write_bytes(self, uri, value):
+            raise RuntimeError("simulated manifest write failure")
+
+        monkeypatch.setattr(ObjectStore, "write_bytes", failing_write_bytes)
+
+        # 새 version 자체는 정상적으로 쓰이고 검증도 통과한다 — manifest 갱신만 실패한다.
+        broken_df = rows_df(spark, self.AS_OF, ("seg-2", 1, 60.0))
+        with pytest.raises(RuntimeError, match="simulated manifest write failure"):
+            write_standard_comfort_score_snapshot(spark, broken_df, output_root, self.AS_OF)
+        monkeypatch.undo()
+
+        assert resolve_active_standard_snapshot_uri(output_root, self.AS_OF) == original.version_uri
+        rows = spark.read.parquet(original.version_uri).collect()
+        assert [row["segment_id"] for row in rows] == ["seg-1"]
+
+
+class TestResolveActiveStandardSnapshot:
+    AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
+
+    def _manifest_uri(self, output_root: str) -> str:
+        return standard_manifest_uri(standard_snapshot_uri(output_root, self.AS_OF))
+
+    def test_reads_the_version_the_manifest_points_to(self, spark, tmp_path) -> None:
+        output_root = str(tmp_path)
+        write_standard_comfort_score_snapshot(
+            spark, rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0)), output_root, self.AS_OF
+        )
+
+        active_df = read_active_standard_comfort_score_snapshot(spark, output_root, self.AS_OF)
+
+        assert [row["segment_id"] for row in active_df.collect()] == ["seg-1"]
+
+    def test_raises_when_no_manifest_exists(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="no manifest found"):
+            resolve_active_standard_snapshot_uri(str(tmp_path), self.AS_OF)
+
+    def test_raises_when_manifest_is_not_valid_json(self, tmp_path) -> None:
+        output_root = str(tmp_path)
+        ObjectStore().write_bytes(self._manifest_uri(output_root), b"not json")
+
+        with pytest.raises(ValueError, match="not valid JSON"):
+            resolve_active_standard_snapshot_uri(output_root, self.AS_OF)
+
+    def test_raises_when_manifest_is_missing_required_keys(self, tmp_path) -> None:
+        output_root = str(tmp_path)
+        ObjectStore().write_bytes(
+            self._manifest_uri(output_root), json.dumps({"version_id": "abc"}).encode()
+        )
+
+        with pytest.raises(ValueError, match="missing required key"):
+            resolve_active_standard_snapshot_uri(output_root, self.AS_OF)
+
+    def test_raises_when_manifest_score_as_of_does_not_match(self, tmp_path) -> None:
+        output_root = str(tmp_path)
+        other_as_of = self.AS_OF.replace(hour=4)
+        root = standard_snapshot_uri(output_root, self.AS_OF)
+        ObjectStore().write_bytes(
+            self._manifest_uri(output_root),
+            json.dumps(
+                {
+                    "score_as_of": other_as_of.isoformat(),
+                    "version_id": "abc",
+                    "snapshot_uri": standard_version_uri(root, "abc"),
+                    "row_count": 1,
+                }
+            ).encode(),
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            resolve_active_standard_snapshot_uri(output_root, self.AS_OF)
+
+    def test_raises_when_manifest_row_count_is_not_a_non_negative_integer(self, tmp_path) -> None:
+        output_root = str(tmp_path)
+        root = standard_snapshot_uri(output_root, self.AS_OF)
+        ObjectStore().write_bytes(
+            self._manifest_uri(output_root),
+            json.dumps(
+                {
+                    "score_as_of": self.AS_OF.isoformat(),
+                    "version_id": "abc",
+                    "snapshot_uri": standard_version_uri(root, "abc"),
+                    "row_count": "ㅋㅋ",
+                }
+            ).encode(),
+        )
+
+        with pytest.raises(ValueError, match="row_count"):
+            resolve_active_standard_snapshot_uri(output_root, self.AS_OF)
+
+    def test_raises_when_manifest_snapshot_uri_does_not_match_its_version_id(
+        self, tmp_path
+    ) -> None:
+        output_root = str(tmp_path)
+        ObjectStore().write_bytes(
+            self._manifest_uri(output_root),
+            json.dumps(
+                {
+                    "score_as_of": self.AS_OF.isoformat(),
+                    "version_id": "abc",
+                    "snapshot_uri": "file:///엉뚱한경로",
+                    "row_count": 1,
+                }
+            ).encode(),
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            resolve_active_standard_snapshot_uri(output_root, self.AS_OF)

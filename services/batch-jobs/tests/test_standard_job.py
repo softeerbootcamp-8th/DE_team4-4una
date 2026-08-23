@@ -1,8 +1,8 @@
-"""Tests for batch_jobs/comfort_score/standard_job.py (#290, #265).
+"""Tests for batch_jobs/comfort_score/standard_job.py (#290, #265, #343).
 
-TestGoldBeforePostgres는 #265의 실행 순서(계산 -> S3 Gold -> read-back ->
-PostgreSQL)를 실제 Spark 세션으로 검증한다. 단위 동작은 test_standard_storage.py와
-기존 standard_writer 테스트가 다루므로, 여기서는 두 단계를 잇는 wiring만 본다.
+TestGoldBeforePostgres는 실행 순서(계산 -> S3 Gold version 저장 -> manifest resolve
+-> PostgreSQL)를 실제 Spark 세션으로 검증한다. 단위 동작은 test_standard_storage.py와
+기존 standard_writer 테스트가 다루므로, 여기서는 단계를 잇는 wiring만 본다.
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from batch_jobs.comfort_score.standard_job import (
     _postgres_jdbc_spark_config,
     run_standard_comfort_score_job,
 )
-from batch_jobs.comfort_score.standard_storage import standard_snapshot_uri
+from batch_jobs.comfort_score.standard_storage import (
+    resolve_active_standard_snapshot_uri,
+)
 from batch_jobs.comfort_score.standard_writer import WriteSummary
 from de4_core import join_uri
 from pyspark.sql import SparkSession
@@ -224,7 +226,30 @@ class TestGoldBeforePostgres:
         received_df = postgres_writer.call_args.args[0]
         assert received_df.count() == summary.scored_count
 
-        target_uri = standard_snapshot_uri(config.gold_output_uri, self.AS_OF)
-        on_disk_rows = {tuple(r) for r in spark.read.parquet(target_uri).collect()}
+        active_uri = resolve_active_standard_snapshot_uri(config.gold_output_uri, self.AS_OF)
+        on_disk_rows = {tuple(r) for r in spark.read.parquet(active_uri).collect()}
         received_rows = {tuple(r) for r in received_df.collect()}
         assert received_rows == on_disk_rows
+
+    def test_postgres_write_reads_through_manifest_resolution_not_the_raw_write_result(
+        self, spark, tmp_path, monkeypatch
+    ) -> None:
+        """gold_result.version_uri를 직접 읽지 않고, manifest를 resolve하는 함수를
+        실제로 호출한다는 걸 증명한다(#343) — 단순 내용 일치만으로는 이 wiring을
+        보장하지 못한다(우연히 같은 값일 수 있으므로)."""
+        config = self._build_config(spark, tmp_path)
+        from batch_jobs.comfort_score import standard_storage
+
+        resolve_spy = Mock(wraps=standard_storage.read_active_standard_comfort_score_snapshot)
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.read_active_standard_comfort_score_snapshot",
+            resolve_spy,
+        )
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.write_standard_comfort_scores",
+            Mock(return_value=WriteSummary(staging_count=1, inserted_count=1, updated_count=0)),
+        )
+
+        run_standard_comfort_score_job(spark, config, self.AS_OF, FakeConnection())
+
+        resolve_spy.assert_called_once_with(spark, config.gold_output_uri, self.AS_OF)
