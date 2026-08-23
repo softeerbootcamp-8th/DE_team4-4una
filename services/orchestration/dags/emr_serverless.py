@@ -32,6 +32,16 @@ _SPARK_EXECUTOR_CORES = "2"
 _SPARK_EXECUTOR_MEMORY = "8g"
 _SPARK_EXECUTOR_INSTANCES = "1"
 
+# Map Matching(find_segment_candidates의 mapInPandas)은 파티션마다 Python
+# worker 프로세스에서 road_segment broadcast(약 17만 건)로 STRtree를 새로
+# 만든다. cores=2라 이 무거운 작업이 최대 2개 동시에 뜨는데, JVM heap 밖
+# overhead가 이전엔 기본값(~10%, 약 800MB)뿐이라 그 메모리를 못 버티고
+# executor가 exit code 137(SIGKILL)로 반복해서 죽었다(#386, EMR Serverless
+# Application maximumCapacity를 8 vCPU/32 GB로 상향한 뒤 적용). executor
+# 총 사용량은 driver(1c/2g) + executor(2c/8g+6g=14g) = 3 vCPU/16 GB로
+# 여유 있게 들어간다.
+_SPARK_EXECUTOR_MEMORY_OVERHEAD = "6g"
+
 # EMR Serverless는 dynamic allocation이 기본 켜져 있어서, 실제 목표 executor 수는
 # spark.executor.instances가 아니라 max(dynamicAllocation.initialExecutors,
 # minExecutors, executor.instances)로 계산된다. EMR 기본값이 1보다 커서 Spark가
@@ -85,6 +95,7 @@ def submit_batch_jobs_command(
         f"--conf spark.driver.memory={_SPARK_DRIVER_MEMORY}",
         f"--conf spark.executor.cores={_SPARK_EXECUTOR_CORES}",
         f"--conf spark.executor.memory={_SPARK_EXECUTOR_MEMORY}",
+        f"--conf spark.executor.memoryOverhead={_SPARK_EXECUTOR_MEMORY_OVERHEAD}",
         f"--conf spark.executor.instances={_SPARK_EXECUTOR_INSTANCES}",
         f"--conf spark.dynamicAllocation.minExecutors={_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS}",
         f"--conf spark.dynamicAllocation.maxExecutors={_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS}",

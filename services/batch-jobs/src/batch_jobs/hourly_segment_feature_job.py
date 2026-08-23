@@ -167,6 +167,11 @@ def run_hourly_segment_feature_job(
     target_df = event_df.filter(
         (F.col("event_time") >= target_hour) & (F.col("event_time") < target_hour_end)
     ).persist(StorageLevel.MEMORY_AND_DISK)
+    # persist는 lazy라 여기서 즉시 materialize하지 않으면, Map Matching을 포함한
+    # 전체 상류 lineage가 뒤쪽의 첫 action(validate_hourly_segment_features 내부)에서야
+    # 실행돼 실패 스택트레이스가 엉뚱하게 aggregation.py를 가리킨다(#386). count()로
+    # 여기서 먼저 materialize해 실패 지점을 Map Matching 단계로 정확히 드러낸다.
+    target_df.count()
 
     try:
         result = build_hourly_segment_features(
