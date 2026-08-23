@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 ---
 
 # Open Questions and Decision Register
@@ -28,8 +28,8 @@ ADR when the choice affects multiple components.
 | ID | Question | Why it matters | Status |
 | --- | --- | --- | --- |
 | OQ-007 | What exact source URLs, releases, licenses, and schemas are approved? | Smoke-test endpoints and checksums are recorded in `context/runs/2026-08-10-nyc-sensor-smoke.md`; long-term snapshot policy remains open | Partially accepted 2026-08-10 |
-| OQ-008 | Which HVFHV source day should be demonstrated? | Prototype smoke test uses 2024-02-01; final showcase day may still change | Prototype accepted 2026-08-10 |
-| OQ-009 | How are eligible rows filtered and stably identified? | Prototype uses valid same-zone trips in stable timestamp/base order and derives a content-based trip ID | Prototype accepted 2026-08-10 |
+| OQ-008 | Which HVFHV source day should be demonstrated? | Superseded: replay now consumes all valid rows from one configured monthly Parquet; the exact monthly file remains run configuration | Superseded 2026-08-23 by issue #352 |
+| OQ-009 | How are eligible rows filtered and stably identified? | Prototype filters unusable timestamps, zones, and distances across the whole file, orders by request time and physical row number, and derives a versioned ID from the immutable source row | Prototype accepted 2026-08-23 by issue #352 |
 | OQ-010 | How should endpoints be selected when a taxi zone has no valid canonical road point? | Controls rejects and route coverage | Open |
 | OQ-011 | How are pavement observations and speed humps spatially assigned near ambiguous segment boundaries? | Prototype uses normalized street name plus nearest geometry within approximately 39 m; exact production policy remains open | Prototype accepted 2026-08-10 |
 | OQ-012 | What does the monthly score period represent: trip month, replay month, reference snapshot month, or publication month? | Controls grouping and API freshness | Open |

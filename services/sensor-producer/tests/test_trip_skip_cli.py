@@ -7,6 +7,7 @@ from sensor_producer.cli import (
     enforce_trip_skip_ratio,
     local_parquet,
     ratio,
+    resolve_trips,
 )
 from sensor_producer.simulation import ReplayResult
 
@@ -56,3 +57,35 @@ def test_local_parquet_rejects_missing_or_non_parquet_input(value: str) -> None:
 def test_run_requires_all_local_parquet_inputs() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["run"])
+
+
+def test_run_replays_the_whole_trip_file_without_date_or_count_options(
+    tmp_path: Path,
+) -> None:
+    paths = [
+        tmp_path / name for name in ("trips.parquet", "roads.parquet", "zones.parquet")
+    ]
+    for path in paths:
+        path.touch()
+
+    arguments = build_parser().parse_args(
+        [
+            "run",
+            "--trips-path",
+            str(paths[0]),
+            "--road-environment-path",
+            str(paths[1]),
+            "--taxi-zone-path",
+            str(paths[2]),
+        ]
+    )
+
+    assert not hasattr(arguments, "source_date")
+    assert not hasattr(arguments, "max_trips")
+    _, summary = resolve_trips(arguments)
+    assert summary == {
+        "format": "parquet",
+        "path": str(paths[0].resolve()),
+        "reader_version": "tlc-hvfhv-parquet-v2",
+        "selection": "all_valid_rows",
+    }

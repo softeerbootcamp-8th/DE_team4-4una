@@ -8,7 +8,7 @@ last_reviewed: 2026-08-23
 
 ## Purpose
 
-Convert approximately 1,000 completed HVFHV trips from one source day into a
+Convert every valid completed HVFHV trip in one pinned monthly Parquet into a
 reproducible wall-clock stream of dispatch and vehicle sensor observations. The
 simulation creates engineering data for pipeline development; it does not claim
 to reconstruct the vehicles' actual routes or physical motion.
@@ -18,8 +18,8 @@ to reconstruct the vehicles' actual routes or physical motion.
 A simulation run should record at least:
 
 - simulation run ID
-- source dataset identifier and source date
-- trip-sampling algorithm version and seed
+- immutable source dataset identifier or file path
+- trip eligibility, ordering, and identity algorithm version
 - road-environment snapshot ID
 - endpoint-selection algorithm version and seed
 - routing algorithm and graph version
@@ -30,7 +30,7 @@ A simulation run should record at least:
 - event-contract version
 - replay start time and time-scale value
 
-The same inputs and logical seeds must produce the same sampled trips, endpoints,
+The same inputs and logical seeds must produce the same eligible trips, endpoints,
 routes, segment traversal order, and synthetic measurements. Wall-clock event
 timestamps may differ between runs, so events should also carry deterministic
 simulation offsets.
@@ -40,19 +40,16 @@ simulation offsets.
 At startup, the local producer opens three explicit files: one monthly TLC HVFHV
 Parquet, one prepared `simulation_road_environment` Parquet, and one prepared
 `taxi_zone` Parquet. It does not resolve S3 URIs, active pointers, manifests, or
-AWS credentials. The trip reader selects one `source_date`, filters invalid rows,
-applies `max_trips` in DuckDB, and yields `TripRecord` objects in bounded batches
-rather than building a Python list. Removing that date and row limit is tracked
-separately in issue #352.
+AWS credentials. The trip reader filters invalid rows across the entire file,
+orders the remaining rows in DuckDB, and yields `TripRecord` objects in bounded
+batches rather than building a Python list.
 
-1. Validate the chosen HVFHV source day and remove rows that cannot support a
-   passenger-trip simulation.
-2. Sort using a documented stable ordering and optionally select the first
-   `max_trips` rows. The implemented Parquet reader orders by request, pickup, and
-   drop-off timestamps, then the immutable object's physical Parquet row number.
-   That row number also participates in the generated `trip_id`, so rewriting an
-   object in place is outside the reproducibility contract. A seeded representative
-   sampling policy remains open.
+1. Validate every row in the configured monthly HVFHV Parquet and remove rows that
+   cannot support a passenger-trip simulation.
+2. Sort by request timestamp and the immutable file's physical Parquet row number.
+   The row number also participates in the versioned `trip_id`, so rewriting the
+   input file in place is outside the reproducibility contract. The producer does
+   not apply a source-date filter, row limit, or sampling policy.
 3. Use the source request time as the dispatch time and use pickup time as the
    beginning of passenger motion. If the selected source schema does not provide
    request time, require an accepted fallback policy rather than silently

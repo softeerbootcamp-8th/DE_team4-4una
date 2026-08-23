@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-23
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -53,12 +53,13 @@ Candidate fields:
 - source and modeled duration and distance
 - vehicle type and vehicle-profile version
 - endpoint, routing, and motion-model versions
-- sampling rank and seed material
+- physical source-row number and trip-identity algorithm version
 - plan status or rejection reason
 
 ## Dispatch event
 
-**Grain:** one selected trip becoming eligible for simulation.
+**Grain:** one valid trip row from the configured monthly source file becoming
+eligible for simulation.
 
 Candidate fields:
 

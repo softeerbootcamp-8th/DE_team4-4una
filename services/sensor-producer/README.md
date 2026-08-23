@@ -76,13 +76,12 @@ Start Kafka and replay in wall-clock time:
 docker compose -f infra/compose/kafka.yaml up -d
 uv run --package sensor-producer sensor-producer run \
   --trips-path data/tlc/fhvhv_tripdata_2024-02.parquet \
-  --source-date 2024-02-01 \
   --road-environment-path data/environment/road_environment.parquet \
   --taxi-zone-path data/environment/taxi_zones.parquet \
   --publisher kafka \
   --bootstrap-servers localhost:9092 \
   --topic sensor-events \
-  --run-id nyc-20240201-v1 \
+  --run-id nyc-202402-v1 \
   --sample-hz 10 \
   --time-scale 1
 ```
@@ -104,11 +103,12 @@ the replay if its skipped-trip ratio is too high. The option is disabled by
 default. The producer still flushes published events and writes the run summary
 before enforcing the threshold.
 
-`--source-date` selects one NYC source day. DuckDB reads only the timestamps, pickup
-and drop-off zone IDs, trip distance, and Parquet row number needed by the simulator;
-it applies validity filters, deterministic ordering, and `--max-trips` before yielding
-rows in batches. The physical row number is the final ordering tie-breaker and part of
-the deterministic `trip_id`, so the input file must be treated as immutable.
+DuckDB reads every valid row from the single local TLC Parquet supplied by
+`--trips-path`. It selects only the timestamps, pickup and drop-off zone IDs, trip
+distance, and Parquet row number needed by the simulator, then yields rows in bounded
+batches. Trips are ordered by request time and physical row number. The row number is
+also part of the deterministic `trip_id`, so the input file must be treated as
+immutable. Directory discovery and multi-file replay are not supported.
 
 ## Timing and delivery contracts
 
