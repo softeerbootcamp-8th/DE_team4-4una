@@ -3,6 +3,12 @@
 .agents
 .local
 .venv
+# .gitignore 대상이지만 build context에는 자동 반영되지 않는 로컬 전용 디렉터리
+.worktrees
+.omc
+.superpowers
+.idea
+.claude
 **/__pycache__
 **/*.py[cod]
 **/.pytest_cache
