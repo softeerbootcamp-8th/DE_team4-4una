@@ -9,12 +9,10 @@ RUN uv sync --locked --package sensor-producer --no-dev --no-editable --compile-
 FROM python:3.12-slim
 
 RUN groupadd --gid 10001 sensor && \
-    useradd --uid 10001 --gid sensor --create-home sensor && \
-    mkdir -p /var/lib/de4 && chown sensor:sensor /var/lib/de4
+    useradd --uid 10001 --gid sensor --create-home sensor
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    SENSOR_CACHE_DIR=/var/lib/de4/cache
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY --from=builder --chown=sensor:sensor /app/.venv /app/.venv

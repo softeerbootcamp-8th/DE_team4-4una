@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
@@ -13,7 +12,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
-from de4_core import ObjectStore
 
 from sensor_producer.domain import TripRecord
 from sensor_producer.environment import load_taxi_zones
@@ -31,9 +29,6 @@ PAVEMENT_DATASET_ID = "6yyb-pb25"
 HUMP_DATASET_ID = "jknp-skuy"
 USER_AGENT = "DE4-sensor-producer/0.1 (+https://github.com/softeerbootcamp-8th/DE_team4-4una)"
 TLC_TRIP_FETCH_BATCH_SIZE = 1000
-
-logger = logging.getLogger(__name__)
-
 
 def fetch_nyc_sample(
     output_dir: Path,
@@ -147,59 +142,6 @@ def fetch_hvfhv_rows(
                 values[key] = value.isoformat()
         result.append(values)
     return result
-
-
-def load_trips(path: Path) -> list[TripRecord]:
-    values = json.loads(path.read_text())
-    trips = [
-        TripRecord(
-            trip_id=item["trip_id"],
-            request_datetime=parse_nyc_datetime(item["request_datetime"]),
-            pickup_datetime=parse_nyc_datetime(item["pickup_datetime"]),
-            dropoff_datetime=parse_nyc_datetime(item["dropoff_datetime"]),
-            pu_location_id=int(item["pu_location_id"]),
-            do_location_id=int(item["do_location_id"]),
-            trip_miles=float(item["trip_miles"]),
-        )
-        for item in values
-    ]
-    return sorted(trips, key=lambda trip: (trip.request_datetime, trip.trip_id))
-
-
-def materialize_trip_parquet(
-    uri: str,
-    cache_dir: Path,
-    object_store: ObjectStore | None = None,
-) -> Path:
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.query or parsed.fragment or not parsed.path.lower().endswith(".parquet"):
-        raise ValueError("TLC trip URI must identify one Parquet object")
-    if parsed.scheme in {"", "file"}:
-        raw_path = urllib.parse.unquote(parsed.path) if parsed.scheme else uri
-        path = Path(raw_path).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        return path
-    if parsed.scheme != "s3":
-        raise ValueError(f"unsupported TLC trip URI scheme: {parsed.scheme}")
-
-    filename = Path(urllib.parse.unquote(parsed.path)).name
-    cache_key = hashlib.sha256(uri.encode()).hexdigest()[:20]
-    destination = cache_dir / "tlc" / f"{cache_key}-{filename}"
-    if destination.is_file():
-        logger.info("TLC trip cache hit: uri=%s path=%s", uri, destination)
-        return destination
-
-    logger.info("TLC trip cache miss; downloading object: uri=%s", uri)
-    temporary = destination.with_suffix(".parquet.part")
-    temporary.unlink(missing_ok=True)
-    store = object_store or ObjectStore()
-    try:
-        store.download_file(uri, temporary)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
 
 
 def iter_hvfhv_parquet_trips(

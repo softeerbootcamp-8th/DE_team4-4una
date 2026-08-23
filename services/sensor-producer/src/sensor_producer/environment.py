@@ -41,6 +41,24 @@ _ROAD_SEGMENT_COLUMNS = (
     "geometry_wkb",
 )
 
+_RUNTIME_ROAD_COLUMNS = frozenset(
+    {
+        "segment_id",
+        "road_snapshot_date",
+        "from_node_id",
+        "to_node_id",
+        "traffic_direction",
+        "street_name",
+        "geometry_wkt",
+        "length_m",
+        "posted_speed_mph",
+        "curve_radius_m",
+        "pavement_rating",
+        "hump_fractions_json",
+    }
+)
+_RUNTIME_TAXI_ZONE_COLUMNS = frozenset({"location_id", "geometry_wkt"})
+
 
 def normalize_street(value: str | None) -> str:
     if not value:
@@ -77,8 +95,16 @@ class RoadEnvironment:
     @classmethod
     def from_parquet(cls, road_path: Path, taxi_zone_path: Path) -> RoadEnvironment:
         """Load the runtime artifacts published by ``batch-jobs``."""
-        road_rows = pq.read_table(road_path).to_pylist()
-        zone_rows = pq.read_table(taxi_zone_path).to_pylist()
+        road_rows = read_required_parquet(
+            road_path,
+            _RUNTIME_ROAD_COLUMNS,
+            "road-environment",
+        )
+        zone_rows = read_required_parquet(
+            taxi_zone_path,
+            _RUNTIME_TAXI_ZONE_COLUMNS,
+            "taxi-zone",
+        )
         if not zone_rows:
             raise ValueError("taxi-zone parquet must contain at least one row")
 
@@ -100,6 +126,18 @@ class RoadEnvironment:
             for location_id, row in zip(zone_ids, zone_rows, strict=True)
         }
         return cls(segments, taxi_zones, next(iter(snapshot_dates)))
+
+
+def read_required_parquet(
+    path: Path,
+    required_columns: frozenset[str],
+    label: str,
+) -> list[dict[str, object]]:
+    table = pq.read_table(path)
+    missing = sorted(required_columns.difference(table.column_names))
+    if missing:
+        raise ValueError(f"{label} parquet missing required columns: {', '.join(missing)}")
+    return table.to_pylist()
 
 
 def road_segment_from_runtime_row(row: dict[str, object]) -> RoadSegment:

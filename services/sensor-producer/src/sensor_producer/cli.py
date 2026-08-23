@@ -8,7 +8,6 @@ import logging
 import os
 from collections.abc import Iterable
 from datetime import date
-from itertools import islice
 from pathlib import Path
 
 from sensor_producer.domain import (
@@ -22,12 +21,9 @@ from sensor_producer.nyc_data import (
     DEFAULT_HVFHV_URL,
     fetch_nyc_sample,
     iter_hvfhv_parquet_trips,
-    load_trips,
-    materialize_trip_parquet,
 )
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
-from sensor_producer.runtime_environment import RoadEnvironmentLoader
 from sensor_producer.simulation import ReplayCoordinator, ReplayResult
 
 
@@ -45,10 +41,13 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def limit_trips(
-    trips: Iterable[TripRecord], maximum: int | None
-) -> Iterable[TripRecord]:
-    return trips if maximum is None else islice(trips, maximum)
+def local_parquet(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.suffix.lower() != ".parquet":
+        raise argparse.ArgumentTypeError("value must be a local Parquet file")
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"local Parquet file not found: {path}")
+    return path.resolve()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,26 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--hvfhv-url", default=DEFAULT_HVFHV_URL)
 
     run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--input-dir", type=Path)
-    trip_input = run_parser.add_mutually_exclusive_group()
-    trip_input.add_argument("--trips-path", type=Path)
-    trip_input.add_argument("--trips-uri")
-    run_parser.add_argument("--source-date", type=date.fromisoformat)
+    run_parser.add_argument("--trips-path", type=local_parquet, required=True)
+    run_parser.add_argument("--source-date", type=date.fromisoformat, required=True)
     run_parser.add_argument(
-        "--road-segment-path",
-        type=Path,
-        help="canonical road_segment 단일 snapshot_date Parquet 파일 (Transform 2와 같은 경로여야 함)",
+        "--road-environment-path",
+        type=local_parquet,
+        required=True,
+        help="batch-jobs가 준비한 simulation_road_environment Parquet 파일",
     )
     run_parser.add_argument(
-        "--environment-pointer-uri", default=os.getenv("SENSOR_ENVIRONMENT_POINTER_URI")
-    )
-    run_parser.add_argument(
-        "--environment-manifest-uri", default=os.getenv("SENSOR_ENVIRONMENT_MANIFEST_URI")
-    )
-    run_parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path(os.getenv("SENSOR_CACHE_DIR", ".local/sensor-producer-cache")),
+        "--taxi-zone-path",
+        type=local_parquet,
+        required=True,
+        help="batch-jobs가 준비한 taxi_zone Parquet 파일",
     )
     run_parser.add_argument("--summary-output", type=Path)
     run_parser.add_argument("--publisher", choices=("kafka", "jsonl"), default="kafka")
@@ -115,9 +107,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return
 
-    input_dir: Path | None = arguments.input_dir
     environment, sources, environment_summary = resolve_environment(arguments)
-    trips, trip_source_summary = resolve_trips(arguments, input_dir)
+    trips, trip_source_summary = resolve_trips(arguments)
     use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,
@@ -129,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     if arguments.publisher == "kafka":
         publisher = KafkaPublisher(arguments.bootstrap_servers.split(","), arguments.topic)
     else:
-        output = arguments.output or (input_dir or arguments.cache_dir) / "sensor_events.jsonl"
+        output = arguments.output or Path("sensor_events.jsonl")
         publisher = JsonlPublisher(output)
     coordinator = ReplayCoordinator(
         RoadRouter(environment.segments),
@@ -160,9 +151,7 @@ def main(argv: list[str] | None = None) -> None:
         "sources": sources,
         **environment_summary,
     }
-    summary_output = arguments.summary_output or (
-        input_dir or arguments.cache_dir
-    ) / "run_summary.json"
+    summary_output = arguments.summary_output or Path("run_summary.json")
     summary_output.parent.mkdir(parents=True, exist_ok=True)
     summary_output.write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, indent=2, sort_keys=True))
@@ -171,85 +160,35 @@ def main(argv: list[str] | None = None) -> None:
 
 def resolve_trips(
     arguments: argparse.Namespace,
-    input_dir: Path | None,
 ) -> tuple[Iterable[TripRecord], dict[str, object]]:
-    if arguments.trips_uri:
-        if arguments.source_date is None:
-            raise SystemExit("--source-date is required with --trips-uri")
-        parquet_path = materialize_trip_parquet(
-            arguments.trips_uri,
-            arguments.cache_dir,
-        )
-        return (
-            iter_hvfhv_parquet_trips(
-                parquet_path,
-                arguments.source_date,
-                arguments.max_trips,
-            ),
-            {
-                "format": "parquet",
-                "uri": arguments.trips_uri,
-                "source_date": arguments.source_date.isoformat(),
-            },
-        )
-
-    trips_path = arguments.trips_path or (input_dir / "trips.json" if input_dir else None)
-    if trips_path is None:
-        raise SystemExit("--trips-uri, --trips-path, or --input-dir is required")
     return (
-        limit_trips(load_trips(trips_path), arguments.max_trips),
-        {"format": "json", "path": str(trips_path)},
+        iter_hvfhv_parquet_trips(
+            arguments.trips_path,
+            arguments.source_date,
+            arguments.max_trips,
+        ),
+        {
+            "format": "parquet",
+            "path": str(arguments.trips_path),
+            "source_date": arguments.source_date.isoformat(),
+        },
     )
 
 
 def resolve_environment(
     arguments: argparse.Namespace,
 ) -> tuple[RoadEnvironment, list[object], dict[str, object]]:
-    pointer_uri = arguments.environment_pointer_uri
-    manifest_uri = arguments.environment_manifest_uri
-    if pointer_uri and manifest_uri:
-        raise SystemExit("choose only one environment pointer or manifest URI")
-    if arguments.road_segment_path and (pointer_uri or manifest_uri):
-        raise SystemExit("choose either a local road segment or a published environment")
-
-    if pointer_uri or manifest_uri:
-        loader = RoadEnvironmentLoader()
-        loaded = (
-            loader.from_pointer(pointer_uri, arguments.cache_dir)
-            if pointer_uri
-            else loader.from_manifest(manifest_uri, arguments.cache_dir)
+    try:
+        environment = RoadEnvironment.from_parquet(
+            arguments.road_environment_path,
+            arguments.taxi_zone_path,
         )
-        manifest = loaded.manifest
-        sources: list[object] = [
-            {
-                "source_id": source.source_id,
-                "snapshot_id": source.snapshot_id,
-                "object_uri": source.object_uri,
-                "sha256": source.sha256,
-            }
-            for source in manifest.sources
-        ]
-        return loaded.environment, sources, {
-            "environment_id": manifest.environment_id,
-            "environment_manifest_uri": loaded.manifest_uri,
-            "reference_date": manifest.reference_date.isoformat(),
-        }
-
-    input_dir: Path | None = arguments.input_dir
-    road_segment_path: Path | None = arguments.road_segment_path
-    if input_dir is None or road_segment_path is None:
-        raise SystemExit(
-            "--input-dir and --road-segment-path, or a published environment URI, "
-            "are required"
-        )
-    environment = RoadEnvironment.from_files(
-        road_segment_path,
-        input_dir / "pavement.geojson",
-        input_dir / "speed_humps.geojson",
-        input_dir / "taxi_zones.zip",
-    )
-    manifest = json.loads((input_dir / "manifest.json").read_text())
-    return environment, manifest["sources"], {}
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        raise SystemExit(f"failed to load local simulation environment: {error}") from error
+    return environment, [], {
+        "road_environment_path": str(arguments.road_environment_path),
+        "taxi_zone_path": str(arguments.taxi_zone_path),
+    }
 
 
 def vehicle_assignment(config: SimulationConfig, result: ReplayResult) -> dict[str, object]:

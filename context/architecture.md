@@ -99,9 +99,11 @@ The producer reads the pinned trip sample and road environment, chooses or loads
 a vehicle profile, computes a route, and emits time-ordered observations. It must
 be restartable without producing logically different events.
 
-The EC2 runtime can resolve the active S3 environment pointer or an immutable
-manifest and verifies its prepared road and taxi-zone artifacts before routing.
-The bounded TLC input remains local until the separate S3 trip-reader work lands.
+The producer runtime is local-only. It receives exact local paths for the prepared
+road-environment Parquet, taxi-zone Parquet, and TLC HVFHV Parquet instead of
+resolving S3 URIs, active pointers, or manifests. `batch-jobs` remains responsible
+for building the versioned environment; replay begins only after the chosen
+artifacts have been copied to the producer machine.
 
 ### Stream collection
 
