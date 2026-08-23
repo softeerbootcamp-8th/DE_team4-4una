@@ -1,7 +1,8 @@
 # Sensor Producer 배포
 
-`main`에 머지된 커밋을 EC2의 sensor-producer 컨테이너로 배포하는 절차와 사전 조건을
-정리한다. 파이프라인은
+Sensor Producer를 필요할 때 EC2에 수동 배포하는 절차와 사전 조건을 정리한다.
+현재 운영 경계에서는 producer를 로컬에서 실행하므로 자동 CD 대상에서 제외했다.
+파이프라인은
 [.github/workflows/deploy-sensor-producer.yml](../.github/workflows/deploy-sensor-producer.yml)
 하나로 구성된다.
 
@@ -17,13 +18,12 @@ trip 목록을 처음부터 끝까지 재생해 Kafka로 발행하고, 다 끝�
 `docker inspect`로 "죽지 않고 떠 있는지"만 확인하고 끝낸다(stream-processor의 기동
 확인 패턴과 동일). 리플레이 자체는 워크플로가 끝난 뒤에도 컨테이너 안에서 계속
 진행되고, 스스로 끝나면 컨테이너는 재시작 없이 그대로 종료 상태로 남는다. 다음
-`main` push가 배포를 다시 트리거하면 컨테이너를 교체하면서 리플레이가 처음부터 다시
-시작된다.
+수동 실행이 컨테이너를 교체하면 리플레이가 처음부터 다시 시작된다.
 
 ## 흐름
 
 ```
-main에 머지 → CI 통과 → ci.yml이 배포 워크플로 호출
+GitHub Actions에서 Deploy Sensor Producer 수동 실행
   → repository variables 확인
   → 이미지 빌드, ECR push (태그 = commit SHA)
   → SSH로 EC2에 배포 스크립트 전송
@@ -32,7 +32,8 @@ main에 머지 → CI 통과 → ci.yml이 배포 워크플로 호출
   → job summary에 commit, image, host 기록
 ```
 
-`ci.yml`이 `workflow_call`로 호출하는 reusable workflow이고 OIDC/`sub` 클레임 이유는
+워크플로는 `workflow_dispatch`로만 실행된다. 로컬 producer를 사용하는 동안
+`ci.yml`에서는 이 워크플로를 호출하지 않는다. OIDC/`sub` 클레임 이유는
 [deploy-serving-api.md](deploy-serving-api.md#흐름)와 동일하다.
 
 ## GitHub 설정

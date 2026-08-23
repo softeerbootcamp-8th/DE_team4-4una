@@ -258,20 +258,6 @@ jobs:
   #
   # 선택적 CI job(test, workspace)이 skipped되어도
   # CI Passed가 성공했다면 deploy job은 실행한다.
-  #
-  # ⚠️ 임시 변경 (2026-08-23): EC2 CD 배포 테스트용. 끝나면 아래 5개 deploy job을
-  # 모두 원래 형태로 되돌리고 이 주석을 지운다.
-  #
-  #   deploy-<name>:
-  #     needs: ci-passed
-  #     if: >-
-  #       always() &&
-  #       needs.ci-passed.result == 'success' &&
-  #       github.event_name == 'push' &&
-  #       github.ref == 'refs/heads/main'
-  #
-  # 트리거를 develop으로 바꾸고, CI 대기를 떼어 배포만 즉시 돌게 했다.
-  # 지금은 CI 게이트가 없으므로 테스트가 깨진 코드도 그대로 배포된다.
   deploy-serving-api:
     if: >-
       github.event_name == 'push' &&
@@ -282,14 +268,16 @@ jobs:
       id-token: write
     secrets: inherit
 
-  deploy-sensor-producer:
+  deploy-kafka:
+    needs: ci-passed
     if: >-
+      always() &&
+      needs.ci-passed.result == 'success' &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop'
-    uses: ./.github/workflows/deploy-sensor-producer.yml
+      github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-kafka.yml
     permissions:
       contents: read
-      id-token: write
     secrets: inherit
 
   deploy-batch-jobs:
