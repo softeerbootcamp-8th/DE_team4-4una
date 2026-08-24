@@ -28,7 +28,7 @@ _SUMMARY_TASK_IDS: dict[str, str] = {
 # 사용자가 콘솔에서 미리 만들어 둔 관측 버킷(#409) — Airflow Variable
 # OBSERVABILITY_FAILED_TASKS_S3_URI로 override 가능.
 _DEFAULT_FAILED_TASKS_S3_ROOT = (
-    "s3://de4-observability-473551908409-ap-northeast-2-a/airflow/failed-tasks/"
+    "s3://de4-observability-473551908409-ap-northeast-2-an/airflow/failed-tasks/"
 )
 
 
@@ -172,8 +172,13 @@ def _write_failure_record(record: dict, run_id: str) -> str:
 def _failed_tasks_s3_root() -> str:
     from airflow.sdk import Variable
 
-    return Variable.get(
-        "OBSERVABILITY_FAILED_TASKS_S3_URI", default=_DEFAULT_FAILED_TASKS_S3_ROOT
+    # infra/compose/airflow.yaml이 이 env var를 항상 선언해서, 호스트 .env에 값이
+    # 없으면 docker compose가 빈 문자열로 채운다 — 그러면 Variable.get의 default가
+    # 아니라 그 빈 문자열이 그대로 반환된다(#409 EC2 배포 중 parse_uri("") 에러로
+    # 실제 발견). 빈 문자열도 미설정과 동일하게 취급한다.
+    return (
+        Variable.get("OBSERVABILITY_FAILED_TASKS_S3_URI", default=_DEFAULT_FAILED_TASKS_S3_ROOT)
+        or _DEFAULT_FAILED_TASKS_S3_ROOT
     )
 
 
