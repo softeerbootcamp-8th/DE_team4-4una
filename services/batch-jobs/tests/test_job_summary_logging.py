@@ -13,7 +13,6 @@ import datetime as dt
 import logging
 from pathlib import Path
 
-from batch_jobs.cleansing.config import CleansingJobConfig
 from batch_jobs.cleansing.job import _log_summary as log_cleansing_summary
 from batch_jobs.comfort_score.standard_job import (
     StandardComfortScoreJobConfig,
@@ -125,28 +124,32 @@ def test_gold_audit_summary_logs_the_data_docs_target_without_credentials(caplog
 
 
 def test_cleansing_summary_logs_paths_and_the_feature_input_window(caplog):
-    config = CleansingJobConfig(
-        bronze_input_path="s3://lake/bronze/sensor-events",
-        quarantine_output_path="s3://lake/quarantine/sensor-events",
-        rules_config_path=Path("config/cleansing_rules.yaml"),
-    )
-
+    # 격리 쓰기가 feature job 안으로 옮겨가면서(#438) 실제로 쓰인 격리/feature
+    # 경로는 feature_summary에만 남는다 — 설정 root가 아니라 그 값을 받는다.
     with caplog.at_level(logging.INFO):
         log_cleansing_summary(
             target_hour=_TARGET_HOUR,
             window_start=dt.datetime(2026, 8, 24, 3, tzinfo=dt.UTC),
             window_end=_TARGET_HOUR,
-            cleansing_config=config,
+            bronze_input_path="s3://lake/bronze/sensor-events",
+            quarantine_output_path="s3://lake/quarantine/sensor-events/hour=2026-08-24T04",
             feature_output_path="s3://lake/silver/hourly_segment_features/hour=2026-08-24T04",
             processed_count=100,
-            quarantined_count=4,
-            feature_count=90,
+            accepted_count=88,
+            cleansing_quarantined_count=4,
+            map_matching_quarantined_count=2,
+            quarantined_count=6,
+            feature_count=88,
         )
 
     message = caplog.text
     assert "s3://lake/bronze/sensor-events" in message
-    assert "s3://lake/quarantine/sensor-events" in message
+    assert "s3://lake/quarantine/sensor-events/hour=2026-08-24T04" in message
     assert "s3://lake/silver/hourly_segment_features/hour=2026-08-24T04" in message
     assert "2026-08-24T03:00:00+00:00" in message
     assert "2026-08-24T04:00:00+00:00" in message
-    assert "quarantined=4" in message
+    # develop에서 들어온 세분화된 건수(#438)도 그대로 남아야 한다.
+    assert "accepted=88" in message
+    assert "cleansing_quarantined=4" in message
+    assert "map_match_quarantined=2" in message
+    assert "quarantined=6" in message

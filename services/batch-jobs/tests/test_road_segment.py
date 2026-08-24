@@ -62,7 +62,10 @@ from batch_jobs.road_segment.validate import (
     missing_required_fields,
     validate_road_segments,
 )
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
+from batch_jobs.schemas import (
+    PROCESSED_SENSOR_EVENT_SCHEMA,
+    SENSOR_EVENT_QUARANTINE_SCHEMA,
+)
 from pyproj import CRS, Transformer
 from pyspark.sql import SparkSession
 from shapely import STRtree
@@ -1036,6 +1039,7 @@ class TestBuild:
             0.0,
             0.0,
             0.0,
+            "{}",
             cls.PROCESSED_AT,
             cls.RUN_ID,
         )
@@ -1200,6 +1204,8 @@ class TestBuild:
         summary = run_hourly_segment_feature_job(
             spark, sensor_df, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION,
             self.RUN_ID, self.PROCESSED_AT,
+            cleansing_quarantine=spark.createDataFrame([], SENSOR_EVENT_QUARANTINE_SCHEMA),
+            quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
 
         assert summary.result_count == 1
@@ -1241,4 +1247,8 @@ class TestBuild:
                 spark, sensor_df, config, self.TARGET_HOUR, wrong_snapshot_date,
                 self.FEATURE_VERSION,
                 self.RUN_ID, self.PROCESSED_AT,
+                cleansing_quarantine=spark.createDataFrame(
+                    [], SENSOR_EVENT_QUARANTINE_SCHEMA
+                ),
+                quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
             )

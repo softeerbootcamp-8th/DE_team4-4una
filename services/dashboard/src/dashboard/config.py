@@ -6,6 +6,11 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+# Streamlit이 쓰던 주소와 포트를 그대로 유지한다 -- 배포 스크립트와 health
+# check가 이 포트를 가리킨다.
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8501
+
 DEFAULT_SERVING_API_URL = "http://localhost:8000"
 DEFAULT_VEHICLE_PROFILE_ID = 0
 
@@ -19,7 +24,12 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_PARALLEL_REQUESTS = 8
 
 ROAD_SEGMENT_CACHE_TTL_SECONDS = 24 * 60 * 60
-SCORE_CACHE_TTL_SECONDS = 5 * 60
+
+# Serving API 점수를 다시 조회하기까지의 시간. current_score_pipeline이
+# zone_weather_pipeline(*/15 * * * *)의 Asset으로 깨어나므로 점수 자체가 15분
+# 주기로 갱신된다. 이보다 짧게 잡으면 아직 없는 새 값을 찾아 헛조회를 한다.
+# 대시보드 안에서만 쓰는 값이라 파이프라인 주기와는 무관하게 조정할 수 있다.
+SCORE_CACHE_TTL_SECONDS = 15 * 60
 
 NYC_MAP_CENTER = (40.7128, -74.0060)
 NYC_MAP_ZOOM = 11
@@ -32,10 +42,10 @@ BOROUGH_MAP_ZOOM = 12
 # than road segments, which is also what makes the first render cheap.
 ALL_BOROUGHS = "All boroughs"
 
-# viewport당 그리는(그리고 #414 이후로는 score 조회도 하는) segment 상한 —
-# 많이 축소하면 viewport가 여전히 borough 전체를 덮을 수 있다. serving API의
-# MAX_COMFORT_SCORE_BATCH_ITEMS와 값을 맞춰 배치 조회가 한 번의 요청으로 끝나게 한다(#421).
-MAX_RENDERED_SEGMENTS = 1000
+# borough를 고르면 그 안의 segment를 전부 그린다. 이 상한은 zone master가 없어
+# borough 개념 자체가 없는 배포에서만 걸린다 -- 그때는 기준이 스냅샷 전체(16만 건,
+# 응답 20MB 이상)뿐이라 그대로 내려보낼 수 없다.
+SNAPSHOT_FALLBACK_MAX_SEGMENTS = 1000
 
 
 @dataclass(frozen=True, slots=True)

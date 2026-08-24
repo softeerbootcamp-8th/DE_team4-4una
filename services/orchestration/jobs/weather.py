@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# 한 번에 너무 많은 좌표를 보내지 않도록 zone을 나눠서 호출한다.
-ZONE_BATCH_SIZE = 50
+# 한 번에 너무 많은 좌표를 보내지 않도록 zone을 나눠서 호출한다. 값을 키우면(50->100)
+# 263개 zone 기준 API 요청 횟수가 약 6번에서 3번으로 줄어 429를 만날 기회 자체가 준다(#444).
+ZONE_BATCH_SIZE = 100
 
 # minutely_15 요청 변수 — latest_zone_weather 컬럼과 1:1 대응, 단위는 ms/mm로 맞춤.
 MINUTELY_15_VARIABLES = (
@@ -52,10 +53,13 @@ FORECAST_MINUTELY_15_STEPS = 8
 # target_time은 15분 스냅샷 경계여야 한다 (내부에서는 항상 UTC로 통일한다).
 VALID_TARGET_MINUTES = frozenset({0, 15, 30, 45})
 
-# 429/5xx/네트워크 오류에 대해 재시도한다.
+# 5xx/네트워크 오류에 대해 재시도한다. 429는 여기 넣지 않는다 — HTTP 내부 retry가
+# backoff 동안 조용히 재시도하면, 그 사이 다음 batch까지 계속 요청이 나가 이미 rate
+# limit에 걸린 상태에서 전체 zone이 연쇄로 실패할 수 있다. 429는 fetch_open_meteo()가
+# 직접 감지해서 남은 batch 요청 자체를 중단한다(#444).
 HTTP_RETRY_TOTAL = 3
 HTTP_RETRY_BACKOFF_FACTOR = 1.0
-HTTP_RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
+HTTP_RETRY_STATUS_FORCELIST = (500, 502, 503, 504)
 
 DEFAULT_ZONE_MASTER_URI = "data/reference/tlc_zone/zone_master.parquet"
 DEFAULT_ZONE_WEATHER_SNAPSHOT_URI = "data/local-lake/bronze/zone_weather_snapshot"
@@ -202,7 +206,7 @@ def _validate_target_time(target_time: datetime) -> datetime:
     return normalized
 
 
-# 429/5xx/네트워크 오류에 재시도하는 기본 세션을 만든다.
+# 5xx/네트워크 오류에 재시도하는 기본 세션을 만든다(429는 별도 처리, 위 설명 참고).
 def _build_default_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -272,6 +276,21 @@ def fetch_open_meteo(
                 },
                 timeout=30,
             )
+            # rate limit에 걸리면 이 batch뿐 아니라 아직 요청 안 한 나머지 batch도
+            # 전부 실패로 남기고 멈춘다 — 계속 요청하면 이미 걸린 rate limit 때문에
+            # 나머지 zone도 연쇄로 실패할 뿐이다(#444).
+            if response.status_code == 429:
+                remaining_zones = zones[start:]
+                logger.warning(
+                    "Open-Meteo rate limited (429) at zones %s (Retry-After=%s) — "
+                    "stopping remaining Open-Meteo requests, %d zones left unrequested",
+                    [zone.location_id for zone in batch],
+                    response.headers.get("Retry-After"),
+                    len(remaining_zones),
+                )
+                for zone in remaining_zones:
+                    failure_reasons[zone.location_id] = "Open-Meteo rate limited (429)"
+                break
             response.raise_for_status()
             payload = response.json()
             locations = payload if isinstance(payload, list) else [payload]

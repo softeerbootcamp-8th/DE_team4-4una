@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 # Target Architecture
@@ -138,18 +138,22 @@ cleansing and feature calculation:
 ```mermaid
 flowchart LR
     BR[(S3 Bronze: sensor_event)] --> T1[Hourly cleansing]
-    T1 --> Q[(Cleansing quarantine)]
+    T1 --> Q[(Sensor event quarantine)]
     T1 -. typed in-memory DataFrame .-> T2[Map matching and feature calculation]
     RS[(Versioned road environment)] --> T2
+    T2 --> Q
     T2 --> HF[(Silver: hourly_segment_features)]
 ```
 
 T1 reads every Bronze hour touched by T2's lookback and lookahead window,
 validates and deduplicates each hour, and passes accepted rows directly to T2 in
-the same Spark session. There is no persisted `processed_sensor_event` boundary.
-Only the target-hour quarantine and `hourly_segment_features` are stored. The
-Airflow DAG invokes the combined command once in its `sensor_processing`
-TaskGroup, then continues to scoring and publication.
+the same Spark session. The original Bronze JSON travels only in this in-memory
+handoff so T2 can quarantine map-matching failures without losing audit detail.
+There is no persisted `processed_sensor_event` boundary. Cleansing failures and
+map-matching failures are combined in the target-hour `sensor_event_quarantine`;
+the other surviving artifact is `hourly_segment_features`. The Airflow DAG
+invokes the combined command once in its `sensor_processing` TaskGroup, then
+continues to validation, scoring, and publication.
 
 `standard_score_pipeline`(renamed from `hourly_pipeline`, issue #229) loads
 `standard_segment_comfort_score` from `hourly_comfort_score` and stops there — it

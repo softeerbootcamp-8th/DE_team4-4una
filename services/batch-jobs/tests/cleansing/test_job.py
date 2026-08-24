@@ -2,7 +2,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from batch_jobs.cleansing.config import CleansingJobConfig
-from batch_jobs.cleansing.hourly_storage import quarantine_hour_path
+from batch_jobs.cleansing.hourly_storage import (
+    quarantine_hour_path,
+    write_hourly_quarantine,
+)
 from batch_jobs.cleansing.job import run_cleansing_job
 from batch_jobs.hourly_segment_feature_job import (
     HourlySegmentFeatureJobConfig,
@@ -36,10 +39,33 @@ def feature_config(directory: Path) -> HourlySegmentFeatureJobConfig:
 
 
 def stub_feature_job(monkeypatch, captured_rows: list[dict[str, object]]) -> None:
-    def run_stub(spark, sensor_df, config, target_hour, snapshot, version, run_id, processed_at):
+    def run_stub(
+        spark,
+        sensor_df,
+        config,
+        target_hour,
+        snapshot,
+        version,
+        run_id,
+        processed_at,
+        *,
+        cleansing_quarantine,
+        quarantine_output_path,
+    ):
         captured_rows.extend(row.asDict() for row in sensor_df.collect())
+        quarantine_write = write_hourly_quarantine(
+            spark,
+            cleansing_quarantine,
+            quarantine_output_path,
+            target_hour,
+            run_id,
+        )
         return HourlySegmentFeatureJobSummary(
             result_count=1,
+            accepted_count=sensor_df.count(),
+            map_matching_quarantined_count=0,
+            quarantined_count=quarantine_write.row_count,
+            quarantine_output_path=quarantine_write.output_path,
             output_path=config.output_path,
             target_hour=target_hour,
             run_id=run_id,
@@ -80,6 +106,9 @@ def test_job_passes_typed_rows_directly_to_features(spark, tmp_path, monkeypatch
     summary, rows = run_job(spark, tmp_path, bronze, monkeypatch)
 
     assert summary.processed_count == 2
+    assert summary.accepted_count == 2
+    assert summary.cleansing_quarantined_count == 2
+    assert summary.map_matching_quarantined_count == 0
     assert summary.quarantined_count == 2
     assert {row["event_id"] for row in rows} == {"first", "second"}
     assert all("event_date" not in row for row in rows)
@@ -100,6 +129,7 @@ def test_missing_bronze_partition_yields_zero_processed_and_quarantined(
     summary, rows = run_job(spark, tmp_path, bronze, monkeypatch)
 
     assert summary.processed_count == 0
+    assert summary.accepted_count == 0
     assert summary.quarantined_count == 0
     assert rows == []
 
@@ -115,7 +145,8 @@ def test_job_conserves_target_hour_rows(spark, tmp_path, monkeypatch):
 
     summary, _ = run_job(spark, tmp_path, bronze, monkeypatch)
 
-    assert summary.processed_count + summary.quarantined_count == 3
+    assert summary.input_count == 3
+    assert summary.accepted_count + summary.quarantined_count == 3
 
 
 def test_rerunning_same_hour_replaces_quarantine(spark, tmp_path, monkeypatch):

@@ -64,6 +64,8 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("jerk_z", DoubleType(), nullable=True),
         StructField("steering_vibration", DoubleType(), nullable=True),
         StructField("steering_angle", DoubleType(), nullable=True),
+        # 맵매칭 실패 시 원본 이벤트를 그대로 격리하기 위한 실행 중 전용 컬럼
+        StructField(RAW_RECORD_COLUMN, StringType(), nullable=False),
         StructField("_processed_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
     ]

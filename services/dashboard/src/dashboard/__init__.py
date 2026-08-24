@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 
 def main() -> None:
-    """Launch the packaged Streamlit application on the container interface."""
-    from streamlit.web import cli as streamlit_cli
+    """Serve the API and the built React app on the container interface.
 
-    app_path = Path(__file__).with_name("app.py")
-    sys.argv = [
-        "streamlit",
-        "run",
-        str(app_path),
-        "--server.address=0.0.0.0",
-        "--server.port=8501",
-        "--server.headless=true",
-    ]
-    streamlit_cli.main()
+    worker는 늘리지 않는다. DashboardService가 road segment 스냅샷과 STRtree를
+    프로세스 메모리에 들고 있어서, worker마다 통째로 중복해 올리고 각자 따로
+    콜드 스타트를 하게 된다.
+    """
+    import uvicorn
+
+    from dashboard.api import app
+    from dashboard.config import DEFAULT_HOST, DEFAULT_PORT
+
+    uvicorn.run(app, host=DEFAULT_HOST, port=DEFAULT_PORT)

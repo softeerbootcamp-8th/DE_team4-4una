@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-25
 ---
 
 # Table Schema Catalog
@@ -318,9 +318,11 @@ one accepted, deduplicated Bronze `sensor_event` row.
 T1 parses and validates `event_time`, applies cleansing and deduplication rules,
 and passes the typed DataFrame directly to T2 in the same Spark session. Neither
 `event_date` nor `event_hour` is part of the contract because the DataFrame is
-not written as an hourly partitioned dataset. Rejected rows are stored in the
-separate cleansing quarantine; accepted rows are consumed immediately by map
-matching and hourly feature calculation.
+not written as an hourly partitioned dataset. The handoff retains the original
+Bronze JSON in `_raw_record` only long enough for T2 to preserve it if map
+matching fails. Cleansing failures and `MAP_MATCH_FAILED` rows are stored in the
+same target-hour `sensor_event_quarantine`; matched rows are consumed immediately
+by hourly feature calculation.
 
 The executable field and type definition is
 `services/batch-jobs/src/batch_jobs/schemas.py::PROCESSED_SENSOR_EVENT_SCHEMA`.

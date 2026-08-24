@@ -31,15 +31,16 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Target Status",
+      "title": "Component Status",
+      "description": "instance별 상태를 우선순위로 판정한다(#437). TARGET DOWN(3, up==0) > BROKER DOWN(2, exporter는 살아있는데 kafka_brokers==0) > UNDER REPLICATED(1, under-replicated partition 존재) > HEALTHY(0). 우선순위가 이렇게 chain으로 겹치는 이유: kafka_brokers/under_replicated metric은 exporter가 실제로 응답해야만 존재하므로, exporter가 죽으면(up==0) 그 metric 자체가 없어져 자동으로 상위 조건(TARGET DOWN)만 남는다 — 즉 겹쳐도 이중 판정이 나지 않는다. 실제 consumer lag(HIGH LAG)는 정상 범위 기준이 아직 없어(Consumer Lag 패널 참고) 이 상태 판정에서 뺐다 — 임의 threshold를 만들지 않기 위함이다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "up{job=\"kafka\"}",
-          "legendFormat": "{{job}}",
+          "expr": "(3 * (up{job=\"kafka\"} == bool 0) > 0) or (2 * (kafka_brokers{job=\"kafka\"} == bool 0) > 0) or (1 * (sum by (instance, job) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"}) > bool 0) > 0) or (0 * up{job=\"kafka\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -59,16 +60,19 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "UNDER REPLICATED", "color": "orange", "index": 1 },
+                "2": { "text": "BROKER DOWN", "color": "red", "index": 2 },
+                "3": { "text": "TARGET DOWN", "color": "red", "index": 3 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
             ]
           }
         },
@@ -76,11 +80,49 @@
       }
     },
     {
+      "id": 10,
+      "type": "state-timeline",
+      "title": "Component Status Timeline",
+      "description": "위 Component Status와 완전히 같은 query — 언제 상태가 바뀌었는지 시간축으로 본다. instant query가 아니라 range query라 pan/zoom한 시간 범위 전체의 이력이 보인다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "(3 * (up{job=\"kafka\"} == bool 0) > 0) or (2 * (kafka_brokers{job=\"kafka\"} == bool 0) > 0) or (1 * (sum by (instance, job) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"}) > bool 0) > 0) or (0 * up{job=\"kafka\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "UNDER REPLICATED", "color": "orange", "index": 1 },
+                "2": { "text": "BROKER DOWN", "color": "red", "index": 2 },
+                "3": { "text": "TARGET DOWN", "color": "red", "index": 3 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
       "id": 2,
       "type": "stat",
       "title": "Brokers",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 0, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -109,15 +151,15 @@
       "id": 3,
       "type": "stat",
       "title": "Topics",
-      "description": "내부 토픽(`__`로 시작, 예: __consumer_offsets)은 제외한다 — 실제로 운영하는 토픽 수를 보기 위함이다.",
+      "description": "내부 토픽(`__`로 시작, 예: __consumer_offsets)은 제외한다 — 실제로 운영하는 토픽 수를 보기 위함이다. instance별로 묶어서(#437) exporter가 여러 개가 되어도 서로 안 섞인다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 6, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 6, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "count(kafka_topic_partitions{job=\"kafka\", topic!~\"__.*\"})",
-          "legendFormat": "topics",
+          "expr": "count by (instance) (kafka_topic_partitions{job=\"kafka\", topic!~\"__.*\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -140,15 +182,15 @@
       "id": 4,
       "type": "stat",
       "title": "Partitions",
-      "description": "내부 토픽(`__`로 시작, 예: __consumer_offsets)은 제외한다.",
+      "description": "내부 토픽(`__`로 시작, 예: __consumer_offsets)은 제외한다. instance별로 묶는다(#437).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 12, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(kafka_topic_partitions{job=\"kafka\", topic!~\"__.*\"})",
-          "legendFormat": "partitions",
+          "expr": "sum by (instance) (kafka_topic_partitions{job=\"kafka\", topic!~\"__.*\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -171,15 +213,15 @@
       "id": 5,
       "type": "stat",
       "title": "Under Replicated",
-      "description": "내부 토픽을 포함한 전체 클러스터 건강 신호다(Topics/Partitions 패널과 달리 제외하지 않음). 0이 정상이다.",
+      "description": "내부 토픽을 포함한 전체 클러스터 건강 신호다(Topics/Partitions 패널과 달리 제외하지 않음). 0이 정상이다. instance별로 묶는다(#437) — Component Status의 BROKER DOWN/UNDER REPLICATED 판정이 쓰는 것과 같은 raw 숫자다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 18, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 18, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(kafka_topic_partition_under_replicated_partition{job=\"kafka\"})",
-          "legendFormat": "under-replicated",
+          "expr": "sum by (instance) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -210,15 +252,15 @@
       "id": 6,
       "type": "timeseries",
       "title": "Message Rate over Time (offset increase, approx.)",
-      "description": "kafka_topic_partition_current_offset의 증가율로 근사한 topic별 message rate다. Kafka broker의 byte throughput(Bytes In/Out) JMX metric이 아니다 — 이번 작업 범위에서 제외했다. 내부 토픽은 제외한다.",
+      "description": "kafka_topic_partition_current_offset의 증가율로 근사한 topic별 message rate다. Kafka broker의 byte throughput(Bytes In/Out) JMX metric이 아니다 — 이번 작업 범위에서 제외했다. 내부 토픽은 제외한다. instance도 legend에 포함한다(#437) — exporter가 여러 개가 되면 어느 instance가 보고한 값인지 구분해야 한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset{job=\"kafka\", topic!~\"__.*\"}[5m]))",
-          "legendFormat": "{{topic}}"
+          "expr": "sum by (instance, topic) (rate(kafka_topic_partition_current_offset{job=\"kafka\", topic!~\"__.*\"}[5m]))",
+          "legendFormat": "{{instance}} / {{topic}}"
         }
       ],
       "fieldConfig": {
@@ -237,22 +279,22 @@
       "type": "row",
       "title": "Consumers",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 },
       "panels": []
     },
     {
       "id": 7,
       "type": "stat",
       "title": "Consumer Lag",
-      "description": "consumer group이 아직 하나도 없으면 kafka_consumergroup_lag 자체가 없어 이 패널은 No data다 — 장애가 아니다. README의 Troubleshooting 참고.",
+      "description": "consumer group이 아직 하나도 없으면 kafka_consumergroup_lag 자체가 없어 이 패널은 No data다 — 장애가 아니다. README의 Troubleshooting 참고. instance별로 묶는다(#437). Gauge로 바꾸지 않은 이유: 정상 범위에 대한 확립된 기준이 없어 임의 threshold를 만들 수 없다(#437) — 실제 운영 데이터로 기준을 잡은 뒤 검토한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 4 },
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(kafka_consumergroup_lag{job=\"kafka\"})",
-          "legendFormat": "lag",
+          "expr": "sum by (instance) (kafka_consumergroup_lag{job=\"kafka\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -275,15 +317,15 @@
       "id": 8,
       "type": "timeseries",
       "title": "Consumer Lag by Topic",
-      "description": "kafka_consumergroup_lag_sum(모든 partition 합산)을 topic별로 더한다. consumer group이 없으면 No data다.",
+      "description": "kafka_consumergroup_lag_sum(모든 partition 합산)을 topic별로 더한다. consumer group이 없으면 No data다. instance도 legend에 포함한다(#437).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (topic) (kafka_consumergroup_lag_sum{job=\"kafka\"})",
-          "legendFormat": "{{topic}}"
+          "expr": "sum by (instance, topic) (kafka_consumergroup_lag_sum{job=\"kafka\"})",
+          "legendFormat": "{{instance}} / {{topic}}"
         }
       ],
       "fieldConfig": {
@@ -301,15 +343,15 @@
       "id": 9,
       "type": "timeseries",
       "title": "Consumer Group Members",
-      "description": "consumer group이 없으면 No data다.",
+      "description": "consumer group이 없으면 No data다. instance도 legend에 포함한다(#437).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (consumergroup) (kafka_consumergroup_members{job=\"kafka\"})",
-          "legendFormat": "{{consumergroup}}"
+          "expr": "sum by (instance, consumergroup) (kafka_consumergroup_members{job=\"kafka\"})",
+          "legendFormat": "{{instance}} / {{consumergroup}}"
         }
       ],
       "fieldConfig": {

@@ -6,13 +6,12 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "boto3>=1.40,<2.0",
     "de4-core",
-    "folium>=0.20.0",
+    "fastapi>=0.120.0",
     "httpx>=0.28.1",
     "pyarrow>=25.0.1",
     "pyproj>=3.7.2",
     "shapely>=2.1.2",
-    "streamlit>=1.62.0",
-    "streamlit-folium>=0.27.4",
+    "uvicorn>=0.38.0",
 ]
 
 [dependency-groups]

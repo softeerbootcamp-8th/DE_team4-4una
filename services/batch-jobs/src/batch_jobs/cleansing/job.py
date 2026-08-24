@@ -11,7 +11,6 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 
 from batch_jobs.cleansing.config import CleansingJobConfig
-from batch_jobs.cleansing.hourly_storage import write_hourly_quarantine
 from batch_jobs.cleansing.reader import (
     filter_bronze_sensor_events_for_hour,
     read_bronze_sensor_events,
@@ -39,7 +38,11 @@ class CleansedSensorEvents:
 
 @dataclass(frozen=True, slots=True)
 class CleansingJobSummary:
+    input_count: int
     processed_count: int
+    accepted_count: int
+    cleansing_quarantined_count: int
+    map_matching_quarantined_count: int
     quarantined_count: int
     quarantine_output_path: str
     feature_summary: HourlySegmentFeatureJobSummary
@@ -112,13 +115,7 @@ def run_cleansing_job(
     target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
     try:
         processed_count = target_processed.count()
-        quarantine_write = write_hourly_quarantine(
-            spark,
-            target_quarantined,
-            cleansing_config.quarantine_output_path,
-            target_hour,
-            run_id,
-        )
+        cleansing_quarantined_count = target_quarantined.count()
         feature_summary = run_hourly_segment_feature_job(
             spark,
             processed_window,
@@ -128,6 +125,8 @@ def run_cleansing_job(
             feature_version,
             run_id,
             processed_at,
+            cleansing_quarantine=target_quarantined,
+            quarantine_output_path=cleansing_config.quarantine_output_path,
         )
     finally:
         target_quarantined.unpersist()
@@ -139,10 +138,16 @@ def run_cleansing_job(
         target_hour=target_hour,
         window_start=window_start,
         window_end=window_end,
-        cleansing_config=cleansing_config,
+        bronze_input_path=cleansing_config.bronze_input_path,
+        # 격리 쓰기가 run_hourly_segment_feature_job 안으로 옮겨가면서(#438) 실제로
+        # 쓰인 경로는 feature_summary에만 있다 — 설정 root가 아니라 이 값을 남긴다.
+        quarantine_output_path=feature_summary.quarantine_output_path,
         feature_output_path=feature_summary.output_path,
         processed_count=processed_count,
-        quarantined_count=quarantine_write.row_count,
+        accepted_count=feature_summary.accepted_count,
+        cleansing_quarantined_count=cleansing_quarantined_count,
+        map_matching_quarantined_count=feature_summary.map_matching_quarantined_count,
+        quarantined_count=feature_summary.quarantined_count,
         feature_count=feature_summary.result_count,
     )
     logger.info(
@@ -151,9 +156,13 @@ def run_cleansing_job(
         time.monotonic() - started,
     )
     return CleansingJobSummary(
+        input_count=processed_count + cleansing_quarantined_count,
         processed_count=processed_count,
-        quarantined_count=quarantine_write.row_count,
-        quarantine_output_path=quarantine_write.output_path,
+        accepted_count=feature_summary.accepted_count,
+        cleansing_quarantined_count=cleansing_quarantined_count,
+        map_matching_quarantined_count=feature_summary.map_matching_quarantined_count,
+        quarantined_count=feature_summary.quarantined_count,
+        quarantine_output_path=feature_summary.quarantine_output_path,
         feature_summary=feature_summary,
     )
 
@@ -195,29 +204,38 @@ def _log_summary(
     target_hour: datetime,
     window_start: datetime,
     window_end: datetime,
-    cleansing_config: CleansingJobConfig,
+    bronze_input_path: str,
+    quarantine_output_path: str,
     feature_output_path: str,
     processed_count: int,
+    accepted_count: int,
+    cleansing_quarantined_count: int,
+    map_matching_quarantined_count: int,
     quarantined_count: int,
     feature_count: int,
 ) -> None:
     """무엇을 어느 구간에서 읽어 어디에 썼는지 요약 한 줄에 다 담는다(#406).
 
     시작 로그에도 경로가 있지만 그건 설정된 root라, 실제로 쓰인 시간별 경로
-    (feature_output_path)와 feature 입력 윈도우는 여기서만 확인된다. 요약 한 줄만
-    보고도 추적이 되도록 경로를 다시 남긴다.
+    (quarantine_output_path/feature_output_path)와 feature 입력 윈도우는 여기서만
+    확인된다. 요약 한 줄만 보고도 추적이 되도록 경로를 다시 남긴다.
     """
     logger.info(
         "target_hour=%s feature_input_window=[%s, %s) bronze=%s quarantine=%s "
-        "features=%s input=%d passed=%d quarantined=%d features_written=%d",
+        "features=%s input=%d cleansed=%d accepted=%d "
+        "cleansing_quarantined=%d map_match_quarantined=%d quarantined=%d "
+        "features_written=%d",
         target_hour.isoformat(),
         window_start.isoformat(),
         window_end.isoformat(),
-        cleansing_config.bronze_input_path,
-        cleansing_config.quarantine_output_path,
+        bronze_input_path,
+        quarantine_output_path,
         feature_output_path,
-        processed_count + quarantined_count,
+        processed_count + cleansing_quarantined_count,
         processed_count,
+        accepted_count,
+        cleansing_quarantined_count,
+        map_matching_quarantined_count,
         quarantined_count,
         feature_count,
     )
