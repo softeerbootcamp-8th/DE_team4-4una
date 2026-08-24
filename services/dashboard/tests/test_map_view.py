@@ -4,6 +4,7 @@ from dashboard.map_view import (
     GREEN,
     RED,
     YELLOW,
+    build_map,
     comfort_score_color,
     join_road_segments_with_scores,
 )
@@ -57,3 +58,10 @@ def test_join_keeps_segments_without_api_score_and_colors_them_gray() -> None:
     assert joined[0].color == GREEN
     assert joined[1].score is None
     assert joined[1].color == GRAY
+
+
+def test_build_map_renders_without_segments() -> None:
+    """The first render happens before the viewport is known, so an empty
+    segment list must not raise: GeoJsonTooltip asserts its field names against
+    the first feature and finds none in an empty collection."""
+    build_map([])
