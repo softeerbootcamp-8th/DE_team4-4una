@@ -15,6 +15,7 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from batch_jobs.cleansing.hourly_storage import write_hourly_quarantine
 from batch_jobs.hourly_segment_feature_storage import (
     HourlySegmentFeatureWriteResult,
     write_hourly_segment_features,
@@ -29,6 +30,7 @@ from batch_jobs.map_matching.config import (
 )
 from batch_jobs.map_matching.scoring import score_segment_candidates
 from batch_jobs.map_matching.selection import select_best_segment
+from batch_jobs.schemas import RAW_RECORD_COLUMN
 from batch_jobs.sensor_features.aggregation import build_hourly_segment_features
 from batch_jobs.sensor_features.config import (
     DEFAULT_EVENT_FEATURE_CONFIG_PATH,
@@ -83,6 +85,10 @@ class HourlySegmentFeatureJobConfig:
 @dataclass(frozen=True, slots=True)
 class HourlySegmentFeatureJobSummary:
     result_count: int
+    accepted_count: int
+    map_matching_quarantined_count: int
+    quarantined_count: int
+    quarantine_output_path: str
     output_path: str
     target_hour: datetime
     run_id: str
@@ -106,6 +112,9 @@ def run_hourly_segment_feature_job(
     feature_version: str,
     run_id: str,
     processed_at: datetime,
+    *,
+    cleansing_quarantine: DataFrame,
+    quarantine_output_path: str,
 ) -> HourlySegmentFeatureJobSummary:
     _validate_job_arguments(target_hour, feature_version, run_id, processed_at)
 
@@ -136,9 +145,7 @@ def run_hourly_segment_feature_job(
     )
     selected = select_best_segment(scored)
 
-    matched_df = sensor_df.join(
-        selected.select("event_id", "segment_id", "road_snapshot_date"), on="event_id", how="left"
-    )
+    matched_df = sensor_df.join(selected, on="event_id", how="left")
 
     steering_df = add_steering_reversal(
         add_steering_rate(matched_df, steering_config.max_gap_seconds.value),
@@ -171,9 +178,28 @@ def run_hourly_segment_feature_job(
     # 전체 상류 lineage가 뒤쪽의 첫 action(validate_hourly_segment_features 내부)에서야
     # 실행돼 실패 스택트레이스가 엉뚱하게 aggregation.py를 가리킨다(#386). count()로
     # 여기서 먼저 materialize해 실패 지점을 Map Matching 단계로 정확히 드러낸다.
-    target_df.count()
+    target_count = target_df.count()
 
     try:
+        map_matching_quarantine = _build_map_matching_quarantine(
+            target_df, run_id, processed_at
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+        try:
+            map_matching_quarantined_count = map_matching_quarantine.count()
+            combined_quarantine = cleansing_quarantine.unionByName(
+                map_matching_quarantine
+            )
+            quarantine_write = write_hourly_quarantine(
+                spark,
+                combined_quarantine,
+                quarantine_output_path,
+                target_hour,
+                run_id,
+            )
+        finally:
+            map_matching_quarantine.unpersist()
+
+        accepted_count = target_count - map_matching_quarantined_count
         result = build_hourly_segment_features(
             target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
         ).persist(StorageLevel.MEMORY_AND_DISK)
@@ -181,9 +207,22 @@ def run_hourly_segment_feature_job(
             write_result = write_hourly_segment_features(
                 spark, result, config.output_path, target_hour, run_id
             )
-            _log_summary(run_id, target_hour, sensor_df, target_df, write_result)
+            _log_summary(
+                run_id,
+                target_hour,
+                sensor_df,
+                target_count,
+                accepted_count,
+                map_matching_quarantined_count,
+                quarantine_write.row_count,
+                write_result,
+            )
             return HourlySegmentFeatureJobSummary(
                 result_count=write_result.row_count,
+                accepted_count=accepted_count,
+                map_matching_quarantined_count=map_matching_quarantined_count,
+                quarantined_count=quarantine_write.row_count,
+                quarantine_output_path=quarantine_write.output_path,
                 output_path=write_result.output_path,
                 target_hour=target_hour,
                 run_id=run_id,
@@ -192,6 +231,37 @@ def run_hourly_segment_feature_job(
             result.unpersist()
     finally:
         target_df.unpersist()
+
+
+def _build_map_matching_quarantine(
+    matched: DataFrame,
+    run_id: str,
+    rejected_at: datetime,
+) -> DataFrame:
+    """맵매칭 실패 행을 공통 sensor_event_quarantine 형태로 변환한다."""
+    reject_detail = F.to_json(
+        F.struct(
+            F.lit("distance+heading").alias("match_method"),
+            F.col("map_match_status"),
+            F.col("road_snapshot_date"),
+            F.col("map_match_distance_m"),
+            F.col("map_match_heading_diff_deg"),
+            F.col("map_match_score"),
+            F.col("candidate_count"),
+        ),
+        options={"ignoreNullFields": "false"},
+    )
+    return matched.filter(F.col("segment_id").isNull()).select(
+        "event_id",
+        "trip_id",
+        F.to_date("event_time").alias("event_date"),
+        F.lit("MAP_MATCH_FAILED").alias("reject_reason"),
+        reject_detail.alias("reject_detail"),
+        F.col(RAW_RECORD_COLUMN).alias("raw_record"),
+        F.lit(run_id).alias("_run_id"),
+        F.lit(rejected_at).alias("_rejected_at"),
+        F.lit(rejected_at.date()).alias("rejected_date"),
+    )
 
 
 def feature_input_window(target_hour: datetime) -> tuple[datetime, datetime]:
@@ -241,24 +311,25 @@ def _log_summary(
     run_id: str,
     target_hour: datetime,
     sensor_df: DataFrame,
-    target_df: DataFrame,
+    target_count: int,
+    accepted_count: int,
+    map_matching_quarantined_count: int,
+    quarantined_count: int,
     write_result: HourlySegmentFeatureWriteResult,
 ) -> None:
     started = time.monotonic()
     sensor_count = sensor_df.count()
-    # count 2개를 액션 1번으로 합친다.
-    counts = target_df.agg(
-        F.count(F.lit(1)).alias("target_count"),
-        F.sum(F.when(F.col("segment_id").isNull(), 1).otherwise(0)).alias("unmatched_count"),
-    ).first()
     logger.info(
         "hourly segment feature job finished run_id=%s target_hour=%s "
-        "read=%d target=%d unmatched=%d result=%d output_path=%s elapsed=%.1fs",
+        "read=%d target=%d accepted=%d map_match_quarantined=%d "
+        "quarantined=%d result=%d output_path=%s elapsed=%.1fs",
         run_id,
         target_hour.isoformat(),
         sensor_count,
-        counts["target_count"],
-        counts["unmatched_count"],
+        target_count,
+        accepted_count,
+        map_matching_quarantined_count,
+        quarantined_count,
         write_result.row_count,
         write_result.output_path,
         time.monotonic() - started,

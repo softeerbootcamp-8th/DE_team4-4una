@@ -79,7 +79,11 @@ class SensorProcessingValidationSummary:
     feature_row_count: int
     accepted_sample_count: int
     quarantine_row_count: int
+    cleansing_quarantine_row_count: int
+    map_matching_quarantine_row_count: int
     quarantine_rate: float
+    cleansing_quarantine_rate: float
+    map_matching_quarantine_rate: float
     feature_ranges_success: bool
     quarantine_rate_success: bool
 
@@ -98,6 +102,13 @@ def compute_quarantine_rate(quarantined_count: int, accepted_count: int) -> floa
     if total == 0:
         return 0.0
     return quarantined_count / total
+
+
+def compute_component_rate(component_count: int, total_count: int) -> float:
+    """전체 입력 중 특정 격리 원인이 차지하는 비율."""
+    if total_count == 0:
+        return 0.0
+    return component_count / total_count
 
 
 def load_expectation_suite(path: Path) -> gx.ExpectationSuite:
@@ -158,8 +169,29 @@ def run_sensor_processing_validation(
 
     feature_row_count = features_df.count()
     accepted_sample_count = features_df.agg(F.sum("sample_count")).first()[0] or 0
-    quarantine_row_count = quarantine_df.count() if quarantine_df is not None else 0
+    if quarantine_df is None:
+        quarantine_row_count = 0
+        map_matching_quarantine_row_count = 0
+    else:
+        quarantine_counts = quarantine_df.agg(
+            F.count(F.lit(1)).alias("total_count"),
+            F.sum(
+                F.when(F.col("reject_reason") == "MAP_MATCH_FAILED", 1).otherwise(0)
+            ).alias("map_matching_count"),
+        ).first()
+        quarantine_row_count = quarantine_counts["total_count"]
+        map_matching_quarantine_row_count = quarantine_counts["map_matching_count"] or 0
+    cleansing_quarantine_row_count = (
+        quarantine_row_count - map_matching_quarantine_row_count
+    )
+    total_input_count = accepted_sample_count + quarantine_row_count
     quarantine_rate = compute_quarantine_rate(quarantine_row_count, accepted_sample_count)
+    cleansing_quarantine_rate = compute_component_rate(
+        cleansing_quarantine_row_count, total_input_count
+    )
+    map_matching_quarantine_rate = compute_component_rate(
+        map_matching_quarantine_row_count, total_input_count
+    )
 
     ranges_suite = load_expectation_suite(config.feature_ranges_suite_path)
     ranges_result = validate_dataframe(features_df, ranges_suite, "hourly_segment_features")
@@ -173,7 +205,11 @@ def run_sensor_processing_validation(
         feature_row_count=feature_row_count,
         accepted_sample_count=accepted_sample_count,
         quarantine_row_count=quarantine_row_count,
+        cleansing_quarantine_row_count=cleansing_quarantine_row_count,
+        map_matching_quarantine_row_count=map_matching_quarantine_row_count,
         quarantine_rate=quarantine_rate,
+        cleansing_quarantine_rate=cleansing_quarantine_rate,
+        map_matching_quarantine_rate=map_matching_quarantine_rate,
         feature_ranges_success=ranges_result.success,
         quarantine_rate_success=rate_result.success,
     )

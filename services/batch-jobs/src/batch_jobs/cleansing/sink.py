@@ -7,7 +7,7 @@ from datetime import datetime
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
-from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA
+from batch_jobs.schemas import PROCESSED_SENSOR_EVENT_SCHEMA, RAW_RECORD_COLUMN
 
 
 def to_processed_sensor_events(
@@ -19,6 +19,7 @@ def to_processed_sensor_events(
     event_time = F.to_timestamp("event_time")
     overrides: dict[str, Column] = {
         "event_time": event_time,
+        RAW_RECORD_COLUMN: F.col(RAW_RECORD_COLUMN),
         "_processed_at": F.lit(processed_at),
         "_run_id": F.lit(run_id),
     }

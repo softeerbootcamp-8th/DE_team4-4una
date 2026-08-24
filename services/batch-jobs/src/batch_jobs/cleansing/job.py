@@ -11,7 +11,6 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 
 from batch_jobs.cleansing.config import CleansingJobConfig
-from batch_jobs.cleansing.hourly_storage import write_hourly_quarantine
 from batch_jobs.cleansing.reader import (
     filter_bronze_sensor_events_for_hour,
     read_bronze_sensor_events,
@@ -39,7 +38,11 @@ class CleansedSensorEvents:
 
 @dataclass(frozen=True, slots=True)
 class CleansingJobSummary:
+    input_count: int
     processed_count: int
+    accepted_count: int
+    cleansing_quarantined_count: int
+    map_matching_quarantined_count: int
     quarantined_count: int
     quarantine_output_path: str
     feature_summary: HourlySegmentFeatureJobSummary
@@ -112,13 +115,7 @@ def run_cleansing_job(
     target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
     try:
         processed_count = target_processed.count()
-        quarantine_write = write_hourly_quarantine(
-            spark,
-            target_quarantined,
-            cleansing_config.quarantine_output_path,
-            target_hour,
-            run_id,
-        )
+        cleansing_quarantined_count = target_quarantined.count()
         feature_summary = run_hourly_segment_feature_job(
             spark,
             processed_window,
@@ -128,6 +125,8 @@ def run_cleansing_job(
             feature_version,
             run_id,
             processed_at,
+            cleansing_quarantine=target_quarantined,
+            quarantine_output_path=cleansing_config.quarantine_output_path,
         )
     finally:
         target_quarantined.unpersist()
@@ -137,7 +136,10 @@ def run_cleansing_job(
 
     _log_summary(
         processed_count,
-        quarantine_write.row_count,
+        feature_summary.accepted_count,
+        cleansing_quarantined_count,
+        feature_summary.map_matching_quarantined_count,
+        feature_summary.quarantined_count,
         feature_summary.result_count,
         target_hour,
     )
@@ -147,9 +149,13 @@ def run_cleansing_job(
         time.monotonic() - started,
     )
     return CleansingJobSummary(
+        input_count=processed_count + cleansing_quarantined_count,
         processed_count=processed_count,
-        quarantined_count=quarantine_write.row_count,
-        quarantine_output_path=quarantine_write.output_path,
+        accepted_count=feature_summary.accepted_count,
+        cleansing_quarantined_count=cleansing_quarantined_count,
+        map_matching_quarantined_count=feature_summary.map_matching_quarantined_count,
+        quarantined_count=feature_summary.quarantined_count,
+        quarantine_output_path=feature_summary.quarantine_output_path,
         feature_summary=feature_summary,
     )
 
@@ -188,15 +194,22 @@ def _union_frames(frames: list[DataFrame]) -> DataFrame:
 
 def _log_summary(
     processed_count: int,
+    accepted_count: int,
+    cleansing_quarantined_count: int,
+    map_matching_quarantined_count: int,
     quarantined_count: int,
     feature_count: int,
     target_hour: datetime,
 ) -> None:
     logger.info(
-        "target_hour=%s input=%d passed=%d quarantined=%d features=%d",
+        "target_hour=%s input=%d cleansed=%d accepted=%d "
+        "cleansing_quarantined=%d map_match_quarantined=%d quarantined=%d features=%d",
         target_hour.isoformat(),
-        processed_count + quarantined_count,
+        processed_count + cleansing_quarantined_count,
         processed_count,
+        accepted_count,
+        cleansing_quarantined_count,
+        map_matching_quarantined_count,
         quarantined_count,
         feature_count,
     )

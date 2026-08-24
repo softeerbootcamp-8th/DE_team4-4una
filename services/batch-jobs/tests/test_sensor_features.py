@@ -20,6 +20,7 @@ from batch_jobs.hourly_segment_feature_storage import (
 from batch_jobs.schemas import (
     HOURLY_SEGMENT_FEATURE_SCHEMA,
     PROCESSED_SENSOR_EVENT_SCHEMA,
+    SENSOR_EVENT_QUARANTINE_SCHEMA,
 )
 from batch_jobs.sensor_features.aggregation import (
     add_hourly_aggregation_keys,
@@ -1334,12 +1335,16 @@ class TestHourlySegmentFeatureJob:
             0.0,
             0.0,
             0.0,
+            "{}",
             self.PROCESSED_AT,
             self.RUN_ID,
         )
 
     def sensor_events(self, spark, rows: list[tuple]):
         return spark.createDataFrame(rows, PROCESSED_SENSOR_EVENT_SCHEMA)
+
+    def empty_quarantine(self, spark):
+        return spark.createDataFrame([], SENSOR_EVENT_QUARANTINE_SCHEMA)
 
     def build_config(self, spark, tmp_path) -> HourlySegmentFeatureJobConfig:
         road_segment_path = self.write_road_segment(spark, tmp_path)
@@ -1361,6 +1366,8 @@ class TestHourlySegmentFeatureJob:
             self.FEATURE_VERSION,
             self.RUN_ID,
             self.PROCESSED_AT,
+            cleansing_quarantine=self.empty_quarantine(spark),
+            quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
         return summary, spark.read.parquet(summary.output_path).collect()
 
@@ -1455,7 +1462,9 @@ class TestHourlySegmentFeatureJob:
         assert result[0]["hard_brake_count"] == 0
         assert result[0]["sample_count"] == 2
 
-    def test_unmatched_events_are_excluded_from_the_result(self, spark, tmp_path) -> None:
+    def test_unmatched_events_are_quarantined_and_excluded_from_result(
+        self, spark, tmp_path
+    ) -> None:
         rows = [
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=0), "e1", trip_seq=0),
             # 도로에서 멀리 떨어진 위치라 어떤 Segment와도 매칭되지 않는다
@@ -1468,11 +1477,18 @@ class TestHourlySegmentFeatureJob:
             ),
         ]
 
-        _, result = self.run_job(spark, tmp_path, rows)
+        summary, result = self.run_job(spark, tmp_path, rows)
 
         assert len(result) == 1
         assert result[0]["segment_id"] == "S1"
         assert result[0]["sample_count"] == 1
+        assert summary.accepted_count == 1
+        assert summary.map_matching_quarantined_count == 1
+        quarantined = spark.read.parquet(summary.quarantine_output_path).collect()
+        assert len(quarantined) == 1
+        assert quarantined[0]["event_id"] == "e2"
+        assert quarantined[0]["reject_reason"] == "MAP_MATCH_FAILED"
+        assert '"candidate_count":0' in quarantined[0]["reject_detail"]
 
     def test_rerunning_the_same_hour_replaces_the_stored_result(self, spark, tmp_path) -> None:
         config = self.build_config(spark, tmp_path)
@@ -1486,6 +1502,8 @@ class TestHourlySegmentFeatureJob:
             self.FEATURE_VERSION,
             "run-1",
             self.PROCESSED_AT,
+            cleansing_quarantine=self.empty_quarantine(spark),
+            quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
         rows = [
             self.sensor_row(self.TARGET_HOUR, "e2"),
@@ -1500,6 +1518,8 @@ class TestHourlySegmentFeatureJob:
             self.FEATURE_VERSION,
             "run-2",
             self.PROCESSED_AT,
+            cleansing_quarantine=self.empty_quarantine(spark),
+            quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
 
         assert second.output_path == first.output_path
@@ -1536,6 +1556,8 @@ class TestHourlySegmentFeatureJob:
                 feature_version,
                 run_id,
                 processed_at,
+                cleansing_quarantine=self.empty_quarantine(spark),
+                quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
             )
 
 

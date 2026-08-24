@@ -168,7 +168,11 @@ class TestRunSensorProcessingValidation:
         config = self.config(tmp_path)
         features_df = self.feature_rows_df(spark, [self.feature_row(sample_count=95)])
         write_hourly_segment_features(spark, features_df, config.feature_output_path, TARGET_HOUR, "run-1")
-        quarantine_df = self.quarantine_rows_df(spark, [self.quarantine_row() for _ in range(5)])
+        quarantine_df = self.quarantine_rows_df(
+            spark,
+            [self.quarantine_row() for _ in range(4)]
+            + [self.quarantine_row(reject_reason="MAP_MATCH_FAILED")],
+        )
         write_hourly_quarantine(spark, quarantine_df, config.quarantine_output_path, TARGET_HOUR, "run-1")
 
         summary = run_sensor_processing_validation(spark, config, TARGET_HOUR)
@@ -177,7 +181,11 @@ class TestRunSensorProcessingValidation:
         assert summary.feature_row_count == 1
         assert summary.accepted_sample_count == 95
         assert summary.quarantine_row_count == 5
+        assert summary.cleansing_quarantine_row_count == 4
+        assert summary.map_matching_quarantine_row_count == 1
         assert summary.quarantine_rate == pytest.approx(0.05)
+        assert summary.cleansing_quarantine_rate == pytest.approx(0.04)
+        assert summary.map_matching_quarantine_rate == pytest.approx(0.01)
 
     def test_raises_when_a_magnitude_column_is_negative(self, spark, tmp_path) -> None:
         config = self.config(tmp_path)
@@ -214,3 +222,5 @@ class TestRunSensorProcessingValidation:
 
         assert summary.success
         assert summary.quarantine_row_count == 0
+        assert summary.cleansing_quarantine_row_count == 0
+        assert summary.map_matching_quarantine_row_count == 0
