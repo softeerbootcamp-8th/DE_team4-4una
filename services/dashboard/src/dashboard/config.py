@@ -20,6 +20,14 @@ SCORE_CACHE_TTL_SECONDS = 5 * 60
 NYC_MAP_CENTER = (40.7128, -74.0060)
 NYC_MAP_ZOOM = 11
 
+# Zoom used after a borough is picked. A borough covers a small part of the
+# city, so staying at the city-wide zoom would leave the selection a speck.
+BOROUGH_MAP_ZOOM = 12
+
+# Sentinel for "no borough picked": the map then shows borough outlines rather
+# than road segments, which is also what makes the first render cheap.
+ALL_BOROUGHS = "All boroughs"
+
 # Folium inlines every rendered segment into the page as GeoJSON, so cost grows
 # with the number of segments drawn, not the number in the snapshot. Only the
 # current viewport is drawn, and this caps even that: zoomed out far enough, the
@@ -36,6 +44,7 @@ class DashboardConfig:
     """
 
     road_segment_s3_uri: str
+    zone_master_s3_uri: str | None
     serving_api_url: str
     vehicle_profile_id: int
     batch_chunk_size: int
@@ -52,6 +61,11 @@ class DashboardConfig:
         road_segment_s3_uri = _require(source, "DASHBOARD_ROAD_SEGMENT_S3_URI")
         if not road_segment_s3_uri.startswith("s3://"):
             raise ValueError("DASHBOARD_ROAD_SEGMENT_S3_URI must start with s3://")
+
+        # Optional: the map still works without it, minus the borough filter.
+        zone_master_s3_uri = source.get("DASHBOARD_ZONE_MASTER_S3_URI") or None
+        if zone_master_s3_uri and not zone_master_s3_uri.startswith("s3://"):
+            raise ValueError("DASHBOARD_ZONE_MASTER_S3_URI must start with s3://")
 
         vehicle_profile_id = int(
             source.get("DASHBOARD_VEHICLE_PROFILE_ID") or DEFAULT_VEHICLE_PROFILE_ID
@@ -74,6 +88,7 @@ class DashboardConfig:
 
         return cls(
             road_segment_s3_uri=road_segment_s3_uri,
+            zone_master_s3_uri=zone_master_s3_uri,
             serving_api_url=(
                 source.get("DASHBOARD_SERVING_API_URL") or DEFAULT_SERVING_API_URL
             ),
