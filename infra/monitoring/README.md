@@ -422,18 +422,19 @@ http://<MONITORING_EC2_PUBLIC_IP>:3000
 ## Grafana Dashboard
 
 Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`, `Serving API`,
-`Kafka`, `Airflow`, `Spark Streaming`, `EMR Serverless` dashboard가 자동으로
-provisioning된다. 여섯 dashboard 모두 같은 provider(`Infrastructure` 폴더,
-`/var/lib/grafana/dashboards`)가 디렉터리 전체를 읽어서 등록하므로, dashboard를
-추가할 때 provider(`dashboards.yml`)를 새로 만들 필요는 없다 — JSON 파일만 그
-디렉터리에 추가하면 된다. Datasource는 Prometheus(스크랩 기반)와
-CloudWatch(AWS API 직접 조회) 두 개가
+`Kafka`, `Airflow`, `Spark Streaming`, `EMR Serverless`, `Service Status
+Overview` dashboard가 자동으로 provisioning된다. 일곱 dashboard 모두 같은
+provider(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`)가 디렉터리
+전체를 읽어서 등록하므로, dashboard를 추가할 때 provider(`dashboards.yml`)를
+새로 만들 필요는 없다 — JSON 파일만 그 디렉터리에 추가하면 된다. Datasource는
+Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
 [grafana/provisioning/datasources/](grafana/provisioning/datasources/)로
 자동 등록된다.
 
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
 - 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → Project Infrastructure**
-  / **Serving API** / **Kafka** / **Airflow** / **Spark Streaming** / **EMR Serverless**
+  / **Serving API** / **Kafka** / **Airflow** / **Spark Streaming** /
+  **EMR Serverless** / **Service Status Overview**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
@@ -453,6 +454,11 @@ CloudWatch(AWS API 직접 조회) 두 개가
     (Project EC2에서 Prometheus로 scrape) dashboard 본문
   - `infra/monitoring/grafana/dashboards/emr-serverless.json` — EMR Serverless
     (CloudWatch datasource) dashboard 본문
+  - `infra/monitoring/grafana/dashboards/service-status-overview.json` — 주요
+    컴포넌트(Project EC2/Host, Kafka, Airflow, Spark Streaming, Serving API,
+    EMR Serverless) 상태를 한 화면에서 확인하는 통합 dashboard 본문. 자세한
+    내용은 아래 [Service Status Overview dashboard](#service-status-overview-dashboard)
+    참고.
   - `infra/monitoring/statsd/airflow-mapping.yml` — Airflow timer metric
     3개를 Prometheus histogram으로 바꾸는 statsd_exporter 매핑 설정
 
@@ -531,16 +537,21 @@ CloudWatch(AWS API 직접 조회) 두 개가
 
 ### Airflow dashboard 지표
 
-Airflow 3.3.1 공식 [Metrics 문서](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/metrics.html)에
-실제로 있는 metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
-붙어 `airflow.<metric>` 형태이고, statsd_exporter가 `.`을 `_`로 바꿔 최종
-Prometheus 이름이 된다(예: `scheduler_heartbeat` → `airflow_scheduler_heartbeat`).
-DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이 된다.
+Airflow 3.3.1 공식 [Metrics 문서](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/metrics.html)를
+근거로 처음 작성했으나, **`scheduler_heartbeat`/`dag_processor_heartbeat`는
+실제 배포한 statsd_exporter에 노출되지 않는 metric 이름이었다** — 문서와 실제
+동작이 달라서(또는 이 Airflow 3.3.1 버전에서 명칭이 바뀌어서) 두 heartbeat
+패널이 항상 `No data`였다. 지금은 실제 exporter(`/metrics`)에서 직접 확인한
+metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가 붙어
+`airflow.<metric>` 형태이고, statsd_exporter가 `.`을 `_`로 바꿔 최종 Prometheus
+이름이 된다. DogStatsD tag(`dag_id`, `task_id`, `action` 등)는 매핑 없이도
+자동으로 label이 된다.
 
 | Airflow metric | Prometheus 이름 | 종류 | Label |
 | --- | --- | --- | --- |
-| `scheduler_heartbeat` | `airflow_scheduler_heartbeat` | Counter | (없음) |
-| `dag_processor_heartbeat` | `airflow_dag_processor_heartbeat` | Counter | (없음) |
+| `scheduler.executor.heartbeat_duration` | `airflow_scheduler_executor_heartbeat_duration_count` | Summary(자동, `_count` suffix) | (없음) |
+| `dag_processing.last_run.seconds_ago` | `airflow_dag_processing_last_run_seconds_ago` | Gauge | (없음) |
+| `dag_processing.processes` | `airflow_dag_processing_processes` | Counter | `action`(`start` 등) |
 | `dag_processing.import_errors` | `airflow_dag_processing_import_errors` | Gauge | (없음) |
 | `ti_successes` | `airflow_ti_successes` | Counter | `dag_id`, `task_id` |
 | `ti_failures` | `airflow_ti_failures` | Counter | `dag_id`, `task_id` |
@@ -552,16 +563,21 @@ DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이
 | `dagrun.duration.success` | `airflow_dagrun_duration_success_seconds` | Histogram(매핑) | `dag_id` |
 | `dagrun.duration.failed` | `airflow_dagrun_duration_failed_seconds` | Histogram(매핑) | `dag_id` |
 
+> **더 이상 쓰지 않는 metric 이름**: `airflow_scheduler_heartbeat`,
+> `airflow_dag_processor_heartbeat`. 존재하지 않는 metric이라 항상 `No data`만
+> 냈다. 아래 두 패널이 각각의 후속이다.
+
 패널별 PromQL:
 
 | Panel | PromQL |
 | --- | --- |
 | Target Status | `up{job="airflow"}` |
-| Scheduler Heartbeat | `sum(increase(airflow_scheduler_heartbeat{job="airflow"}[5m]))` |
-| DAG Processor Heartbeat | `sum(increase(airflow_dag_processor_heartbeat{job="airflow"}[5m]))` |
+| Scheduler Heartbeat | `sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job="airflow"}[5m]))` |
+| DAG Processor Last Run Age | `max(airflow_dag_processing_last_run_seconds_ago{job="airflow"})` |
+| DAG Processor Process Starts (5m) | `sum(increase(airflow_dag_processing_processes{job="airflow", action="start"}[5m])) or vector(0)` |
 | DAG Import Errors | `airflow_dag_processing_import_errors{job="airflow"}` |
-| Running DAG Runs / Scheduled / Queued / Running Tasks | `sum(airflow_scheduler_dagruns_running{job="airflow"})` (나머지도 같은 형태로 `airflow_ti_scheduled`/`airflow_ti_queued`/`airflow_ti_running`) |
-| Task Success/Failure Rate | `sum(rate(airflow_ti_successes{job="airflow"}[5m]))` (failure는 `ti_failures`) |
+| Running DAG Runs / Scheduled / Queued / Running Tasks | `sum(airflow_scheduler_dagruns_running{job="airflow"}) or vector(0)` (나머지도 같은 형태로 `airflow_ti_scheduled`/`airflow_ti_queued`/`airflow_ti_running`) |
+| Task Success/Failure Rate | `sum(rate(airflow_ti_successes{job="airflow"}[5m])) or vector(0)` (failure는 `ti_failures`) |
 | Failures by DAG | `sum by (dag_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Failures by Task | `sum by (dag_id, task_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Task/DAG Run Duration (p50/p95/p99) | `histogram_quantile(0.95, sum by (le) (rate(airflow_task_duration_seconds_bucket{job="airflow"}[5m])))` (dagrun success/failed도 같은 형태) |
@@ -570,9 +586,19 @@ DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이
 
 - **Heartbeat과 Target Status는 다른 걸 본다.** `up{job="airflow"}`는
   statsd_exporter 프로세스가 살아있는지만 의미한다. scheduler/dag-processor가
-  실제로 도는지는 `airflow_scheduler_heartbeat`/`airflow_dag_processor_heartbeat`의
-  최근 5분 증가량으로 따로 확인해야 한다 — exporter는 멀쩡한데 scheduler만
-  죽은 경우 Target Status는 계속 UP으로 보인다.
+  실제로 도는지는 `airflow_scheduler_executor_heartbeat_duration_count`/
+  `airflow_dag_processing_last_run_seconds_ago`로 따로 확인해야 한다 —
+  exporter는 멀쩡한데 scheduler만 죽은 경우 Target Status는 계속 UP으로
+  보인다.
+- **Scheduler Heartbeat / DAG Processor Last Run Age / DAG Import Errors는
+  `No data` 자체가 실제 장애 신호이므로 `or vector(0)`로 감추지 않는다.**
+  scheduler나 dag-processor가 죽으면 statsd_exporter가 이 metric들을 아예
+  못 받아 시계열이 사라지는데, 이걸 0으로 보정해 버리면 "정상인데 heartbeat가
+  0회"인 상태와 "애초에 죽어서 metric이 안 온" 상태를 구분할 수 없게 된다.
+  반대로 `Running DAG Runs`/`Scheduled`/`Queued`/`Running Tasks`/
+  `Task Success/Failure Rate`/`DAG Processor Process Starts`는 DAG가 안
+  돌거나 재시작이 없는 것 자체가 정상적인 0이라 `or vector(0)`로 명시적인
+  0을 보여준다.
 - **duration 단위는 seconds다.** Airflow는 StatsD timer(`|ms`)로 값을
   보내지만, statsd_exporter가 노출할 때 이를 seconds로 자동 변환한다 —
   그래서 mapping의 bucket도 seconds 기준으로 적었고(`[1, 5, 15, 30, ...]`),
@@ -580,8 +606,21 @@ DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이
 - **timer metric은 mapping 설정이 있어야 histogram이 된다.** statsd_exporter
   기본값은 timer를 고정 분위수(0.5/0.9/0.99) Summary로 바꾸는데, p95는 그
   집합에 없다. 그래서 `infra/monitoring/statsd/airflow-mapping.yml`이 이
-  3개 metric만 histogram으로 바꾼다 — 그 외 metric은 매핑 없이 statsd_exporter
-  기본 변환을 그대로 쓴다.
+  3개 metric만 histogram으로 바꾼다 — 그 외 metric(heartbeat duration
+  포함)은 매핑 없이 statsd_exporter 기본 변환(Summary, `_count`/`_sum` suffix)을
+  그대로 쓴다.
+- **`airflow_dag_processing_last_run_seconds_ago`는 DAG 파일별로 별도
+  series가 찍힌다** — 실제 exporter에서도 파일별 값이 여러 개 확인됐다.
+  raw metric을 stat 패널에 그대로 쓰면 여러 series 중 하나만 보이거나
+  표시가 불안정해지므로 `max(...)`로 묶어 "가장 오래 처리 안 된 파일" 기준
+  단일 값을 보여준다.
+- **DAG Processor Last Run Age의 임계값(60s/300s)은 아직 실제 운영 주기로
+  검증하지 못했다.** dag-processor의 실제 파일 스캔 주기에 따라 배포 후
+  조정이 필요할 수 있다.
+- **`DAG Processor Process Starts`가 높다고 곧바로 crash loop로 단정하지
+  않는다.** dag-processor는 정상적으로도 파일 파싱 subprocess를 반복
+  생성할 수 있어서, 이 패널은 최근 DAG 파일 처리 activity 정도로 보고
+  `DAG Processor Last Run Age`/`DAG Import Errors`와 함께 판단해야 한다.
 - **DogStatsD tag(즉 `dag_id`/`task_id` label)가 실제로 붙는지는 배포 후
   확인이 필요하다.** `AIRFLOW__METRICS__STATSD_DATADOG_ENABLED=True` +
   statsd_exporter의 기본 DogStatsD tag parsing으로 동작해야 하는 것을
@@ -589,20 +628,24 @@ DogStatsD tag(`dag_id`, `task_id` 등)는 매핑 없이도 자동으로 label이
   조합으로 직접 띄워보지는 못했다(아래 Validation 참고). `Failures by DAG`
   류 패널이 label 없이 뭉뚱그려 나오면 아래 troubleshooting을 따라간다.
 - **cardinality**: `job_id`, `run_id`, `file_path`를 label로 쓰는 Airflow
-  metric(`local_task_job.task_exit`, `dag_processing.processes` 등)은 이번
-  dashboard에서 아예 쓰지 않는다. `statsd_disabled_tags`는 별도로 override하지
-  않고 Airflow 3.3.1 기본값(`job_id,run_id`)을 그대로 둔다 — 기본값 자체가
-  이미 두 high-cardinality tag를 막아주고, 이 dashboard가 쓰는 metric 중
-  `job_id`/`run_id`/`file_path` label을 가진 것도 공식 문서 기준으로 하나도
-  없기 때문이다.
-- **DAG가 아직 한 번도 안 돈 상태에서는 다음 패널이 `No data`인 게
-  정상이다**: `Task Success/Failure Rate`, `Failures by DAG`,
-  `Failures by Task`, `Task Duration`, `DAG Run Success/Failed Duration`,
-  `Running DAG Runs`/`Scheduled`/`Queued`/`Running Tasks`. 이 metric들은
-  실제로 task/dagrun이 실행돼야 값이 생긴다. 반대로 `Target Status`,
-  `Scheduler Heartbeat`, `DAG Processor Heartbeat`, `DAG Import Errors`는
-  scheduler/dag-processor가 떠 있기만 하면 DAG 실행과 무관하게 값이
-  나와야 한다.
+  metric(`local_task_job.task_exit` 등)은 이번 dashboard에서 아예 쓰지 않는다.
+  `dag_processing.processes`는 `action` label만 갖고 있어(실제 exporter로
+  확인) high-cardinality가 아니라 이번에 새로 썼다. `statsd_disabled_tags`는
+  별도로 override하지 않고 Airflow 3.3.1 기본값(`job_id,run_id`)을 그대로
+  둔다 — 기본값 자체가 이미 두 high-cardinality tag를 막아주고, 이 dashboard가
+  쓰는 metric 중 `job_id`/`run_id`/`file_path` label을 가진 것도 없기
+  때문이다.
+- **DAG가 아직 한 번도 안 돈 상태에서는 다음 패널이 `0`(`No data`가 아니라)인
+  게 정상이다**: `Task Success/Failure Rate`, `Running DAG Runs`/`Scheduled`/
+  `Queued`/`Running Tasks`, `DAG Processor Process Starts`. `or vector(0)`로
+  명시적인 0을 보여주도록 바꿨다. `Failures by DAG`/`Failures by Task`/
+  `Task Duration`/`DAG Run Success/Failed Duration`(timeseries 패널)은
+  여전히 `No data`가 정상이다 — 실제로 task/dagrun이 실행돼야 값이 생기고,
+  timeseries 그래프에서 빈 구간은 stat 패널의 회색 `No data`처럼 오해를
+  주지 않는다. `Target Status`, `Scheduler Heartbeat`,
+  `DAG Processor Last Run Age`, `DAG Import Errors`는 scheduler/dag-processor가
+  떠 있기만 하면 DAG 실행과 무관하게 값이 나와야 하고, 안 나오면 그 자체가
+  장애 신호다.
 
 ### Stream Processor dashboard 지표
 
@@ -630,7 +673,7 @@ metric들을 갱신한다.
 | Input Rows/sec | `stream_processor_input_rows_per_second{job="stream-processor"}` |
 | Processed Rows/sec | `stream_processor_processed_rows_per_second{job="stream-processor"}` |
 | Micro-batch Duration (p50/p95) | `histogram_quantile(0.50, sum by (le) (rate(stream_processor_batch_duration_seconds_bucket{job="stream-processor"}[5m])))` (p95는 quantile 값만 교체) |
-| Last Progress Age | `time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}` |
+| Last Progress Age | `(time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}) and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)` |
 | Total Input Rows | `stream_processor_input_rows_total{job="stream-processor"}` |
 | Query Failures | `stream_processor_query_failures_total{job="stream-processor"}` |
 
@@ -644,6 +687,15 @@ metric들을 갱신한다.
   (기본 600,000건)가 쌓이기 전에는 이 지연 시간이 지나야 배치가 실행된다.
   Threshold를 300초보다 조금 더 여유 있는 330초로 잡은 것도 이 때문이다 —
   실제로 값이 계속 커지기만 하고 꺾이지 않아야 장애로 본다.
+- **아직 한 번도 progress가 발생하지 않은 초기 상태에서는 `Last Progress
+  Age`가 `No data`인 게 정상이다.** `stream_processor_last_progress_timestamp_seconds`는
+  gauge 초기값이 `0`(Unix epoch)이라, `time() - ...`을 그대로 계산하면
+  약 56년(1970-01-01 기준 경과 시간)처럼 잘못된 큰 값이 나온다. 그래서
+  `and (stream_processor_last_progress_timestamp_seconds{...} > 0)`로
+  timestamp가 실제로 한 번이라도 기록된 경우에만 age를 계산하도록 필터링한다
+  — 이 필터 때문에 progress가 아직 없으면 값 자체가 없어(`No data`) 큰
+  숫자로 오해할 일이 없다. 이 상태는 첫 마이크로배치가 끝나면 정상적으로
+  풀린다.
 - **`Micro-batch Duration`은 배치가 5초~5분 간격으로만 발생해 데이터 포인트가
   희소하다.** `rate(...[5m])` 윈도우 안에 샘플이 아예 없으면 `No data`가
   정상이다 — Kafka Exporter의 `Consumer Lag`류 패널과 같은 이유다.
@@ -654,18 +706,28 @@ Prometheus가 아니라 CloudWatch datasource로 AWS `AWS/EMRServerless` 네임�
 metric을 직접 조회한다 — EMR Serverless 자체를 새로 계측하는 코드는 이번 작업에서
 추가하지 않았다(AWS가 1분 주기로 자동 발행하는 값을 그대로 쓴다).
 
-dashboard 상단의 `Application ID` 변수(텍스트 입력)에 조회할 EMR Serverless
-application id를 입력해야 값이 나온다 — Airflow에서 쓰는
-`EMR_SERVERLESS_APPLICATION_ID` 변수와 같은 값이다
-(`services/orchestration/dags/emr_serverless.py` 참고). 기본값을 비워 뒀으므로
-처음 열면 모든 패널이 `No data`로 보이는 게 정상이다.
+dashboard 상단의 `Application ID`/`Application Name` 변수(텍스트 입력)로
+조회할 EMR Serverless application을 지정한다. `Application ID`는 Airflow에서
+쓰는 `EMR_SERVERLESS_APPLICATION_ID` 변수와 같은 값이다
+(`services/orchestration/dags/emr_serverless.py` 참고). 이 프로젝트에서 쓰는
+application이 고정이라 두 변수 모두 실제 값(`00g85ljahc0svj2p`/
+`de4-batch-jobs`)을 기본값으로 채워 뒀다 — Grafana를 새로 띄울 때마다 값을
+입력할 필요가 없다. 다른 환경/다른 application을 보려면 값을 바꾼다.
+
+> **CloudWatch query는 `ApplicationId`뿐 아니라 `ApplicationName` dimension도
+> 함께 넣어야 한다.** `ApplicationId`만으로는 AWS/EMRServerless metric이
+> 조회되지 않는 것을 실제 계정(`ApplicationId: 00g85ljahc0svj2p`,
+> `ApplicationName: de4-batch-jobs`)에서 직접 확인했다 — 두 dimension을 함께
+> 넣었을 때만 `SuccessJobs` 등이 정상적으로 나온다. 처음 이 dashboard를 만들
+> 때는 CloudWatch 콘솔에서 두 dimension이 항상 함께 붙어 있는 것을 놓쳐
+> `ApplicationId`만 썼었다.
 
 | Metric | Statistic | Dimension | 설명 |
 | --- | --- | --- | --- |
-| `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId | 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
-| `RunningWorkerCount` | Maximum | ApplicationId, WorkerType, CapacityAllocationType | worker 조합 전체를 `SUM()` 식으로 합산 |
-| `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, WorkerType, CapacityAllocationType | application에 할당된 capacity, `SUM()`으로 합산 |
-| `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `SUM()`으로 합산 |
+| `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId, ApplicationName | 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
+| `RunningWorkerCount` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | worker 조합 전체를 `SUM()` 식으로 합산 |
+| `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | application에 할당된 capacity, `SUM()`으로 합산 |
+| `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, ApplicationName, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `SUM()`으로 합산 |
 
 각 패널은 CloudWatch 쿼리를 두 개씩 쓴다 — `matchExact: false`(search)로 실제
 dimension 조합을 전부 찾는 숨겨진 쿼리 하나와, 그 결과를 `SUM(...)` 수식으로
@@ -675,11 +737,9 @@ dimension 조합을 전부 찾는 숨겨진 쿼리 하나와, 그 결과를 `SUM
 
 몇 가지 명확히 해 둘 점:
 
-- **이 dashboard는 실제 AWS 계정/EMR Serverless application으로 검증하지
-  못했다.** [AWS 공식 문서](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/app-job-metrics.html)에
-  있는 metric 이름과 dimension만 근거로 작성했다 — 배포 후 실제 값이
-  기대대로 나오는지, 특히 `SUM()` 식이 원하는 조합만 더하는지 확인이
-  필요하다.
+- **`ApplicationName` dimension을 빠뜨리면 모든 패널이 `No data`다.** 위
+  경고 참고 — `Application ID`만 채우고 `Application Name`을 비우면 여전히
+  조회가 안 된다.
 - **Statistic 선택은 문서 근거가 있는 것(WorkerCpuUsed/WorkerMemoryUsed의
   Sum)과 그렇지 않은 것(나머지의 Maximum)이 섞여 있다.** 나머지 metric은
   1분마다 한 값만 찍히는 상태값 성격이라 Maximum/Average/Sum이 숫자상
@@ -688,6 +748,73 @@ dimension 조합을 전부 찾는 숨겨진 쿼리 하나와, 그 결과를 `SUM
 - **CloudWatch datasource가 `authType: default`(EC2 IAM Role)를 쓰므로,
   Monitoring EC2에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)의
   IAM 권한이 없으면 모든 패널이 permission 오류로 `No data`가 된다.**
+- **`RunningJobs`/`RunningWorkerCount`가 0인 것은 application이 idle 상태일 뿐
+  정상이다** — job이 없으면 0이 나오는 게 맞고, 이걸 장애로 해석하지 않는다.
+  진짜 조회 실패(`No data`)와 idle(`0`)은 서로 다른 상태다. 아래
+  [Service Status Overview dashboard](#service-status-overview-dashboard)도
+  같은 원칙으로 설계했다.
+
+### Service Status Overview dashboard
+
+`infra/monitoring/grafana/dashboards/service-status-overview.json`. 개별
+dashboard를 하나씩 열어보지 않고 Project EC2/Host, Kafka, Airflow, Spark
+Streaming, Serving API, EMR Serverless 여섯 컴포넌트 상태를 한 화면에서 먼저
+확인하기 위한 dashboard다. 상세 metric은 각 컴포넌트 dashboard로 넘어가서
+본다 — 이 dashboard 자체는 패널을 최소화했다.
+
+| 컴포넌트 | 판단 기준 | 비고 |
+| --- | --- | --- |
+| Project EC2 / Host | `up{job=~"project-node\|project-containers"}` | node_exporter + cAdvisor 스크랩 여부만 본다 |
+| Kafka | `kafka_brokers{job="kafka"} > bool 0` | exporter up이 아니라 실제 broker 수 기준. exporter만 살아있고 broker가 전부 죽은 경우까지 DOWN으로 잡는다 |
+| Airflow | `sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job="airflow"}[5m])) > bool 0` | statsd_exporter up이 아니라 scheduler heartbeat 기준. exporter만 살아있고 scheduler가 죽은 경우까지 DOWN으로 잡는다 |
+| Spark Streaming | `stream_processor_query_running{job="stream-processor"}` | 프로세스 up이 아니라 실제 streaming query 실행 여부 기준 |
+| Serving API | `up{job="serving-api"}` | metrics endpoint 스크랩 여부만 본다 |
+| EMR Serverless | CloudWatch `AWS/EMRServerless` `RunningJobs`(최근 6시간, `matchExact: false`) | 아래 설명 참고 |
+
+Kafka/Airflow/Spark Streaming은 **처음에는 각각 `up{job="kafka"}`/
+`up{job="airflow"}`/`up{job="stream-processor"}`로 만들었다가 바꿨다** —
+`up`은 exporter/endpoint가 스크랩되고 있다는 뜻일 뿐, 그 안의 애플리케이션
+로직까지 정상이라는 뜻은 아니기 때문이다. 구체적으로:
+
+- Kafka Exporter는 살아있는데(`up==1`) Kafka broker가 전부 죽어도
+  `up{job="kafka"}`는 계속 1이다 — broker 생존은 `kafka_brokers`(Kafka
+  Exporter가 admin API로 직접 확인해 보고하는 값)로 봐야 한다.
+- Airflow도 statsd_exporter는 살아있는데(`up==1`) scheduler만 죽으면
+  `up{job="airflow"}`는 계속 1이다 — scheduler 생존은 heartbeat metric
+  증가량으로 봐야 한다(Airflow dashboard와 같은 기준).
+- Spark Streaming도 컨테이너는 떠 있지만(`up==1`) 쿼리가 예외로 죽어
+  재시작 대기 중인 순간에는 `stream_processor_query_running`이 0이 될 수
+  있다 — Spark Streaming dashboard에도 같은 설명이 있다.
+
+Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시나리오에
+해당하는 별도 애플리케이션 health metric이 없어(또는 있어도 이 dashboard
+범위를 벗어나) 그대로 `up{job="..."}`을 쓴다 — 이 두 컴포넌트는 여전히
+"exporter/endpoint가 스크랩되고 있다"는 뜻으로 읽어야 한다.
+
+**EMR Serverless는 Prometheus scrape 대상이 아니라서 `up{}`이 없다.** 대신
+CloudWatch `RunningJobs`를 최근 6시간 창(`matchExact: false`로 실제 dimension
+조합 검색)으로 조회해서, 그 창 안에 metric이 한 번이라도 있으면(0 running
+이어도) `OK`로, 6시간 내내 metric이 전혀 없으면 `NO METRIC DATA`로 표시한다.
+"job이 0개"와 "metric 자체가 없음"을 구분하기 위한 설계다 — job이 0개인
+idle 상태를 `OK`로, `ApplicationId`/`ApplicationName`이 비어있거나 틀렸거나
+IAM 권한이 없거나(또는 오래 idle이라 auto-stop된 경우도 포함) `NO METRIC
+DATA`로 나눈다. `NO METRIC DATA`가 곧바로 장애를 의미하지는 않는다 —
+auto-stop은 EMR Serverless의 정상 동작이다. 실제 application 상태는
+아래 명령으로 직접 확인해야 정확하다.
+
+```bash
+aws emr-serverless get-application --application-id <application_id>
+```
+
+이 dashboard도 EMR Serverless dashboard와 같은 `application_id`/
+`application_name` 변수를 쓴다(별도 dashboard라 변수를 공유하지 않지만,
+둘 다 이 프로젝트에서 쓰는 실제 값 `00g85ljahc0svj2p`/`de4-batch-jobs`를
+기본값으로 채워 뒀다). 다른 application을 보려면 값을 바꾼다.
+
+이 dashboard는 실제 AWS 계정으로 EMR Serverless가 idle→active를 오가는
+전이 상황까지 검증하지 못했다 — 6시간이라는 조회 창 길이가 실제 auto-stop
+주기에 비해 적절한지, `OK`/`NO METRIC DATA` 판정이 실제 장애 상황에서
+기대대로 동작하는지는 배포 후 관찰이 필요하다.
 
 ### Source of truth와 `allowUiUpdates`
 
@@ -788,7 +915,12 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   8. Prometheus Targets에서 `airflow`가 `UP`인지.
   9. 위가 다 정상인데 특정 패널만 `No data`라면 PromQL 자체를 의심한다 —
      Grafana Explore에서 해당 metric 이름을 직접 조회해 실제로 존재하는지,
-     `dag_id`/`task_id` label이 붙어 있는지 확인한다.
+     `dag_id`/`task_id` label이 붙어 있는지 확인한다. 특히 `Scheduler
+     Heartbeat`/`DAG Processor Last Run Age`는 각각
+     `airflow_scheduler_executor_heartbeat_duration_count`/
+     `airflow_dag_processing_last_run_seconds_ago`를 쓴다 — 예전에 쓰던
+     `airflow_scheduler_heartbeat`/`airflow_dag_processor_heartbeat`는 이
+     exporter에 존재하지 않는 이름이었다.
 
 - Spark Streaming(Stream Processor) 패널: `up{job="stream-processor"}`가 `0`이거나
   값이 없으면 아래를 순서대로 확인한다.
@@ -805,8 +937,11 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
 
 - EMR Serverless 패널: CloudWatch datasource 자체가 문제인지, 쿼리가
   문제인지부터 구분한다.
-  1. dashboard 상단 `Application ID` 변수에 값을 입력했는지 확인한다 — 비어
-     있으면 모든 패널이 `No data`다.
+  1. dashboard 상단 `Application ID`와 `Application Name` 변수 둘 다 값이
+     들어있는지 확인한다 — 둘 중 하나라도 비어 있으면 모든 패널이 `No
+     data`다. `ApplicationId`만 넣고 `ApplicationName`을 빠뜨리는 것이
+     실제로 겪었던 원인이었다(위 [EMR Serverless dashboard
+     지표](#emr-serverless-dashboard-지표) 참고).
   2. Grafana 컨테이너 로그에 `AccessDenied`/`UnrecognizedClientException` 같은
      CloudWatch API 오류가 없는지 확인한다 — 있다면 Monitoring EC2의 IAM
      Role에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)
@@ -817,6 +952,32 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
      worker가 없었을 수 있다(예: `RunningJobs`/`RunningWorkerCount`는 애초에
      실행 중인 게 없으면 0에 가까운 게 정상이다) — CloudWatch 콘솔에서 같은
      namespace/metric/dimension을 직접 조회해 데이터 유무를 먼저 확인한다.
+  5. AWS CLI로 직접 확인하려면:
+
+     ```bash
+     aws cloudwatch get-metric-statistics \
+       --namespace AWS/EMRServerless \
+       --metric-name SuccessJobs \
+       --dimensions Name=ApplicationId,Value=<application_id> Name=ApplicationName,Value=<application_name> \
+       --start-time "$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%S)" \
+       --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+       --period 60 \
+       --statistics Maximum
+     ```
+
+- Service Status Overview 패널: 개별 컴포넌트 dashboard에서 이미 `No data`나
+  `DOWN`을 확인했다면 그쪽 troubleshooting(Kafka/Airflow/Spark
+  Streaming/Serving API 각 절)을 그대로 따라간다. Overview 자체에서만
+  문제가 있어 보이면:
+  1. Host/Kafka/Airflow/Spark Streaming/Serving API 패널은 각 컴포넌트
+     dashboard의 `Target Status` 패널과 완전히 같은 datasource/PromQL을
+     쓴다 — Overview에서만 다르게 나올 수 없다. 다르게 보이면 브라우저
+     캐시나 dashboard 새로고침 문제일 가능성이 높다.
+  2. EMR Serverless 패널이 `NO METRIC DATA`면 위 EMR Serverless 패널
+     troubleshooting을 따라가되, **`NO METRIC DATA`≠장애**라는 점을 먼저
+     염두에 둔다 — `application_id`/`application_name` 변수를 채웠는지부터
+     확인하고, 그다음 auto-stop 여부를 `aws emr-serverless
+     get-application`으로 확인한다.
 
 ### Dashboard 변경 배포
 
