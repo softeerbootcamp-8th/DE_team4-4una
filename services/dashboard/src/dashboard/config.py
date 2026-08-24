@@ -20,6 +20,12 @@ SCORE_CACHE_TTL_SECONDS = 5 * 60
 NYC_MAP_CENTER = (40.7128, -74.0060)
 NYC_MAP_ZOOM = 11
 
+# Folium inlines every rendered segment into the page as GeoJSON, so cost grows
+# with the number of segments drawn, not the number in the snapshot. Only the
+# current viewport is drawn, and this caps even that: zoomed out far enough, the
+# viewport still covers the whole city.
+MAX_RENDERED_SEGMENTS = 6000
+
 
 @dataclass(frozen=True, slots=True)
 class DashboardConfig:
