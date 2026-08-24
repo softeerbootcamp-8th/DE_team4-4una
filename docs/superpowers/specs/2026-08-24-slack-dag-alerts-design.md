@@ -18,8 +18,8 @@ Airflow DAG 실행 결과(성공/실패)나 처리 건수를 확인하려면 매
 관련 문서: `services/orchestration/README.md`,
 `docs/adr/0004-data-quality-validation-with-great-expectations.md`
 
-> 브레인스토밍 중 세 지점이 초기 제안에서 뒤집히거나 범위가 넓어졌다 — 왜
-> 그랬는지 §2, §4, §6에 근거를 남긴다.
+> 브레인스토밍 중 네 지점이 초기 제안에서 뒤집히거나 범위가 넓어졌다 — 왜
+> 그랬는지 §2, §4, §6, §7에 근거를 남긴다.
 
 ## 확정된 결정
 
@@ -189,17 +189,76 @@ task에 대해 "Job Run이 실패했다"는 상태값 이상의 정보를 알림
 - EMR execution role(IAM)에 이 버킷에 대한 `s3:PutObject` 권한을 미리
   부여해야 한다 — README "준비" 절에 다른 EMR 관련 IAM 요구사항과 같은
   형식으로 추가.
-- `EmrServerlessStartJobOperator`는 실행한 Job Run의 `job_id`를 XCom(`return_value`)으로
-  남긴다. `on_failure_callback`이 실패한 task가 EMR 기반 task(§4 표의
-  `standard_score_pipeline`/`data_quality_audit` 소속)이면
-  `ti.xcom_pull(task_ids=<실패한 task_id>)`로 job run id를 읽어, AWS 콘솔의
-  EMR Serverless Job Run 상세 페이지 링크(`application_id` + `job_run_id`
-  조합, `application_id`는 이미 알려진 Airflow Variable)를 알림에 덧붙인다.
-  Job Run 생성 자체가 실패해 XCom이 없으면(제출 단계에서 바로 실패)
-  이 링크 없이 Airflow `log_url`만 포함한다(fallback).
+- **구현 중 검증한 메커니즘 정정**: 처음엔 `EmrServerlessStartJobOperator`의
+  반환값(`job_id`, `return_value` XCom)을 읽어 EMR 콘솔 링크를 직접 조합할
+  계획이었다. 그런데 `execute()`가 Job Run 실패 시 `wait()`에서 예외를
+  던지고 끝나 **`return_value` 자체가 아예 안 생긴다**는 것을 provider
+  소스(`airflow/providers/amazon/aws/operators/emr.py`)로 확인했다. 대신
+  같은 메서드가 `wait()` 이전에 호출하는 `self.persist_links(context)`가
+  `configuration_overrides`에 `s3MonitoringConfiguration`이 있으면
+  `EmrServerlessS3LogsLink.persist(...)`로 `context["ti"].xcom_push(key="emr_serverless_s3_logs", value={...})`를
+  남긴다 — **이 XCom은 Job Run이 실패해도 남는다**. `on_failure_callback`은
+  EMR task인지 여부를 따로 판별하지 않고, 실패한 task_id로
+  `xcom_pull(task_ids=<실패한 task_id>, key=EmrServerlessS3LogsLink.key)`를
+  시도해 값이 있으면 `EmrServerlessS3LogsLink().format_link(**xcom_value)`로
+  그대로 콘솔 딥링크를 재구성하고, 없으면(EMR task가 아니거나 Job Run 제출
+  자체가 실패) 조용히 건너뛴다.
 - Airflow 자체 task 로그(로컬 PythonOperator DAG들)의 원격 로깅
   (`AIRFLOW__LOGGING__REMOTE_LOGGING`) 설정은 이 결정과 별개다 — §제외
   범위 참고.
+
+### 7. 구조화된 실패 기록(JSON) — S3 관측 버킷
+
+**결론**: `on_failure_callback`은 §6의 EMR 원본 로그 링크(있을 때만) 외에,
+**실패할 때마다 우리가 직접 만든 구조화된 요약 레코드(JSON)**를 별도 S3
+관측 버킷에 남긴다. 이 레코드는 5개 DAG 전부에 적용되며(EMR 기반 여부와
+무관), Slack 실패 메시지는 이 레코드로 가는 콘솔 링크와 함께, 레코드에
+담기는 핵심 필드(처리 건수·처리 일자)를 메시지 본문에도 그대로 포함한다
+— 사용자가 이미 준비해 둔 관측 버킷(`de4-observability-473551908409-ap-northeast-2-a`,
+prefix `airflow/failed-tasks/`)을 그대로 쓴다.
+
+**뒤집힌 근거**: §6은 원래 "EMR Job Run의 원본 Spark 로그를 있는 그대로
+S3에 흘려보내고 링크만 알림에 붙인다"는 범위였다. 브레인스토밍 중 "CLI가
+찍는 원본을 그대로 보관하는 게 아니라, 가독성 좋게 문구를 정리하고 처리
+건수·처리 일자 같은 기본 정보를 포함하고 싶다"는 요구가 나왔다 — 이건
+§6의 원본 로그 보존과는 다른 목적(사람이 Slack에서 바로 읽을 수 있는 요약)
+이라 별도 항목으로 분리했다. 적용 범위도 EMR 기반 2개 DAG가 아니라 5개
+DAG 전부로 넓혔다 — PythonOperator 기반 DAG(`current_score_pipeline`,
+`zone_weather_pipeline`, `bronze_compaction`)도 실패 시 같은 형태의 요약이
+필요하기 때문이다.
+
+**레코드 필드**(JSON):
+
+| 필드 | 값 |
+| --- | --- |
+| `dag_id`, `task_id` | 실패한 task |
+| `logical_date` | 처리 일자(DagRun의 logical_date) |
+| `owner`, `severity` | 레지스트리 조회 결과 |
+| `exception` | `str(context["exception"])`, 없으면 `null` |
+| `log_url` | Task Instance Airflow URL |
+| `counts` | §4의 `_SUMMARY_TASK_IDS` 매핑으로 **이미 성공한 상위 task가 있으면** 그 XCom 요약을 그대로 담는다. 실패가 첫 stage에서 났으면(아직 아무 summary task도 안 돌았으면) `null` — 없는 값을 지어내지 않는다. |
+| `recorded_at` | 레코드를 쓴 시각(UTC) |
+
+**구현**:
+
+- 별도 헬퍼 모듈을 만들지 않고 `dags/notifications.py` 안에서
+  `de4_core.ObjectStore.write_bytes(uri, json_bytes)`(이미 있는 API, 신규
+  의존성 없음)로 JSON을 직접 쓴다.
+- 저장 경로: `s3://de4-observability-473551908409-ap-northeast-2-a/airflow/failed-tasks/<dag_id>/<task_id>/<run_id>.json`.
+  버킷/접두사는 `OBSERVABILITY_FAILED_TASKS_S3_URI` Airflow Variable로
+  override 가능하게 하되(다른 버킷 Variable들과 동일한 패턴) 기본값을 위
+  경로로 둔다.
+- Slack 메시지는 이 레코드로 가는 AWS 콘솔 오브젝트 링크
+  (`https://<region>.console.aws.amazon.com/s3/object/<bucket>?region=<region>&prefix=<key>`)와
+  함께, `counts`가 있으면 그 값을 메시지 본문에도 그대로 한 줄 추가한다
+  (§3의 "실행 시각(logical_date)" 줄은 이미 항상 포함돼 있었다 — "처리
+  일자"는 이번 결정으로 새로 추가된 게 아니라 기존 항목 재확인).
+- 이 버킷에 대한 `s3:PutObject` 권한이 `airflow-scheduler`가 쓰는 AWS
+  자격증명(로컬은 boto3 기본 체인, 운영은 EC2 Instance Role)에 미리
+  부여돼 있어야 한다 — README에 다른 S3 버킷 IAM 요구사항과 같은 형식으로
+  추가.
+- §6의 EMR 원본 로그 링크는 그대로 유지한다(더 깊은 디버깅용, Spark
+  스택트레이스 원문이 필요할 때) — 이 항목은 그걸 대체하지 않고 보완한다.
 
 ## 전체 데이터 흐름
 
@@ -210,8 +269,11 @@ task 실패(재시도 소진) ──▶ on_failure_callback(context)
                               │     └─ slack_id 있으면 바로, 없으면 email → users.lookupByEmail
                               ├─ dag_owners.resolve_severity(...)
                               ├─ context["task_instance"].log_url
-                              ├─ (EMR 기반 task면) xcom_pull(실패 task_id) → job_run_id
-                              │     └─ 있으면 EMR Serverless 콘솔 링크도 함께 포함
+                              ├─ xcom_pull(실패 task_id, key=EmrServerlessS3LogsLink.key)
+                              │     └─ 있으면(EMR 기반 task) S3 원본 로그 콘솔 링크 포함(§6)
+                              ├─ xcom_pull(task_ids=<요약 task>) 로 처리 건수 조회(있으면, §4)
+                              ├─ ObjectStore.write_bytes(...) 로 구조화된 실패 기록(JSON) S3에 저장(§7)
+                              │     └─ 처리 건수 + 콘솔 링크를 메시지 본문에도 포함
                               └─ SlackHook.client.chat_postMessage(channel=..., text=...)
 
 DagRun 성공 ──▶ on_success_callback(context)
@@ -231,7 +293,8 @@ DagRun 성공 ──▶ on_success_callback(context)
 
 - `jobs/dag_owners.py`(신규) — 레지스트리 로더 + 조회(dataclass 기반, §1).
 - `dags/notifications.py`(신규) — `on_failure_callback`/`on_success_callback`
-  구현(§3), Severity 상수(이모지 포함), DAG별 요약 task 매핑 테이블(§4).
+  구현(§3), DAG별 요약 task 매핑 테이블(§4), 구조화된 실패 기록(JSON) S3
+  저장(§7).
 - `dags/standard_score_pipeline.py` — `report_processing_counts` task 추가,
   `default_args`에 `on_failure_callback` 배선, DAG에 `on_success_callback`
   배선.
@@ -249,8 +312,8 @@ DagRun 성공 ──▶ on_success_callback(context)
 ### `infra/compose/airflow.yaml`, `.env.example`
 
 - §5의 마운트/`_PIP_ADDITIONAL_REQUIREMENTS`/`base_url`/Connection
-  플레이스홀더, §6의 `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI` 플레이스홀더
-  반영.
+  플레이스홀더, §6의 `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI`, §7의
+  `AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI` 플레이스홀더 반영.
 
 ## 테스트 전략
 
@@ -258,8 +321,11 @@ DagRun 성공 ──▶ on_success_callback(context)
   task_group → dag) 단위 테스트, `slack_id`/`email` 우선순위, 필수값 누락 시
   에러.
 - `tests/test_notifications.py`(신규) — 콜백 함수를 가짜 Airflow context(dict)로
-  단위 테스트, `SlackHook`은 mock. 멘션/심각도 라벨/URL이 메시지에
-  포함되는지, email만 있을 때 `users_lookupByEmail`이 호출되는지 검증.
+  단위 테스트, `SlackHook`/`ObjectStore`는 mock. 멘션/심각도 라벨/URL이
+  메시지에 포함되는지, email만 있을 때 `users_lookupByEmail`이 호출되는지,
+  실패 시 구조화된 JSON 레코드가 S3에 쓰이고(§7) 그 필드(특히 `counts`)가
+  Slack 메시지에도 반영되는지, 상위 요약 task가 아직 안 돌았을 때
+  `counts`가 `null`로 정직하게 빠지는지 검증.
 - 기존 `test_standard_score_pipeline_dag.py`/`test_current_score_pipeline_dag.py`/
   `test_zone_weather_pipeline_dag.py`/`test_data_quality_audit_dag.py`/
   `test_bronze_compaction_dag.py`에 신규 task/콜백 배선 반영(task 존재,
@@ -289,6 +355,12 @@ DagRun 성공 ──▶ on_success_callback(context)
   인스턴스가 살아있는 한 `log_url`이 문제없이 동작하고, EMR Job Run 로그
   (§6)와 달리 이 알림 기능 자체를 막지 않는 별개의 보존 정책 이슈다.
   필요해지면 별도 이슈.
-- 실패 알림에 포함하는 S3/EMR 콘솔 링크를 넘어, 로그 내용 자체를 파싱해
-  Slack 메시지에 에러 요약으로 임베드하는 기능(§6) — 링크 제공까지만
-  이번 범위.
+- §6의 EMR 원본 Spark 로그(driver/executor stdout/stderr) **내용 자체**를
+  파싱해 Slack 메시지에 임베드하는 기능 — 그건 링크 제공까지만 이번
+  범위다. (§7의 구조화된 JSON 레코드는 원본 로그가 아니라 우리가 직접
+  만든 요약이라 이 항목과 다르다 — 그 요약의 핵심 필드는 메시지 본문에도
+  넣는다.)
+- 구조화된 실패 기록(§7)에 담을 `counts`를 얻으려고 아직 완료되지 않은
+  단계의 부분 처리량을 별도로 계산하는 기능 — 이미 성공해 XCom을 남긴
+  상위 task가 있을 때만 그 값을 재사용하고, 없으면 `null`로 둔다(§4의
+  요약 task가 실패 시점까지 아직 안 돌았을 수 있다).
