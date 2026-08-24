@@ -20,7 +20,6 @@ from dashboard.config import (
     DashboardConfig,
 )
 from dashboard.map_view import (
-    build_borough_map,
     build_map,
     join_road_segments_with_scores,
 )
@@ -217,7 +216,6 @@ def main() -> None:
             "Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing every "
             "segment in the snapshot instead."
         )
-
     selected = _borough_selector(boroughs)
     borough = None if selected == ALL_BOROUGHS else selected
     candidate_indices = _candidate_indices(config, road_segments, boroughs, borough)
