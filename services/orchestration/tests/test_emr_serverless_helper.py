@@ -138,3 +138,14 @@ def test_dynamic_allocation_is_capped_to_match_executor_instances():
     assert "spark.dynamicAllocation.minExecutors=1" in params
     assert "spark.dynamicAllocation.maxExecutors=1" in params
     assert "spark.dynamicAllocation.initialExecutors=1" in params
+
+
+def test_all_job_runs_persist_logs_to_s3_monitoring_configuration():
+    operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
+
+    log_uri = operator.configuration_overrides["monitoringConfiguration"][
+        "s3MonitoringConfiguration"
+    ]["logUri"]
+    assert log_uri == (
+        "{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', 's3://de4-emr-serverless-logs/') }}"
+    )
