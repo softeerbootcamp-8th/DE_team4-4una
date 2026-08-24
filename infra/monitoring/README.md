@@ -724,27 +724,50 @@ application이 고정이라 두 변수 모두 실제 값(`00g85ljahc0svj2p`/
 
 | Metric | Statistic | Dimension | 설명 |
 | --- | --- | --- | --- |
-| `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId, ApplicationName | 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
-| `RunningWorkerCount` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | worker 조합 전체를 `SUM()` 식으로 합산 |
-| `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | application에 할당된 capacity, `SUM()`으로 합산 |
-| `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, ApplicationName, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `SUM()`으로 합산 |
+| `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId, ApplicationName | 이 metric의 dimension 전부라 direct query 하나로 조회한다(`matchExact: true`) — 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
+| `RunningWorkerCount` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | worker 조합별로 별도 series라 `matchExact: false`(search)+`SUM()` 식으로 합산 |
+| `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | application에 할당된 capacity, `matchExact: false`+`SUM()`으로 합산 |
+| `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, ApplicationName, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `matchExact: false`+`SUM()`으로 합산 |
 
-각 패널은 CloudWatch 쿼리를 두 개씩 쓴다 — `matchExact: false`(search)로 실제
-dimension 조합을 전부 찾는 숨겨진 쿼리 하나와, 그 결과를 `SUM(...)` 수식으로
-더하는 쿼리 하나. Application/Job 수준 metric은 `WorkerType`/
-`CapacityAllocationType`(Used는 `JobId`까지) 조합별로 별도 시계열이 발행되므로,
-이렇게 합산해야 application 전체 값이 나온다.
+`RunningJobs`/`SuccessJobs`/`FailedJobs`는 ApplicationId+ApplicationName이
+dimension 전부이므로(추가 dimension 없음) direct query 하나로 충분하다. 반면
+`RunningWorkerCount`/`CPUAllocated`/`MemoryAllocated`/`WorkerCpuUsed`/
+`WorkerMemoryUsed`는 `WorkerType`/`CapacityAllocationType`(Used는 `JobId`까지)
+조합별로 별도 시계열이 발행되므로, CloudWatch 쿼리를 두 개씩 쓴다 —
+`matchExact: false`(search)로 실제 dimension 조합을 전부 찾는 숨겨진 쿼리
+하나와, 그 결과를 `SUM(...)` 수식(Metric Math)으로 더하는 쿼리 하나. 이렇게
+합산해야 application 전체 값이 나온다.
 
 몇 가지 명확히 해 둘 점:
 
 - **`ApplicationName` dimension을 빠뜨리면 모든 패널이 `No data`다.** 위
   경고 참고 — `Application ID`만 채우고 `Application Name`을 비우면 여전히
   조회가 안 된다.
+- **hide+`SUM()` Metric Math 쿼리에는 `metricQueryType`/`metricEditorMode`를
+  명시해야 한다(#410).** Grafana CloudWatch datasource는 이 두 필드가 없으면
+  모든 target을 기본값인 "Search, Code" 모드로 해석한다 — 그러면 직접 작성한
+  `namespace`/`metricName`/`dimensions` 필드 대신 Grafana가 자체적으로 합성한
+  `SEARCH(...)` 문자열이 실행되는데, 이게 Explore에서 성공한 것과 다른
+  쿼리라 `No data`가 났다. Grafana 자체에도 "이 필드들이 빠지면 기본값
+  Search/Code로 떨어져 의도한 쿼리와 다르게 동작한다"는 같은 매커니즘의
+  버그 리포트가 있다(grafana/grafana#90000) — 다만 그 이슈에서 실제로 터진
+  증상은 우리와 달리 파서 크래시(`index out of range`)였고 머지된 수정도
+  그 크래시만 고쳤을 뿐, "이 필드들을 항상 채워야 한다"가 Grafana의 공식
+  가이드로 명시된 건 아니다. 그래서 direct metric 쿼리에는
+  `"metricQueryType": 0, "metricEditorMode": 0`(Search, Builder)을,
+  `SUM(...)` 같은 Metric Math 쿼리에는 `"metricQueryType": 0,
+  "metricEditorMode": 1`(Search, Code)을 명시적으로 채워 넣었다.
+  `RunningJobs`/`SuccessJobs`/`FailedJobs`는 애초에 `SUM()`이 필요 없는
+  단일 series라 이 문제를 우회해 direct query로 단순화했다.
 - **Statistic 선택은 문서 근거가 있는 것(WorkerCpuUsed/WorkerMemoryUsed의
   Sum)과 그렇지 않은 것(나머지의 Maximum)이 섞여 있다.** 나머지 metric은
   1분마다 한 값만 찍히는 상태값 성격이라 Maximum/Average/Sum이 숫자상
   같아야 정상이지만, 실제로 여러 데이터 포인트가 겹쳐 발행되는 경우를
   발견하면 이 값을 조정해야 한다.
+- **Memory 단위는 GB(10진, `decgbytes`)다.** AWS가 `MemoryAllocated`/
+  `WorkerMemoryUsed`를 GB 단위로 발행하므로, Grafana에서 원시 byte 값을
+  스케일링하는 `bytes` 계열이 아니라 "입력값이 이미 GB"로 가정하는
+  `decgbytes`를 그대로 쓴다 — 별도 단위 변환이 필요 없다.
 - **CloudWatch datasource가 `authType: default`(EC2 IAM Role)를 쓰므로,
   Monitoring EC2에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)의
   IAM 권한이 없으면 모든 패널이 permission 오류로 `No data`가 된다.**
@@ -964,6 +987,15 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
        --period 60 \
        --statistics Maximum
      ```
+  6. **AWS CLI/CloudWatch 콘솔/Grafana Explore에서는 같은 metric이 정상 조회되는데
+     이 dashboard의 패널만 `No data`라면**, target JSON에서 `metricQueryType`/
+     `metricEditorMode`가 빠지지 않았는지 확인한다(#410) — Explore는 쿼리를
+     실행할 때 이 필드를 항상 채워 보내지만, dashboard JSON을 손으로 고칠 때
+     빠뜨리기 쉽다. 빠지면 Grafana가 target을 기본값(Search, Code)으로 해석해
+     직접 쓴 `namespace`/`metricName`/`dimensions`가 아니라 자체 합성한
+     `SEARCH(...)` 문자열을 실행한다. direct metric 쿼리는
+     `"metricQueryType": 0, "metricEditorMode": 0`, `SUM(...)` 같은 Metric
+     Math 쿼리는 `"metricQueryType": 0, "metricEditorMode": 1`이어야 한다.
 
 - Service Status Overview 패널: 개별 컴포넌트 dashboard에서 이미 `No data`나
   `DOWN`을 확인했다면 그쪽 troubleshooting(Kafka/Airflow/Spark
