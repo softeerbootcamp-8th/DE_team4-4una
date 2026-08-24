@@ -262,11 +262,12 @@ jobs:
           enable-cache: true
           cache-suffix: monitoring-config
 
-      # monitoring.yaml은 두 값이 비면 :? 로 죽는다. 파일 구조만 보는 것이므로
+      # monitoring.yaml은 필수 값이 비면 :? 로 죽는다. 파일 구조만 보는 것이므로
       # 실제 값 대신 자리표시자를 넣는다. 인스턴스의 .env는 CI에 없다.
       - name: Validate compose files
         env:
           PROJECT_EC2_PRIVATE_IP: 10.0.0.1
+          SPARK_EC2_PRIVATE_IP: 10.0.0.2
           GRAFANA_ADMIN_PASSWORD: ci-placeholder
         run: |
           set -euo pipefail

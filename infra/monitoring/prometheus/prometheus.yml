@@ -35,4 +35,4 @@ scrape_configs:
   - job_name: stream-processor
     static_configs:
       - targets:
-          - project-ec2:9103
+          - spark-ec2:9103
