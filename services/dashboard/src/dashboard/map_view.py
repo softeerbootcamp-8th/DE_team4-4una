@@ -11,6 +11,7 @@ import folium
 from dashboard.config import NYC_MAP_CENTER, NYC_MAP_ZOOM
 from dashboard.road_geometry import RoadSegment
 from dashboard.serving_api_client import ComfortScore
+from dashboard.zone_master import Borough
 
 GREEN = "green"
 YELLOW = "yellow"
@@ -96,6 +97,51 @@ def build_map(
         ),
     ).add_to(fmap)
     fmap.get_root().html.add_child(folium.Element(_legend_html()))
+    return fmap
+
+
+BOROUGH_TOOLTIP_FIELD = "borough"
+
+
+def build_borough_map(
+    boroughs: Sequence[Borough],
+    center: tuple[float, float] = NYC_MAP_CENTER,
+    zoom: int = NYC_MAP_ZOOM,
+) -> folium.Map:
+    """Overview map: one clickable outline per borough, no road segments.
+
+    Six polygons instead of the whole road network, so the first render costs
+    almost nothing and the user picks a borough before any segment is drawn.
+    """
+    fmap = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+    if not boroughs:
+        return fmap
+    folium.GeoJson(
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": borough.geometry,
+                    "properties": {BOROUGH_TOOLTIP_FIELD: borough.name},
+                }
+                for borough in boroughs
+            ],
+        },
+        name="NYC boroughs",
+        style_function=lambda _feature: {
+            "color": "#3d6fb4",
+            "weight": 2,
+            "fillColor": "#3d6fb4",
+            "fillOpacity": 0.15,
+        },
+        highlight_function=lambda _feature: {"fillOpacity": 0.35},
+        tooltip=folium.GeoJsonTooltip(
+            fields=[BOROUGH_TOOLTIP_FIELD],
+            aliases=[BOROUGH_TOOLTIP_FIELD],
+            sticky=False,
+        ),
+    ).add_to(fmap)
     return fmap
 
 
