@@ -51,6 +51,7 @@ POSTGRES_JDBC_JAR_URI_ENV = "POSTGRES_JDBC_JAR_URI"
 @dataclass(frozen=True, slots=True)
 class StandardComfortScoreJobConfig:
     data_lake_uri: str
+    road_environment_uri: str
     window_hours: int
     comfort_score_config_path: Path
     gold_output_uri: str
@@ -68,8 +69,14 @@ class StandardComfortScoreJobConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> StandardComfortScoreJobConfig:
         source = env if env is not None else os.environ
         data_lake_uri = source.get("STANDARD_COMFORT_SCORE_DATA_LAKE_URI") or "data/local-lake"
+        # road-environment(active pointer/manifest/enriched_segment_reference)는
+        # gold/silver와 다른 reference 버킷에 있다(#389). build-road-environment/
+        # run-monthly가 이미 이 이름을 쓰고 있어(cli.py) 그대로 재사용하고,
+        # 없으면 data_lake_uri로 폴백해 로컬(단일 루트) 개발은 그대로 동작한다.
+        road_environment_uri = source.get("REFERENCE_DATA_LAKE_URI") or data_lake_uri
         return cls(
             data_lake_uri=data_lake_uri,
+            road_environment_uri=road_environment_uri,
             window_hours=int(
                 source.get("STANDARD_COMFORT_SCORE_WINDOW_HOURS")
                 or DEFAULT_WINDOW_HOURS
@@ -143,7 +150,7 @@ def run_standard_comfort_score_job(
     hourly_df = load_hourly_comfort_score_for_gold(
         spark, config.data_lake_uri, as_of, config.window_hours
     )
-    universe_df = load_universe(spark, config.data_lake_uri, connection)
+    universe_df = load_universe(spark, config.road_environment_uri, connection)
     scoring_config = load_comfort_score_config(config.comfort_score_config_path)
 
     scored = _select_staging_columns(

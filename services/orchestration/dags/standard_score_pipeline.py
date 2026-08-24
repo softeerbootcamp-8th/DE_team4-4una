@@ -202,6 +202,13 @@ with DAG(
                     "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', "
                     "'data/local-lake') }}"
                 ),
+                # road-environment(active pointer/manifest)는 gold/silver와 다른
+                # reference 버킷에 있다(#389) — build-road-environment/run-monthly가
+                # 이미 이 이름을 쓰고 있어 그대로 재사용한다. 비어 있으면 job이
+                # STANDARD_COMFORT_SCORE_DATA_LAKE_URI로 폴백한다.
+                "REFERENCE_DATA_LAKE_URI": (
+                    "{{ var.value.get('REFERENCE_DATA_LAKE_URI', '') }}"
+                ),
                 "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
                     "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
                 ),

@@ -104,6 +104,11 @@ def run_cleansing_job(
     processed_window = _union_frames(processed_frames).persist(
         StorageLevel.MEMORY_AND_DISK
     )
+    # persist는 lazy라 여기서 즉시 materialize하지 않으면, 바로 아래 첫 action
+    # (target_processed.count())이 processed_window가 아닌 다른 DataFrame을
+    # 건드려서 실제 계산이 run_hourly_segment_feature_job 안의 target_df.count()
+    # (#386)까지 조용히 미뤄진다(#389). count()로 여기서 먼저 materialize한다.
+    processed_window.count()
     target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
     try:
         processed_count = target_processed.count()

@@ -29,7 +29,7 @@ SEGMENT_ARTIFACT_ROLE = "enriched_segment_reference"
 
 def load_universe(
     spark: SparkSession,
-    data_lake_uri: str,
+    road_environment_uri: str,
     connection,
     store: ObjectStore | None = None,
 ) -> DataFrame:
@@ -38,7 +38,7 @@ def load_universe(
     sentinel `vehicle_profile_id=0`은 제외한다 — vehicle-agnostic 행은 formula.py가
     segment 목록으로부터 직접 만든다.
     """
-    segments = load_segment_ids(spark, data_lake_uri, store)
+    segments = load_segment_ids(spark, road_environment_uri, store)
     profile_ids = load_vehicle_profile_ids(connection)
     profiles = spark.createDataFrame(
         [(profile_id,) for profile_id in profile_ids], "vehicle_profile_id int"
@@ -47,10 +47,10 @@ def load_universe(
 
 
 def load_segment_ids(
-    spark: SparkSession, data_lake_uri: str, store: ObjectStore | None = None
+    spark: SparkSession, road_environment_uri: str, store: ObjectStore | None = None
 ) -> DataFrame:
     """활성 environment의 enriched_segment_reference에서 segment_id만 읽는다."""
-    artifact_uri = resolve_segment_artifact_uri(data_lake_uri, store)
+    artifact_uri = resolve_segment_artifact_uri(road_environment_uri, store)
     return (
         spark.read.parquet(_decode_local_file_uri(artifact_uri))
         .select("segment_id")
@@ -68,10 +68,10 @@ def _decode_local_file_uri(path: str) -> str:
 
 
 def resolve_segment_artifact_uri(
-    data_lake_uri: str, store: ObjectStore | None = None
+    road_environment_uri: str, store: ObjectStore | None = None
 ) -> str:
     active_store = store if store is not None else ObjectStore()
-    pointer_uri = join_uri(data_lake_uri, ACTIVE_POINTER_KEY)
+    pointer_uri = join_uri(road_environment_uri, ACTIVE_POINTER_KEY)
     pointer = json.loads(active_store.read_bytes(pointer_uri))
 
     manifest_uri = pointer.get("manifest_uri")

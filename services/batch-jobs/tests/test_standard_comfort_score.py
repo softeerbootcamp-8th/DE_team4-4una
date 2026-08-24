@@ -281,7 +281,7 @@ class TestUniverseResolution:
         return str(tmp_path)
 
     def test_resolves_the_enriched_segment_reference_artifact(self, tmp_path):
-        data_lake_uri = self.write_environment(
+        road_environment_uri = self.write_environment(
             tmp_path,
             [
                 {"role": "road_segment", "uri": "file:///other.parquet"},
@@ -289,12 +289,12 @@ class TestUniverseResolution:
             ],
         )
 
-        assert resolve_segment_artifact_uri(data_lake_uri) == "file:///wanted.parquet"
+        assert resolve_segment_artifact_uri(road_environment_uri) == "file:///wanted.parquet"
 
     def test_raises_when_the_manifest_has_no_segment_artifact(self, tmp_path):
-        data_lake_uri = self.write_environment(
+        road_environment_uri = self.write_environment(
             tmp_path, [{"role": "road_segment", "uri": "file:///other.parquet"}]
         )
 
         with pytest.raises(ValueError, match="enriched_segment_reference"):
-            resolve_segment_artifact_uri(data_lake_uri)
+            resolve_segment_artifact_uri(road_environment_uri)
