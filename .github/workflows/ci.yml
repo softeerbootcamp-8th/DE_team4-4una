@@ -5,6 +5,7 @@
 #   lint        ruff 정적 분석                                            [항상]
 #   test        변경된 대상만, 대상별로 러너를 나눠 병렬 실행
 #   workspace   워크스페이스 전체 import 검증          [공유 코드가 바뀔 때]
+#   monitoring  compose/Prometheus/Grafana 설정 검증   [모니터링 설정이 바뀔 때]
 #
 # 로컬에서는 `make lint` / `make test`로 전체를 한 번에 검증할 수 있다.
 name: CI
@@ -36,6 +37,7 @@ jobs:
       # test matrix가 그대로 쓰는 {name, pkg, paths} 배열
       targets: ${{ steps.select.outputs.targets }}
       workspace: ${{ steps.filter.outputs.workspace }}
+      monitoring: ${{ steps.filter.outputs.monitoring }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,6 +88,13 @@ jobs:
             # 모든 Python 변경이 승격되어 버린다.
             python:
               - '**/*.py'
+            # 모니터링 설정은 Python이 아니라서 위 필터에 걸리지 않는다. 배포는
+            # deploy-monitoring.yml이 따로 판정하고, 여기서는 검증만 한다.
+            monitoring:
+              - 'infra/compose/monitoring.yaml'
+              - 'infra/compose/exporters.yaml'
+              - 'infra/monitoring/**'
+              - '.github/workflows/ci.yml'
 
       # 필터 이름을 (uv 패키지, pytest 경로) 쌍으로 바꾼다.
       #
@@ -236,12 +245,122 @@ jobs:
       - name: Run pytest
         run: uv run --all-packages --frozen pytest tests/integration
 
+  # 모니터링 설정에는 테스트가 없다. 잘못 고치면 배포가 끝난 뒤 Prometheus나
+  # Grafana 컨테이너가 죽어서야 알게 되므로, PR에서 문법과 정합성만 먼저 본다.
+  monitoring-config:
+    name: Monitoring Config
+    needs: select
+    if: needs.select.outputs.monitoring == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+          enable-cache: true
+          cache-suffix: monitoring-config
+
+      # monitoring.yaml은 두 값이 비면 :? 로 죽는다. 파일 구조만 보는 것이므로
+      # 실제 값 대신 자리표시자를 넣는다. 인스턴스의 .env는 CI에 없다.
+      - name: Validate compose files
+        env:
+          PROJECT_EC2_PRIVATE_IP: 10.0.0.1
+          GRAFANA_ADMIN_PASSWORD: ci-placeholder
+        run: |
+          set -euo pipefail
+          docker compose -f infra/compose/monitoring.yaml config --quiet
+          docker compose -f infra/compose/exporters.yaml config --quiet
+
+      # 컨테이너가 쓰는 것과 같은 버전의 promtool로 본다. 이미지 태그를 compose에서
+      # 뽑아 쓰므로, Prometheus를 올려도 검사 버전이 따라간다.
+      - name: Check Prometheus config
+        run: |
+          set -euo pipefail
+
+          image=$(grep -oE 'prom/prometheus:[^[:space:]]+' infra/compose/monitoring.yaml | head -1)
+          echo "promtool 이미지: $image"
+
+          docker run --rm --entrypoint promtool \
+            --volume "$PWD/infra/monitoring/prometheus:/cfg:ro" \
+            "$image" check config /cfg/prometheus.yml
+
+      # Grafana는 설정 검사 CLI가 없다. 대신 provisioning YAML과 대시보드 JSON이
+      # 파싱되는지, provider가 가리키는 경로가 compose의 마운트 지점과 맞는지 본다.
+      # 경로가 어긋나면 Grafana는 조용히 대시보드를 하나도 안 띄운다.
+      - name: Validate Grafana provisioning
+        run: |
+          set -euo pipefail
+
+          uv run --with pyyaml --no-project python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          errors = []
+          grafana = Path("infra/monitoring/grafana")
+
+          provisioning = sorted(grafana.glob("provisioning/**/*.yml"))
+          if not provisioning:
+              errors.append("provisioning YAML을 하나도 찾지 못했습니다")
+
+          for path in provisioning:
+              try:
+                  loaded = yaml.safe_load(path.read_text())
+              except yaml.YAMLError as exc:
+                  errors.append(f"{path}: YAML 파싱 실패 - {exc}")
+                  continue
+              if not isinstance(loaded, dict) or "apiVersion" not in loaded:
+                  errors.append(f"{path}: apiVersion이 없습니다")
+
+          dashboards = sorted(grafana.glob("dashboards/*.json"))
+          if not dashboards:
+              errors.append("대시보드 JSON을 하나도 찾지 못했습니다")
+
+          for path in dashboards:
+              try:
+                  json.loads(path.read_text())
+              except json.JSONDecodeError as exc:
+                  errors.append(f"{path}: JSON 파싱 실패 - {exc}")
+
+          # provider가 가리키는 컨테이너 경로가 compose의 마운트 지점과 같아야 한다.
+          compose = yaml.safe_load(Path("infra/compose/monitoring.yaml").read_text())
+          mounts = {
+              volume.split(":")[1]
+              for volume in compose["services"]["grafana"]["volumes"]
+              if ":" in volume
+          }
+
+          providers = yaml.safe_load(
+              (grafana / "provisioning/dashboards/dashboards.yml").read_text()
+          )
+          for provider in providers.get("providers", []):
+              path = provider.get("options", {}).get("path")
+              if path not in mounts:
+                  errors.append(
+                      f"provider {provider.get('name')}의 path {path} 가 "
+                      f"monitoring.yaml의 grafana 마운트 {sorted(mounts)} 에 없습니다"
+                  )
+
+          for error in errors:
+              print(f"::error::{error}")
+
+          print(
+              f"검사 완료 — provisioning {len(provisioning)}개, "
+              f"대시보드 {len(dashboards)}개"
+          )
+          sys.exit(1 if errors else 0)
+          PY
+
   # 브랜치 보호의 required status check으로는 이 job 하나만 지정한다.
   # 위 job들은 변경 내용에 따라 스킵되고 matrix 때문에 이름도 늘어난다. 개별 job을
   # required로 걸면 스킵된 job이 pending으로 남아 PR이 merge되지 않는다.
   ci-passed:
     name: CI Passed
-    needs: [select, lock-check, lint, test, workspace]
+    needs: [select, lock-check, lint, test, workspace, monitoring-config]
     if: always()
     runs-on: ubuntu-latest
     steps:
