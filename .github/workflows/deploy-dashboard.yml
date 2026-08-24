@@ -1,0 +1,183 @@
+# develop에 들어간 커밋을 dashboard 컨테이너로 배포한다.
+#
+# CI를 기다리지 않는다. develop 병합은 branch protection의 required status check
+# 을 통과해야만 가능하므로, develop에 올라온 시점에 이미 검증된 커밋이다.
+#
+# 순서: 이미지 빌드 -> ECR push -> SSH로 EC2에 배포 스크립트 전송 -> 결과 확인.
+# 컨테이너 교체와 health 확인, 실패 시 되돌리기, 오래된 이미지 정리는 인스턴스에서
+# 실행되는 services/dashboard/deploy/deploy_on_instance.sh가 담당한다.
+#
+# AWS 식별자와 EC2 주소는 repository variables에, SSH 개인키는 secret에 둔다.
+# 하나라도 비어 있으면 첫 스텝이 어떤 값이 없는지 알려주고 멈춘다.
+name: Deploy Dashboard
+
+on:
+  # 이미지에 실제로 들어가는 경로만 본다. Dockerfile이 COPY . . 뒤에
+  # `uv sync --package dashboard`를 하므로 산출물을 바꾸는 것은 이 서비스와 공유
+  # 코드뿐이다.
+  push:
+    branches: [develop]
+    paths:
+      - 'services/dashboard/**'
+      - 'libs/de4-core/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/deploy-dashboard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # OIDC 인증에 필요하다. 이 줄이 없으면 AWS 자격증명을 받지 못한다.
+  id-token: write
+
+# 배포 두 개가 동시에 돌면 컨테이너가 섞인다. 취소하지 않고 앞 배포를 기다린다.
+concurrency:
+  group: deploy-dashboard
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    # 배포 대상이 arm64(t4g) 인스턴스라 arm 러너에서 빌드한다.
+    runs-on: ubuntu-24.04-arm
+    env:
+      REVISION: ${{ github.sha }}
+      CONTAINER: ${{ vars.DASHBOARD_CONTAINER_NAME || 'dashboard' }}
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      # dashboard/__init__.py가 0.0.0.0:8501에 고정으로 바인딩한다. 호스트 네트워크를
+      # 쓰므로 그대로 호스트의 포트가 된다 — 바꾸려면 앱을 함께 고쳐야 한다.
+      PORT: "8501"
+      # Streamlit이 제공하는 health 엔드포인트다.
+      HEALTH_PATH: /_stcore/health
+      HEALTH_TIMEOUT: "90"
+      SERVING_API_URL: ${{ vars.DASHBOARD_SERVING_API_URL || 'http://localhost:8000' }}
+      ROAD_SEGMENT_S3_URI: ${{ vars.DASHBOARD_ROAD_SEGMENT_S3_URI }}
+      # 없어도 지도는 뜬다. borough 필터만 빠진다 (dashboard/config.py 참고).
+      ZONE_MASTER_S3_URI: ${{ vars.DASHBOARD_ZONE_MASTER_S3_URI }}
+    steps:
+      # 값이 없으면 나중에 aws 명령이 알아보기 힘든 에러를 낸다. 여기서 먼저 잡는다.
+      - name: Check required variables
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          ECR_REPOSITORY: ${{ vars.DASHBOARD_ECR_REPOSITORY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN ECR_REPOSITORY EC2_HOST \
+                      EC2_SSH_PRIVATE_KEY ROAD_SEGMENT_S3_URI; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::repository variables가 비어 있습니다:$missing"
+            echo "Settings > Secrets and variables > Actions > Variables 에서 설정하세요."
+            exit 1
+          fi
+
+          # config.py가 같은 검사를 하지만, 거기서 걸리면 컨테이너가 기동 실패로
+          # 죽은 뒤에야 알게 된다. 배포 전에 잡는다.
+          for name in ROAD_SEGMENT_S3_URI ZONE_MASTER_S3_URI; do
+            eval "value=\${$name}"
+            case "${value:-s3://}" in
+              s3://*) ;;
+              *)
+                echo "::error::$name 은 s3:// 로 시작해야 합니다: $value"
+                exit 1
+                ;;
+            esac
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          # 안 적으면 기본 브랜치 최신을 가져온다. 배포할 커밋을 직접 지정한다.
+          ref: ${{ env.REVISION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.DASHBOARD_ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${REPOSITORY}:${REVISION}"
+
+          # Dockerfile이 uv.lock과 libs/de4-core까지 COPY하므로 빌드 컨텍스트는
+          # 저장소 루트다. 뭘 뺄지는 .dockerignore가 정한다.
+          docker build \
+            --tag "$image" \
+            --file services/dashboard/Dockerfile \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            .
+          docker push "$image"
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          # 비대화식이라 호스트 키를 미리 받아둔다. 없으면 확인 프롬프트에서 멈춘다.
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: |
+          set -euo pipefail
+
+          # 배포 스크립트가 쓸 변수들을 스크립트 맨 앞에 붙여 하나로 만들어 stdin으로
+          # 넘긴다. printf %q가 값을 따옴표로 감싸므로 값에 공백이 있어도 깨지지 않는다.
+          # AWS_REGION은 configure-aws-credentials가 job 환경에 내보낸 값을 쓴다.
+          prelude=$(printf 'IMAGE=%q\nREGISTRY=%q\nAWS_REGION=%q\nCONTAINER=%q\nPORT=%q\nREVISION=%q\nHEALTH_PATH=%q\nHEALTH_TIMEOUT=%q\nROAD_SEGMENT_S3_URI=%q\nZONE_MASTER_S3_URI=%q\nSERVING_API_URL=%q\n' \
+            "$IMAGE" "$REGISTRY" "$AWS_REGION" "$CONTAINER" "$PORT" "$REVISION" \
+            "$HEALTH_PATH" "$HEALTH_TIMEOUT" "$ROAD_SEGMENT_S3_URI" \
+            "$ZONE_MASTER_S3_URI" "$SERVING_API_URL")
+
+          # ssh는 원격 명령의 종료 코드를 그대로 돌려준다. 스크립트가 rollback 후 1로
+          # 끝나면 이 스텝도 실패한다.
+          {
+            printf '%s\n' "$prelude"
+            cat services/dashboard/deploy/deploy_on_instance.sh
+          } | ssh "${EC2_USER}@${EC2_HOST}" 'bash -s'
+
+      # 어떤 커밋이 어떤 이미지로 어디에 배포됐는지 실행 화면에 남긴다.
+      - name: Job summary
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Dashboard 배포"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`$REVISION\` |"
+            echo "| image | \`${IMAGE:-(빌드 전 중단)}\` |"
+            echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+            echo "| url | \`http://${EC2_HOST:-(미설정)}:${PORT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

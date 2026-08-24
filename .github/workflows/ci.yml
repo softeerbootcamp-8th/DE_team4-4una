@@ -67,6 +67,9 @@ jobs:
             stream-processor:
               - *shared
               - 'services/stream-processor/**'
+            dashboard:
+              - *shared
+              - 'services/dashboard/**'
             batch-jobs-sensor-features: *batchjobs
             batch-jobs-cleansing: *batchjobs
             batch-jobs-rest: *batchjobs
@@ -107,6 +110,7 @@ jobs:
             "serving-api":                {pkg: "serving-api",      paths: "services/serving-api/tests"},
             "orchestration":              {pkg: "orchestration",    paths: "services/orchestration/tests"},
             "stream-processor":           {pkg: "stream-processor", paths: "services/stream-processor/tests"},
+            "dashboard":                  {pkg: "dashboard",        paths: "services/dashboard/tests"},
             "batch-jobs-sensor-features": {pkg: "batch-jobs",       paths: ($bj + "/test_sensor_features.py")},
             "batch-jobs-cleansing":       {pkg: "batch-jobs",       paths: ($bj + "/cleansing")},
             "batch-jobs-rest":            {pkg: "batch-jobs",       paths: ($bj + " --ignore=" + $bj + "/test_sensor_features.py --ignore=" + $bj + "/cleansing")}
