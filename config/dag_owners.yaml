@@ -1,0 +1,29 @@
+# DAG/task 담당자 및 심각도 레지스트리 (#409). services/orchestration/jobs/dag_owners.py가
+# 읽는다. 실제 팀원 정보로 값을 채워 넣는다 — 아래는 스키마를 보여주는 예시다.
+
+users:
+  alice:
+    email: alice@example.com   # slack_id가 없으면 알림 시점에 users.lookupByEmail로 조회
+  bob:
+    slack_id: U0456GHIJKL      # 이미 알고 있으면 email 조회를 건너뛰고 바로 멘션
+
+dags:
+  standard_score_pipeline:
+    owner: alice
+    severity: critical
+    tasks:
+      sensor_processing.resolve_road_snapshot_date:
+        owner: bob
+        severity: high
+  current_score_pipeline:
+    owner: alice
+    severity: high
+  zone_weather_pipeline:
+    owner: bob
+    severity: medium
+  data_quality_audit:
+    owner: alice
+    severity: medium
+  bronze_compaction:
+    owner: bob
+    severity: low
