@@ -304,11 +304,82 @@
       }
     },
     {
+      "id": 10,
+      "type": "stat",
+      "title": "Event-Time Lag",
+      "description": "이번 micro-batch에서 처리한 가장 최신 sensor event_time과 지금 사이 초 -- Last Progress Age와 달리 쿼리가 살아서 계속 진행 중이어도 실제 데이터 자체가 오래된 경우(Kafka에 백로그가 쌓여 옛날 메시지를 계속 처리 중인 상황)까지 잡아낸다(#426 후속). observe()로 얻으며 watermark 없이도 동작한다. 빈 배치는 max_event_time이 없어 No data가 되는데(장애 아님) 이전 값을 그대로 보여준다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 35, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "stream_processor_event_time_lag_seconds{job=\"stream-processor\"}",
+          "legendFormat": "event-time lag",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 60 },
+              { "color": "red", "value": 330 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Kafka Offset Lag",
+      "description": "subscribe 중인 topic의 (latestOffset - endOffset) 합 -- Kafka에는 이미 있지만 이번 micro-batch까지 아직 못 읽은 메시지 수다(#426 후속). 정상 범위에 대한 확립된 기준이 아직 없어 Kafka dashboard의 Consumer Lag와 같이 threshold 없이 raw 값만 보여준다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 12, "y": 35, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "stream_processor_kafka_offset_lag{job=\"stream-processor\"}",
+          "legendFormat": "offset lag",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 103,
       "type": "row",
       "title": "Totals",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 39, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -316,7 +387,7 @@
       "type": "stat",
       "title": "Total Input Rows",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 36, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -347,7 +418,7 @@
       "title": "Query Failures",
       "description": "stream_processor_query_failures_total — 컨테이너가 재시작되지 않고 예외로 종료된 누적 횟수.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 36, "w": 12, "h": 4 },
+      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",

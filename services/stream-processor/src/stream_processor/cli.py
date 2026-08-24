@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import signal
+import time
 from pathlib import Path
 from threading import Event
 
@@ -48,6 +49,12 @@ SPARK_PACKAGES = f"{KAFKA_PACKAGE},{HADOOP_AWS_PACKAGE}"
 
 
 def build_spark_session() -> SparkSession:
+    # spark.sql.session.timeZone은 SQL 표현식/포맷팅에만 적용된다 -- StreamingQueryListener가
+    # observedMetrics로 받는 Timestamp는 Py4J가 JVM 기본 타임존으로 변환해 돌려주므로
+    # (실제로 이 호스트가 UTC가 아니면 값이 그만큼 어긋난다 -- 로컬에서 9시간 어긋남을
+    # 직접 확인함, #426 후속), JVM을 띄우기 전에 프로세스 TZ 자체를 UTC로 못박는다.
+    os.environ["TZ"] = "UTC"
+    time.tzset()
     builder = (
         SparkSession.builder.appName("stream-processor")
         .config("spark.jars.packages", SPARK_PACKAGES)

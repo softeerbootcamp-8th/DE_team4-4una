@@ -14,6 +14,8 @@ from pyspark.sql.types import (
     TimestampType,
 )
 from stream_processor.bronze_sink import (
+    BATCH_STATS_OBSERVATION_NAME,
+    MAX_EVENT_TIME_FIELD,
     add_ingestion_time_to_value,
     prepare_bronze_records,
     write_bronze_stream,
@@ -180,6 +182,41 @@ def test_parquet_sink_resumes_from_checkpoint_without_rewriting_input(spark, tmp
         "hour",
     ]
     assert (output_path / "event_date=2026-08-14" / "hour=05").is_dir()
+
+
+def test_write_bronze_stream_observes_the_latest_event_time_per_batch(spark, tmp_path) -> None:
+    # event-time lag metric(#426 후속)이 읽는 값이 실제로 채워지는지, 진짜
+    # StreamingQuery로 끝까지 확인한다 -- observedMetrics 접근 방식은 문서화가 부실해서
+    # SimpleNamespace로 흉내내는 것만으로는 못 믿는다.
+    input_path = tmp_path / "input"
+    output_path = tmp_path / "bronze"
+    checkpoint_path = tmp_path / "checkpoint"
+    input_path.mkdir()
+    config = stream_config(str(output_path), str(checkpoint_path))
+
+    for offset, event_time in ((1, "2026-08-14T05:00:00+00:00"), (2, "2026-08-14T05:10:00+00:00")):
+        record = {
+            "key": "trip-1",
+            "value": json.dumps(SENSOR_VALUE | {"event_id": f"event-{offset}", "event_time": event_time}),
+            "topic": "sensor-events",
+            "partition": 0,
+            "offset": offset,
+            "timestamp": "2026-08-14T05:00:00Z",
+        }
+        (input_path / f"batch-{offset}.json").write_text(json.dumps(record))
+
+    records = spark.readStream.schema(KAFKA_RECORD_SCHEMA).json(str(input_path))
+    query = write_bronze_stream(records, config)
+    query.processAllAvailable()
+
+    progress = query.lastProgress
+    query.stop()
+
+    observed = progress["observedMetrics"][BATCH_STATS_OBSERVATION_NAME]
+    # lastProgress는 JSON 경로라 timestamp가 문자열로 온다 -- 실제 프로덕션 경로인
+    # StreamingQueryListener는 datetime을 돌려준다(metrics.py의 단위 테스트가 그 경로를
+    # 흉내낸다). 여기서는 observe()가 정확한 event_time을 잡아내는지만 확인한다.
+    assert observed[MAX_EVENT_TIME_FIELD] == "2026-08-14 05:10:00"
 
 
 def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -> None:
