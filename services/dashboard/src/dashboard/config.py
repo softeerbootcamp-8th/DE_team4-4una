@@ -14,6 +14,12 @@ DEFAULT_VEHICLE_PROFILE_ID = 0
 DEFAULT_BATCH_CHUNK_SIZE = 300
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
+# The API caps a request at a few hundred segments, so a map-sized query becomes
+# hundreds of round trips. They are issued concurrently, bounded here: the
+# serving API's own connection pool is small, and out-running it would just move
+# the queueing to its side.
+DEFAULT_MAX_PARALLEL_REQUESTS = 8
+
 ROAD_SEGMENT_CACHE_TTL_SECONDS = 24 * 60 * 60
 SCORE_CACHE_TTL_SECONDS = 5 * 60
 
@@ -28,11 +34,11 @@ BOROUGH_MAP_ZOOM = 12
 # than road segments, which is also what makes the first render cheap.
 ALL_BOROUGHS = "All boroughs"
 
-# Folium inlines every rendered segment into the page as GeoJSON, so cost grows
-# with the number of segments drawn, not the number in the snapshot. Only the
-# current viewport is drawn, and this caps even that: zoomed out far enough, the
-# viewport still covers the whole city.
-MAX_RENDERED_SEGMENTS = 6000
+# Folium inlines every rendered segment into the page as GeoJSON, and each one
+# carries a six-field tooltip, so cost grows with the number drawn rather than
+# the number in the snapshot. Only the current viewport is drawn, and this caps
+# even that: zoomed out far enough, the viewport still covers a whole borough.
+MAX_RENDERED_SEGMENTS = 3000
 
 
 @dataclass(frozen=True, slots=True)

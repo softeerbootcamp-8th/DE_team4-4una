@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from dashboard.config import DEFAULT_MAX_PARALLEL_REQUESTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +63,16 @@ def fetch_comfort_scores(
     segment_ids: Iterable[str],
     batch_size: int,
     timeout_seconds: float,
+    max_parallel_requests: int = DEFAULT_MAX_PARALLEL_REQUESTS,
 ) -> ComfortScoreBatchResult:
-    """Fetch all scores without duplicating the API's current/standard policy."""
+    """Fetch all scores without duplicating the API's current/standard policy.
+
+    The API caps a request at a few hundred segments, so a map-sized query turns
+    into many of them and the round trips, not the queries, dominate. They are
+    issued concurrently for that reason; the cap keeps the fan-out from
+    exhausting the API's own connection pool. Responses are merged in request
+    order so the result does not depend on which one returns first.
+    """
     batches = chunk_segment_ids(segment_ids, batch_size)
     scores: dict[str, ComfortScore] = {}
     not_found: list[str] = []
@@ -69,7 +80,8 @@ def fetch_comfort_scores(
     profile_fallback: bool | None = None
 
     with httpx.Client(timeout=timeout_seconds) as client:
-        for batch in batches:
+
+        def _post(batch: tuple[str, ...]) -> dict[str, Any]:
             response = client.post(
                 endpoint,
                 json={
@@ -78,8 +90,19 @@ def fetch_comfort_scores(
                 },
             )
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
 
+        if not batches:
+            payloads: list[dict[str, Any]] = []
+        elif len(batches) == 1:
+            payloads = [_post(batches[0])]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(max_parallel_requests, len(batches))
+            ) as pool:
+                payloads = list(pool.map(_post, batches))
+
+        for batch, payload in zip(batches, payloads, strict=True):
             chunk_effective_profile_id = int(payload["effective_vehicle_profile_id"])
             chunk_profile_fallback = bool(payload["vehicle_profile_fallback"])
             if effective_profile_id is None:

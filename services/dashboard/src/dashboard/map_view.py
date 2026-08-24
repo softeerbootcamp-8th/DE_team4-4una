@@ -58,8 +58,18 @@ def build_map(
     segments: Sequence[ScoredRoadSegment],
     center: tuple[float, float] = NYC_MAP_CENTER,
     zoom: int = NYC_MAP_ZOOM,
+    boroughs: Sequence[Borough] = (),
+    selected_borough: str | None = None,
 ) -> folium.Map:
+    """Draw the borough outlines, and the segments of the selected borough.
+
+    The outlines stay on the map after a borough is picked so that zooming out
+    and clicking another one is possible; the selected borough is drawn without
+    a fill so clicks reach the segments inside it.
+    """
     fmap = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+    _add_borough_layers(fmap, boroughs, selected_borough)
+
     # GeoJsonTooltip reads its field names off the first feature, so an empty
     # collection makes it assert that every field is missing. Nothing would be
     # drawn anyway -- the viewport can legitimately contain no segments, and the
@@ -103,46 +113,57 @@ def build_map(
 BOROUGH_TOOLTIP_FIELD = "borough"
 
 
-def build_borough_map(
-    boroughs: Sequence[Borough],
-    center: tuple[float, float] = NYC_MAP_CENTER,
-    zoom: int = NYC_MAP_ZOOM,
-) -> folium.Map:
-    """Overview map: one clickable outline per borough, no road segments.
+def _borough_features(boroughs: Sequence[Borough]) -> dict[str, Any]:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": borough.geometry,
+                "properties": {BOROUGH_TOOLTIP_FIELD: borough.name},
+            }
+            for borough in boroughs
+        ],
+    }
 
-    Six polygons instead of the whole road network, so the first render costs
-    almost nothing and the user picks a borough before any segment is drawn.
-    """
-    fmap = folium.Map(location=center, zoom_start=zoom, control_scale=True)
-    if not boroughs:
-        return fmap
-    folium.GeoJson(
-        {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": borough.geometry,
-                    "properties": {BOROUGH_TOOLTIP_FIELD: borough.name},
-                }
-                for borough in boroughs
-            ],
-        },
-        name="NYC boroughs",
-        style_function=lambda _feature: {
-            "color": "#3d6fb4",
-            "weight": 2,
-            "fillColor": "#3d6fb4",
-            "fillOpacity": 0.15,
-        },
-        highlight_function=lambda _feature: {"fillOpacity": 0.35},
-        tooltip=folium.GeoJsonTooltip(
-            fields=[BOROUGH_TOOLTIP_FIELD],
-            aliases=[BOROUGH_TOOLTIP_FIELD],
-            sticky=False,
-        ),
-    ).add_to(fmap)
-    return fmap
+
+def _add_borough_layers(
+    fmap: folium.Map,
+    boroughs: Sequence[Borough],
+    selected_borough: str | None,
+) -> None:
+    selectable = [b for b in boroughs if b.name != selected_borough]
+    if selectable:
+        folium.GeoJson(
+            _borough_features(selectable),
+            name="NYC boroughs",
+            style_function=lambda _feature: {
+                "color": "#3d6fb4",
+                "weight": 2,
+                "fillColor": "#3d6fb4",
+                "fillOpacity": 0.15,
+            },
+            highlight_function=lambda _feature: {"fillOpacity": 0.35},
+            tooltip=folium.GeoJsonTooltip(
+                fields=[BOROUGH_TOOLTIP_FIELD],
+                aliases=[BOROUGH_TOOLTIP_FIELD],
+                sticky=False,
+            ),
+        ).add_to(fmap)
+
+    current = [b for b in boroughs if b.name == selected_borough]
+    if current:
+        # No fill and no tooltip: a filled polygon would swallow every click
+        # meant for the segments drawn inside it.
+        folium.GeoJson(
+            _borough_features(current),
+            name="Selected borough",
+            style_function=lambda _feature: {
+                "color": "#3d6fb4",
+                "weight": 2,
+                "fill": False,
+            },
+        ).add_to(fmap)
 
 
 def _feature_collection(segments: Sequence[ScoredRoadSegment]) -> dict[str, Any]:

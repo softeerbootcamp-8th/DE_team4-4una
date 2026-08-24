@@ -19,11 +19,7 @@ from dashboard.config import (
     SCORE_CACHE_TTL_SECONDS,
     DashboardConfig,
 )
-from dashboard.map_view import (
-    build_borough_map,
-    build_map,
-    join_road_segments_with_scores,
-)
+from dashboard.map_view import build_map, join_road_segments_with_scores
 from dashboard.road_geometry import RoadSegment, load_road_segments
 from dashboard.serving_api_client import (
     ComfortScoreBatchResult,
@@ -43,9 +39,10 @@ SegmentBounds = tuple[float, float, float, float]
 Viewport = tuple[float, float, float, float]
 
 # Leaflet reports bounds at full float precision, so panning by a pixel yields a
-# different value every frame. Rounding to ~1m keeps that from triggering an
-# endless rerun loop while still tracking real movement.
-_VIEWPORT_PRECISION = 5
+# different value every frame. Every change costs a rerun and a full redraw, so
+# this rounds to ~100m: small enough to follow real panning, coarse enough that
+# nudging the map does not rebuild it.
+_VIEWPORT_PRECISION = 3
 
 
 @st.cache_data(ttl=ROAD_SEGMENT_CACHE_TTL_SECONDS, show_spinner=False)
@@ -123,19 +120,25 @@ def _geometry_bounds(geometry: dict) -> SegmentBounds:
 
 
 def _parse_viewport(bounds: dict | None) -> Viewport | None:
-    """Convert st_folium's Leaflet bounds payload to (south, west, north, east)."""
+    """Convert st_folium's Leaflet bounds payload to (south, west, north, east).
+
+    Returns None until the payload carries real coordinates: before Leaflet has
+    laid the map out it reports the corner keys with null values, so a present
+    key is not proof of a usable coordinate.
+    """
     if not bounds:
         return None
-    south_west = bounds.get("_southWest")
-    north_east = bounds.get("_northEast")
-    if not south_west or not north_east:
-        return None
-    return (
-        south_west["lat"],
-        south_west["lng"],
-        north_east["lat"],
-        north_east["lng"],
+    south_west = bounds.get("_southWest") or {}
+    north_east = bounds.get("_northEast") or {}
+    corners = (
+        south_west.get("lat"),
+        south_west.get("lng"),
+        north_east.get("lat"),
+        north_east.get("lng"),
     )
+    if any(corner is None for corner in corners):
+        return None
+    return corners
 
 
 def _intersects(segment_bounds: SegmentBounds, viewport: Viewport) -> bool:
@@ -195,15 +198,6 @@ def main() -> None:
                     config.zone_master_s3_uri,
                     config.aws_region,
                 )
-        segment_ids = tuple(segment.segment_id for segment in road_segments)
-        with st.spinner("Loading comfort scores from the Serving API..."):
-            score_result = _load_scores_cached(
-                config.batch_endpoint,
-                config.vehicle_profile_id,
-                segment_ids,
-                config.batch_chunk_size,
-                config.request_timeout_seconds,
-            )
     except ValueError as exc:
         st.error(f"Dashboard configuration or data is invalid: {exc}")
         st.stop()
@@ -214,15 +208,91 @@ def main() -> None:
         st.error(f"Unable to load comfort scores from the Serving API: {exc}")
         st.stop()
 
-    # Snapshot-wide, deliberately not narrowed by the borough or the viewport:
-    # coverage that moved as the map moved would be more confusing than useful.
+    if not boroughs:
+        st.info(
+            "Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing every "
+            "segment in the snapshot instead."
+        )
+
+    selected = _borough_selector(boroughs)
+    borough = None if selected == ALL_BOROUGHS else selected
+    candidate_indices = _candidate_indices(config, road_segments, boroughs, borough)
+
+    # Scores are fetched for the selected borough only. Asking for the whole
+    # snapshot means hundreds of API round trips before anything can be drawn,
+    # and every segment outside the selection is discarded anyway.
+    score_result = None
+    if candidate_indices:
+        try:
+            with st.spinner("Loading comfort scores from the Serving API..."):
+                score_result = _load_scores_cached(
+                    config.batch_endpoint,
+                    config.vehicle_profile_id,
+                    tuple(road_segments[i].segment_id for i in candidate_indices),
+                    config.batch_chunk_size,
+                    config.request_timeout_seconds,
+                )
+        except httpx.HTTPError as exc:
+            st.error(f"Unable to load comfort scores from the Serving API: {exc}")
+            st.stop()
+
+    _render_metrics(score_result, len(candidate_indices), borough, len(road_segments))
+
+    if boroughs and borough is None:
+        st.caption("Click a borough to load its road segments.")
+
+    _render_map(
+        config,
+        road_segments,
+        segment_bounds,
+        score_result,
+        boroughs,
+        borough,
+        candidate_indices,
+    )
+
+
+def _candidate_indices(
+    config: DashboardConfig,
+    road_segments: Sequence[RoadSegment],
+    boroughs: Sequence[Borough],
+    borough: str | None,
+) -> Sequence[int]:
+    if borough is not None:
+        return _borough_segment_indices_cached(
+            config.road_segment_s3_uri,
+            config.zone_master_s3_uri,
+            config.aws_region,
+            borough,
+        )
+    if boroughs:
+        # Outlines only: drawing the whole network is what made the map unusable.
+        return ()
+    return range(len(road_segments))
+
+
+def _render_metrics(
+    score_result: ComfortScoreBatchResult | None,
+    total_count: int,
+    borough: str | None,
+    snapshot_count: int,
+) -> None:
+    """Metrics cover the selection, since only its scores were fetched.
+
+    They stay fixed while the map moves: coverage that changed with every pan
+    would read as the data changing rather than the view.
+    """
+    if score_result is None:
+        st.metric("Road segments in snapshot", f"{snapshot_count:,}")
+        return
+
     scored_count = len(score_result.scores)
-    total_count = len(road_segments)
     missing_count = total_count - scored_count
     coverage = scored_count / total_count * 100 if total_count else 0.0
+    scope = borough if borough is not None else "snapshot"
 
     metric_columns = st.columns(4)
-    metric_columns[0].metric("Road segments", f"{total_count:,}")
+    metric_columns[0].metric(f"Road segments in {scope}", f"{total_count:,}")
     metric_columns[1].metric("Scored", f"{scored_count:,}")
     metric_columns[2].metric("No score", f"{missing_count:,}")
     metric_columns[3].metric("Coverage", f"{coverage:.1f}%")
@@ -234,20 +304,6 @@ def main() -> None:
             f"profile {score_result.requested_vehicle_profile_id}."
         )
 
-    if not boroughs:
-        st.info(
-            "Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing every "
-            "segment in the snapshot instead."
-        )
-        _render_segments(config, road_segments, segment_bounds, score_result, None)
-        return
-
-    selected = _borough_selector(boroughs)
-    if selected == ALL_BOROUGHS:
-        _render_borough_overview(boroughs)
-    else:
-        _render_segments(config, road_segments, segment_bounds, score_result, selected)
-
 
 def _borough_selector(boroughs: Sequence[Borough]) -> str:
     """Dropdown mirroring the clickable outlines.
@@ -255,6 +311,8 @@ def _borough_selector(boroughs: Sequence[Borough]) -> str:
     Kept alongside the map because clicking depends on st_folium reporting the
     click, and a selection that cannot be undone would strand the user.
     """
+    if not boroughs:
+        return ALL_BOROUGHS
     names = [ALL_BOROUGHS, *(borough.name for borough in boroughs)]
     current = st.session_state.get("borough", ALL_BOROUGHS)
     if current not in names:
@@ -285,28 +343,6 @@ def _select_borough(name: str, boroughs: Sequence[Borough]) -> None:
     st.rerun()
 
 
-def _render_borough_overview(boroughs: Sequence[Borough]) -> None:
-    center = st.session_state.get("center", NYC_MAP_CENTER)
-    zoom = st.session_state.get("zoom", NYC_MAP_ZOOM)
-
-    st.caption("Click a borough to load its road segments.")
-    map_state = st_folium(
-        build_borough_map(boroughs, center=center, zoom=zoom),
-        width=None,
-        height=720,
-        center=center,
-        zoom=zoom,
-        # No viewport tracking here: six outlines are cheap to draw in full, so
-        # nothing needs to be filtered by what is on screen.
-        returned_objects=["last_object_clicked_tooltip"],
-        key="borough_map",
-    )
-
-    clicked = _clicked_borough(map_state, boroughs)
-    if clicked is not None:
-        _select_borough(clicked, boroughs)
-
-
 def _clicked_borough(
     map_state: dict | None,
     boroughs: Sequence[Borough],
@@ -314,13 +350,13 @@ def _clicked_borough(
     """Match st_folium's clicked-tooltip text back to a borough.
 
     The payload is the rendered tooltip rather than the feature's properties,
-    so the name is matched inside it. No borough name contains another, so a
-    substring match cannot pick the wrong one.
+    so the name is matched inside it. Segment tooltips are rejected first: a
+    street such as MANHATTAN AVENUE would otherwise read as a borough click.
     """
     if not map_state:
         return None
     tooltip = map_state.get("last_object_clicked_tooltip")
-    if not tooltip:
+    if not tooltip or "segment_id" in tooltip:
         return None
     for borough in boroughs:
         if borough.name in tooltip:
@@ -328,23 +364,22 @@ def _clicked_borough(
     return None
 
 
-def _render_segments(
+def _render_map(
     config: DashboardConfig,
     road_segments: Sequence[RoadSegment],
     segment_bounds: Sequence[SegmentBounds],
-    score_result: ComfortScoreBatchResult,
+    score_result: ComfortScoreBatchResult | None,
+    boroughs: Sequence[Borough],
     borough: str | None,
+    candidate_indices: Sequence[int],
 ) -> None:
-    if borough is None:
-        candidate_indices: Sequence[int] = range(len(road_segments))
-    else:
-        candidate_indices = _borough_segment_indices_cached(
-            config.road_segment_s3_uri,
-            config.zone_master_s3_uri,
-            config.aws_region,
-            borough,
-        )
+    """One map holding both layers.
 
+    The outlines are drawn on every pass, not only before a borough is picked,
+    so zooming out and clicking a different borough stays possible. Segments are
+    added only once a borough narrows them down -- or, with no zone reference at
+    all, for the whole snapshot.
+    """
     # The viewport is only known after the map has rendered once, so the first
     # pass draws nothing and the reported bounds drive every pass after it.
     viewport: Viewport | None = st.session_state.get("viewport")
@@ -369,17 +404,23 @@ def _render_segments(
 
     joined_segments = join_road_segments_with_scores(
         visible_segments,
-        score_result.scores,
+        score_result.scores if score_result is not None else {},
     )
 
     map_state = st_folium(
-        build_map(joined_segments, center=center, zoom=zoom),
+        build_map(
+            joined_segments,
+            center=center,
+            zoom=zoom,
+            boroughs=boroughs,
+            selected_borough=borough,
+        ),
         width=None,
         height=720,
         center=center,
         zoom=zoom,
-        returned_objects=["bounds", "zoom"],
-        key="segment_map",
+        returned_objects=["bounds", "zoom", "last_object_clicked_tooltip"],
+        key="map",
     )
 
     scope = borough if borough is not None else "the snapshot"
@@ -390,6 +431,10 @@ def _render_segments(
         f"Comfort score cache: {SCORE_CACHE_TTL_SECONDS // 60}m · "
         f"Serving API chunk size: {config.batch_chunk_size:,}"
     )
+
+    clicked = _clicked_borough(map_state, boroughs)
+    if clicked is not None and clicked != borough:
+        _select_borough(clicked, boroughs)
 
     _sync_viewport(map_state, viewport, zoom)
 
@@ -404,7 +449,7 @@ def _sync_viewport(
     st_folium reports the viewport only after the map has rendered, so the map
     on screen always lags one pass behind. Rerunning once the reported viewport
     differs from the one just drawn closes that gap; comparing rounded values
-    keeps sub-metre jitter from rerunning forever.
+    keeps small jitter from rerunning forever.
     """
     if not map_state:
         return
