@@ -59,6 +59,13 @@ def build_map(
     zoom: int = NYC_MAP_ZOOM,
 ) -> folium.Map:
     fmap = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+    # GeoJsonTooltip reads its field names off the first feature, so an empty
+    # collection makes it assert that every field is missing. Nothing would be
+    # drawn anyway -- the viewport can legitimately contain no segments, and the
+    # first render always does, since it happens before the viewport is known.
+    if not segments:
+        fmap.get_root().html.add_child(folium.Element(_legend_html()))
+        return fmap
     folium.GeoJson(
         _feature_collection(segments),
         name="NYC road comfort score",
