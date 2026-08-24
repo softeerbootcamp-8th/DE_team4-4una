@@ -322,3 +322,19 @@ def test_success_callback_without_summary_task_still_posts(_fake_slack_hook):
     notifications.on_success_callback(context)
 
     _fake_slack_hook.client.chat_postMessage.assert_called_once()
+
+
+def test_failed_tasks_s3_root_falls_back_to_default_when_variable_is_empty_string(monkeypatch):
+    # infra/compose/airflow.yaml이 AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI를
+    # 항상 선언해서, 호스트 .env에 값이 없으면 docker compose가 컨테이너에 빈
+    # 문자열로 채운다 — EC2 실제 배포에서 이 때문에 Variable.get(key, default=...)이
+    # "존재하는 값"으로 보고 빈 문자열을 그대로 돌려줘 parse_uri("")가 터지는 것을
+    # 발견했다(#409). 빈 문자열도 미설정과 동일하게 기본값으로 대체해야 한다.
+    class _FakeVariable:
+        @staticmethod
+        def get(key, default=None):
+            return "" if key == "OBSERVABILITY_FAILED_TASKS_S3_URI" else default
+
+    monkeypatch.setattr("airflow.sdk.Variable", _FakeVariable)
+
+    assert notifications._failed_tasks_s3_root() == notifications._DEFAULT_FAILED_TASKS_S3_ROOT
