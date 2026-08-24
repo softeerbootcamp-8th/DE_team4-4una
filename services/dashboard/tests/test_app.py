@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import inspect
+
+import streamlit as st
+from dashboard import app as app_module
 from dashboard.app import (
     Viewport,
     _group_indices_by_borough,
     _render_metrics,
+    _resolve_viewport_update,
+    _sync_map_state,
     _visible_segments,
 )
 from dashboard.config import MAX_RENDERED_SEGMENTS
 from dashboard.road_geometry import RoadSegment
+
+# Leaflet의 bounds 페이로드 형태를 그대로 흉내낸다.
+BOUNDS = {
+    "_southWest": {"lat": 40.0, "lng": -74.1},
+    "_northEast": {"lat": 40.1, "lng": -74.0},
+}
 
 # (south, west, north, east) 순서
 VIEWPORT: Viewport = (40.0, -74.1, 40.1, -74.0)
@@ -164,3 +176,75 @@ class TestGroupIndicesByBorough:
         grouped = _group_indices_by_borough([], {})
 
         assert grouped == {}
+
+
+class TestResolveViewportUpdate:
+    def test_missing_bounds_returns_none(self):
+        assert _resolve_viewport_update({"bounds": None}, None, 11) is None
+        assert _resolve_viewport_update(None, None, 11) is None
+        assert _resolve_viewport_update({}, None, 11) is None
+
+    def test_valid_bounds_returns_viewport_center_and_zoom(self):
+        map_state = {"bounds": BOUNDS, "zoom": 13}
+
+        update = _resolve_viewport_update(map_state, None, 11)
+
+        assert update == ((40.0, -74.1, 40.1, -74.0), (40.05, -74.05), 13)
+
+    def test_an_unchanged_viewport_and_zoom_returns_none(self):
+        # 미세한 부동소수점 차이는 _VIEWPORT_PRECISION 반올림으로 흡수돼야 한다.
+        jittered_bounds = {
+            "_southWest": {"lat": 40.0000001, "lng": -74.1000001},
+            "_northEast": {"lat": 40.1000001, "lng": -74.0000001},
+        }
+        current_viewport = (40.0, -74.1, 40.1, -74.0)
+
+        update = _resolve_viewport_update(
+            {"bounds": jittered_bounds, "zoom": 11}, current_viewport, 11
+        )
+
+        assert update is None
+
+    def test_a_zoom_only_change_still_returns_an_update(self):
+        current_viewport = (40.0, -74.1, 40.1, -74.0)
+
+        update = _resolve_viewport_update(
+            {"bounds": BOUNDS, "zoom": 14}, current_viewport, 11
+        )
+
+        assert update is not None
+        assert update[2] == 14
+
+
+class TestSyncMapState:
+    def teardown_method(self):
+        for key in ("map", "viewport", "center", "zoom"):
+            st.session_state.pop(key, None)
+
+    def test_updates_session_state_from_the_map_key(self):
+        st.session_state["map"] = {"bounds": BOUNDS, "zoom": 13}
+
+        _sync_map_state()
+
+        assert st.session_state["viewport"] == (40.0, -74.1, 40.1, -74.0)
+        assert st.session_state["center"] == (40.05, -74.05)
+        assert st.session_state["zoom"] == 13
+
+    def test_does_nothing_when_bounds_are_missing(self):
+        st.session_state["map"] = {"bounds": None}
+
+        _sync_map_state()
+
+        assert "viewport" not in st.session_state
+
+
+class TestMapFragment:
+    def test_render_map_is_wrapped_as_a_streamlit_fragment(self):
+        source = inspect.getsource(app_module)
+        assert "@st.fragment\ndef _render_map(" in source
+
+    def test_the_on_change_callback_never_triggers_a_rerun(self):
+        # 일반 pan/zoom은 fragment의 자동 rerun에 맡긴다 — 여기서 st.rerun()이나
+        # st.rerun(scope="fragment")를 직접 부르면 안 된다.
+        source = inspect.getsource(_sync_map_state)
+        assert "st.rerun(" not in source

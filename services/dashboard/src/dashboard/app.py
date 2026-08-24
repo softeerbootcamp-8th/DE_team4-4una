@@ -359,6 +359,7 @@ def _clicked_borough(
     return None
 
 
+@st.fragment
 def _render_map(
     config: DashboardConfig,
     road_segments: Sequence[RoadSegment],
@@ -431,6 +432,7 @@ def _render_map(
         zoom=zoom,
         returned_objects=["bounds", "zoom", "last_object_clicked_tooltip"],
         key="map",
+        on_change=_sync_map_state,
     )
 
     scope = borough if borough is not None else "the snapshot"
@@ -446,35 +448,63 @@ def _render_map(
     if clicked is not None and clicked != borough:
         _select_borough(clicked, boroughs)
 
-    _sync_viewport(map_state, viewport, zoom)
+    # 최초 부트스트랩 전용(#414 후속) — viewport를 아직 모르면 이번 실행에서 받은
+    # bounds로 딱 한 번만 전체 rerun한다. 이후 pan/zoom은 on_change 콜백이 처리하므로
+    # (Streamlit이 fragment만 다시 실행) 여기 다시 안 걸린다.
+    if viewport is None:
+        update = _resolve_viewport_update(map_state, viewport, zoom)
+        if update is not None:
+            new_viewport, new_center, new_zoom = update
+            st.session_state["viewport"] = new_viewport
+            st.session_state["center"] = new_center
+            st.session_state["zoom"] = new_zoom
+            st.rerun()
 
 
-def _sync_viewport(
-    map_state: dict | None,
-    viewport: Viewport | None,
-    zoom: int,
-) -> None:
-    """Store the viewport the user is actually looking at, then redraw for it.
+def _resolve_viewport_update(
+    map_state: Mapping[str, object] | None,
+    current_viewport: Viewport | None,
+    current_zoom: int,
+) -> tuple[Viewport, tuple[float, float], int] | None:
+    """map_state에서 새 viewport/center/zoom을 뽑는다. 바뀐 게 없으면 None.
 
-    st_folium reports the viewport only after the map has rendered, so the map
-    on screen always lags one pass behind. Rerunning once the reported viewport
-    differs from the one just drawn closes that gap; comparing rounded values
-    keeps small jitter from rerunning forever.
+    bounds가 없거나(레이아웃 전) 기존과 같으면(반올림 기준) None을 돌려줘서
+    미세한 pan 지터로 계속 갱신되는 걸 막는다.
     """
     if not map_state:
-        return
+        return None
     reported = _parse_viewport(map_state.get("bounds"))
     if reported is None:
-        return
-    reported_zoom = map_state.get("zoom") or zoom
-    if _rounded(reported) == _rounded(viewport) and reported_zoom == zoom:
-        return
+        return None
+    reported_zoom = map_state.get("zoom") or current_zoom
+    if _rounded(reported) == _rounded(current_viewport) and reported_zoom == current_zoom:
+        return None
 
     south, west, north, east = reported
-    st.session_state["viewport"] = reported
-    st.session_state["center"] = ((south + north) / 2, (west + east) / 2)
-    st.session_state["zoom"] = reported_zoom
-    st.rerun()
+    center = ((south + north) / 2, (west + east) / 2)
+    return reported, center, reported_zoom
+
+
+def _sync_map_state() -> None:
+    """st_folium의 on_change 콜백 — Session State만 갱신한다(#414 후속).
+
+    fragment 안 위젯 상호작용은 Streamlit이 알아서 fragment만 다시 실행하므로
+    여기서 rerun을 직접 호출하지 않는다. `scope="fragment"`는 이 콜백이 full-app
+    실행의 일부로 처음 도는 상황(예: Borough 변경 직후)에서 부르면
+    `StreamlitAPIException`이 난다 — 그래서 아예 호출하지 않는다.
+    """
+    map_state = st.session_state.get("map")
+    update = _resolve_viewport_update(
+        map_state,
+        st.session_state.get("viewport"),
+        st.session_state.get("zoom", NYC_MAP_ZOOM),
+    )
+    if update is None:
+        return
+    viewport, center, zoom = update
+    st.session_state["viewport"] = viewport
+    st.session_state["center"] = center
+    st.session_state["zoom"] = zoom
 
 
 if __name__ == "__main__":
