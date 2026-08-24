@@ -1,57 +1,40 @@
-"""Join road geometry with scores and render a Folium map."""
+"""Render road geometry and borough outlines with Folium.
+
+점수 -> 색상 규칙과 GeoJSON 변환은 geojson.py에 있다. 여기 남은 것은 Folium
+객체를 만드는 부분뿐이다.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any
 
 import folium
 
 from dashboard.config import NYC_MAP_CENTER, NYC_MAP_ZOOM
-from dashboard.road_geometry import RoadSegment
-from dashboard.serving_api_client import ComfortScore
+from dashboard.geojson import (
+    GRAY,
+    GREEN,
+    RED,
+    YELLOW,
+    ScoredRoadSegment,
+    build_feature_collection,
+    comfort_score_color,
+    join_road_segments_with_scores,
+)
 from dashboard.zone_master import Borough
 
-GREEN = "green"
-YELLOW = "yellow"
-RED = "red"
-GRAY = "gray"
-
-
-@dataclass(frozen=True, slots=True)
-class ScoredRoadSegment:
-    road_segment: RoadSegment
-    score: ComfortScore | None
-
-    @property
-    def color(self) -> str:
-        value = self.score.comfort_score if self.score is not None else None
-        return comfort_score_color(value)
-
-
-def comfort_score_color(score: float | None) -> str:
-    if score is None:
-        return GRAY
-    if score >= 80:
-        return GREEN
-    if score >= 60:
-        return YELLOW
-    return RED
-
-
-def join_road_segments_with_scores(
-    road_segments: Sequence[RoadSegment],
-    scores: Mapping[str, ComfortScore],
-) -> list[ScoredRoadSegment]:
-    """Keep every road segment and attach its score by canonical segment_id."""
-    return [
-        ScoredRoadSegment(
-            road_segment=road_segment,
-            score=scores.get(road_segment.segment_id),
-        )
-        for road_segment in road_segments
-    ]
+__all__ = [
+    "GRAY",
+    "GREEN",
+    "RED",
+    "YELLOW",
+    "ScoredRoadSegment",
+    "build_base_map",
+    "build_segment_feature_group",
+    "comfort_score_color",
+    "join_road_segments_with_scores",
+]
 
 
 def build_base_map(
@@ -92,7 +75,7 @@ def build_segment_feature_group(
     if not segments:
         return group
     folium.GeoJson(
-        _feature_collection(segments),
+        build_feature_collection(segments),
         name="NYC road comfort score",
         style_function=lambda feature: {
             "color": feature["properties"]["color"],
@@ -177,54 +160,6 @@ def _add_borough_layers(
                 "fill": False,
             },
         ).add_to(fmap)
-
-
-# ~11cm at NYC's latitude -- visually identical to full float64 precision but
-# meaningfully shorter once serialized across up to MAX_RENDERED_SEGMENTS
-# features per render (#421).
-_COORDINATE_PRECISION = 6
-
-
-def _rounded_coordinates(coordinates: Any) -> Any:
-    if isinstance(coordinates, (int, float)):
-        return round(coordinates, _COORDINATE_PRECISION)
-    return [_rounded_coordinates(value) for value in coordinates]
-
-
-def _feature_collection(segments: Sequence[ScoredRoadSegment]) -> dict[str, Any]:
-    return {
-        "type": "FeatureCollection",
-        "features": [_feature(segment) for segment in segments],
-    }
-
-
-def _feature(segment: ScoredRoadSegment) -> dict[str, Any]:
-    score = segment.score
-    geometry = segment.road_segment.geometry
-    return {
-        "type": "Feature",
-        "geometry": {
-            "type": geometry["type"],
-            "coordinates": _rounded_coordinates(geometry["coordinates"]),
-        },
-        "properties": {
-            "segment_id": segment.road_segment.segment_id,
-            "street_name": segment.road_segment.street_name or "N/A",
-            "comfort_score": (
-                f"{score.comfort_score:.2f}" if score is not None else "N/A"
-            ),
-            "confidence_score": (
-                f"{score.confidence_score:.2f}" if score is not None else "N/A"
-            ),
-            "source": score.source if score is not None else "N/A",
-            "weather_time": (
-                score.weather_time
-                if score is not None and score.weather_time is not None
-                else "N/A"
-            ),
-            "color": segment.color,
-        },
-    }
 
 
 def _legend_html() -> str:
