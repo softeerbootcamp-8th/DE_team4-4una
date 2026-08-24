@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from botocore.exceptions import ClientError
+from de4_core import ObjectStore, join_uri
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jobs import current_score, current_score_quarantine
 from jobs.current_score import (
+    DEFAULT_ROAD_SEGMENT_URI,
     CurrentScoreJobConfig,
     find_changed_zones,
     load_segment_zones,
@@ -62,6 +67,65 @@ def write_road_segment(tmp_path: Path, rows: list[tuple[str, date, int | None]])
     )
     pq.write_table(table, path)
     return path
+
+
+def write_road_segment_partition(
+    root: Path, snapshot_date: date, rows: list[tuple[str, date, int | None]]
+) -> Path:
+    """root/road_segment/snapshot_date=<date>/ 아래 단일 Parquet에 쓰고 road_segment 루트를 반환한다.
+
+    load_segment_zones()는 이제 road_segment_uri(루트)와 snapshot_date로 정확히 이
+    파티션 경로를 조합해 조회하므로, 픽스처도 실제 레이아웃과 같은 모양으로 둔다.
+    """
+    partition = root / "road_segment" / f"snapshot_date={snapshot_date.isoformat()}"
+    partition.mkdir(parents=True, exist_ok=True)
+    write_road_segment(partition, rows)
+    return root / "road_segment"
+
+
+def _write_parquet_object(store: ObjectStore, uri: str, rows: list[tuple[str, date, int | None]]) -> None:
+    table = pa.table(
+        {
+            "segment_id": pa.array([row[0] for row in rows], pa.string()),
+            "snapshot_date": pa.array([row[1] for row in rows], pa.date32()),
+            "location_id": pa.array([row[2] for row in rows], pa.int32()),
+        }
+    )
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer)
+    store.write_bytes(uri, buffer.getvalue())
+
+
+class FakeS3Client:
+    """put_object/get_object/list_objects_v2만 갖춘 최소 in-memory S3."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, **kwargs: object) -> None:
+        self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        if key not in self.objects:
+            raise ClientError(
+                {
+                    "Error": {"Code": "NoSuchKey", "Message": "not found"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "GetObject",
+            )
+        return {"Body": io.BytesIO(self.objects[key])}
+
+    def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+        bucket = str(kwargs["Bucket"])
+        prefix = str(kwargs["Prefix"])
+        contents = [
+            {"Key": key, "LastModified": datetime(2026, 8, 20, tzinfo=UTC), "Size": len(body)}
+            for (obj_bucket, key), body in self.objects.items()
+            if obj_bucket == bucket and key.startswith(prefix)
+        ]
+        return {"Contents": contents, "IsTruncated": False}
 
 
 class FakeCursor:
@@ -133,7 +197,7 @@ class FakeConnection:
 
 def config_for(path: Path) -> CurrentScoreJobConfig:
     return CurrentScoreJobConfig(
-        road_segment_path=path,
+        road_segment_uri=str(path),
         road_snapshot_date=SNAPSHOT_DATE,
         postgres_host="localhost",
         postgres_port=5432,
@@ -149,13 +213,13 @@ def upserted_row(connection) -> dict:
 
 class TestLoadSegmentZones:
     def test_maps_segment_to_zone(self, tmp_path):
-        path = write_road_segment(tmp_path, [("1", SNAPSHOT_DATE, 76), ("2", SNAPSHOT_DATE, 12)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("1", SNAPSHOT_DATE, 76), ("2", SNAPSHOT_DATE, 12)])
 
         assert load_segment_zones(path, SNAPSHOT_DATE) == {"1": 76, "2": 12}
 
     def test_drops_segments_without_a_zone(self, tmp_path):
         # location_id는 nullable인데 current 테이블에서는 NOT NULL이라 행을 만들 수 없다.
-        path = write_road_segment(tmp_path, [("1", SNAPSHOT_DATE, None), ("2", SNAPSHOT_DATE, 12)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("1", SNAPSHOT_DATE, None), ("2", SNAPSHOT_DATE, 12)])
 
         assert load_segment_zones(path, SNAPSHOT_DATE) == {"2": 12}
 
@@ -169,10 +233,80 @@ class TestLoadSegmentZones:
         assert load_segment_zones(tmp_path / "road_segment", SNAPSHOT_DATE) == {"1": 76}
 
     def test_rejects_another_snapshot(self, tmp_path):
-        path = write_road_segment(tmp_path, [("1", date(2024, 1, 1), 76)])
+        # 파티션 폴더 이름(snapshot_date=2024-02-01)은 맞는데 파일 내부 컬럼 값이
+        # 다른 경우 — 잘못 배치된 데이터를 잡아내는 방어적 검증이다.
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("1", date(2024, 1, 1), 76)])
 
         with pytest.raises(ValueError, match="expected snapshot_date"):
             load_segment_zones(path, SNAPSHOT_DATE)
+
+    def test_raises_when_the_snapshot_partition_is_missing(self, tmp_path):
+        (tmp_path / "road_segment").mkdir()
+
+        with pytest.raises(ValueError, match="no parquet files found"):
+            load_segment_zones(tmp_path / "road_segment", SNAPSHOT_DATE)
+
+    def test_reads_a_snapshot_partition_from_s3(self):
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+        root = "s3://de4-reference/normalized/road_segment"
+        _write_parquet_object(
+            store,
+            join_uri(root, f"snapshot_date={SNAPSHOT_DATE}", "part-0.parquet"),
+            [("1", SNAPSHOT_DATE, 76), ("2", SNAPSHOT_DATE, 12)],
+        )
+
+        assert load_segment_zones(root, SNAPSHOT_DATE, store=store) == {"1": 76, "2": 12}
+
+    def test_only_reads_the_requested_snapshot_partition_on_s3(self):
+        # 같은 root 아래 다른 날짜의 partition도 있지만, 요청한 snapshot_date만 읽는다 —
+        # S3에서 root 전체를 스캔하면 비용도 크고 다른 날짜 데이터가 섞일 수 있다.
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+        root = "s3://de4-reference/normalized/road_segment"
+        _write_parquet_object(
+            store,
+            join_uri(root, f"snapshot_date={SNAPSHOT_DATE}", "part-0.parquet"),
+            [("1", SNAPSHOT_DATE, 76)],
+        )
+        _write_parquet_object(
+            store,
+            join_uri(root, "snapshot_date=2024-01-01", "part-0.parquet"),
+            [("2", date(2024, 1, 1), 12)],
+        )
+
+        assert load_segment_zones(root, SNAPSHOT_DATE, store=store) == {"1": 76}
+
+    def test_raises_when_the_s3_snapshot_partition_is_missing(self):
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+        root = "s3://de4-reference/normalized/road_segment"
+
+        with pytest.raises(ValueError, match="no parquet files found"):
+            load_segment_zones(root, SNAPSHOT_DATE, store=store)
+
+
+class TestCurrentScoreJobConfigFromEnv:
+    BASE_ENV: ClassVar[dict[str, str]] = {
+        "CURRENT_SCORE_ROAD_SNAPSHOT_DATE": "2024-02-01",
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": "de4",
+        "POSTGRES_USER": "de4",
+        "POSTGRES_PASSWORD": "de4",
+    }
+
+    def test_falls_back_to_the_local_default_uri(self):
+        config = CurrentScoreJobConfig.from_env(self.BASE_ENV)
+
+        assert config.road_segment_uri == DEFAULT_ROAD_SEGMENT_URI
+
+    def test_reads_an_s3_uri_from_the_environment(self):
+        config = CurrentScoreJobConfig.from_env(
+            {
+                **self.BASE_ENV,
+                "CURRENT_SCORE_ROAD_SEGMENT_URI": "s3://de4-reference/normalized/road_segment",
+            }
+        )
+
+        assert config.road_segment_uri == "s3://de4-reference/normalized/road_segment"
 
 
 class TestFindChangedZones:
@@ -187,7 +321,7 @@ class TestFindChangedZones:
 
 class TestRunCurrentScoreJob:
     def test_applies_the_zone_weather_to_the_standard_scores(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = FakeConnection(
             weather_rows=[(76, WEATHER_TIME, ICE_SIGNATURE)],
             standard_rows=[STANDARD_ROW],
@@ -211,7 +345,7 @@ class TestRunCurrentScoreJob:
         assert connection.committed
 
     def test_copies_standard_provenance_unchanged(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = FakeConnection(
             weather_rows=[(76, WEATHER_TIME, CLEAR_SIGNATURE)],
             standard_rows=[STANDARD_ROW],
@@ -227,7 +361,7 @@ class TestRunCurrentScoreJob:
         assert row["standard_score_version"] == "1.0.0"
 
     def test_zone_without_weather_is_written_unadjusted(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = FakeConnection(weather_rows=[], standard_rows=[STANDARD_ROW])
 
         run_current_score_job(
@@ -246,7 +380,7 @@ class TestRunCurrentScoreJob:
         assert row["weather_impact_signature"] is None
 
     def test_skips_a_segment_without_a_zone(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, None)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, None)])
         connection = FakeConnection(standard_rows=[STANDARD_ROW])
 
         summary = run_current_score_job(
@@ -257,7 +391,7 @@ class TestRunCurrentScoreJob:
         assert connection.upserted == []
 
     def test_changed_zones_only_stops_when_nothing_changed(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = FakeConnection(
             weather_rows=[(76, WEATHER_TIME, CLEAR_SIGNATURE)],
             standard_rows=[STANDARD_ROW],
@@ -272,8 +406,8 @@ class TestRunCurrentScoreJob:
         assert connection.upserted == []
 
     def test_changed_zones_only_narrows_the_standard_query(self, tmp_path):
-        path = write_road_segment(
-            tmp_path, [("12345", SNAPSHOT_DATE, 76), ("99999", SNAPSHOT_DATE, 12)]
+        path = write_road_segment_partition(
+            tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76), ("99999", SNAPSHOT_DATE, 12)]
         )
         connection = FakeConnection(
             weather_rows=[(76, WEATHER_TIME, ICE_SIGNATURE)],
@@ -297,7 +431,7 @@ class TestRunCurrentScoreJob:
         assert parameters == (["12345"],)
 
     def test_takes_the_advisory_lock_before_writing(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = FakeConnection(
             weather_rows=[(76, WEATHER_TIME, CLEAR_SIGNATURE)], standard_rows=[STANDARD_ROW]
         )
@@ -319,8 +453,9 @@ class TestRunCurrentScoreJob:
         # 변경, 직접 데이터 수정 등) 뚫렸다고 가정한 방어적 시나리오를 검증한다.
         # 격리율 25% 서킷브레이커 임계값(DEFAULT_MAX_QUARANTINE_RATE) 아래로 유지하려면
         # 정상 행이 3건 이상 필요하다 (1개 격리 / 4개 전체 = 25%는 초과가 아니라 통과).
-        path = write_road_segment(
+        path = write_road_segment_partition(
             tmp_path,
+            SNAPSHOT_DATE,
             [
                 ("11111", SNAPSHOT_DATE, 76),
                 ("22222", SNAPSHOT_DATE, 76),
@@ -347,7 +482,7 @@ class TestRunCurrentScoreJob:
         assert connection.committed
 
     def test_circuit_breaker_trips_when_all_rows_are_quarantined(self, tmp_path):
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         bad_row = ("12345", 1, SCORE_AS_OF, None, 80.0, 70.0, 60.0, 900, 1.5, "1.0.0")
         connection = FakeConnection(weather_rows=[], standard_rows=[bad_row])
 
@@ -367,7 +502,7 @@ class TestCurrentScoreJobIntegration:
     def test_rerunning_updates_the_same_row(self, tmp_path):
         import psycopg2
 
-        path = write_road_segment(tmp_path, [("12345", SNAPSHOT_DATE, 76)])
+        path = write_road_segment_partition(tmp_path, SNAPSHOT_DATE, [("12345", SNAPSHOT_DATE, 76)])
         connection = psycopg2.connect(
             host=os.environ["POSTGRES_HOST"],
             port=int(os.environ["POSTGRES_PORT"]),
