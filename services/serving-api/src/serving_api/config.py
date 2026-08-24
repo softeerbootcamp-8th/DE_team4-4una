@@ -16,10 +16,11 @@ DEFAULT_METRICS_PORT = 9101
 DEFAULT_POOL_MIN_SIZE = 1
 DEFAULT_POOL_MAX_SIZE = 8
 
-# 다건 조회 한 번에 담을 수 있는 (segment_id, vehicle_profile_id) 조합 수 상한.
-# 경로 하나가 세그먼트 수백 개로 이뤄질 수 있어 300으로 둔다. 상한이 없으면
-# 요청 하나가 커넥션을 오래 점유해 다른 요청까지 대기시킨다.
-MAX_BATCH_ITEMS = 300
+# comfort-scores/batch 상한(#414) — Dashboard의 viewport 하나 분량을 담을 수 있게 크게 잡는다.
+MAX_COMFORT_SCORE_BATCH_ITEMS = 1000
+
+# 경로 평가 상한. comfort-scores/batch와 분리했고(#414) 값은 기존 그대로다.
+MAX_ROUTE_SEGMENTS = 300
 
 # 한 번에 비교할 후보 경로 수 상한. 내비게이션이 제시하는 후보는 보통 서너 개다.
 MAX_ROUTES_PER_REQUEST = 10

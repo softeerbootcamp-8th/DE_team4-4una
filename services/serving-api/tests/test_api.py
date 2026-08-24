@@ -15,7 +15,11 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from serving_api.app import create_app
-from serving_api.config import MAX_BATCH_ITEMS, ServingApiConfig
+from serving_api.config import (
+    MAX_COMFORT_SCORE_BATCH_ITEMS,
+    MAX_ROUTE_SEGMENTS,
+    ServingApiConfig,
+)
 from serving_api.repository import (
     ACTIVE_VEHICLE_PROFILE_SQL,
     CURRENT_TABLE,
@@ -248,7 +252,10 @@ def test_batch_lookup_returns_a_repeated_segment_once() -> None:
     "segment_ids",
     [
         pytest.param([], id="empty"),
-        pytest.param([f"{index:07d}" for index in range(MAX_BATCH_ITEMS + 1)], id="too-many"),
+        pytest.param(
+            [f"{index:07d}" for index in range(MAX_COMFORT_SCORE_BATCH_ITEMS + 1)],
+            id="too-many",
+        ),
     ],
 )
 def test_batch_lookup_rejects_an_out_of_range_segment_count(segment_ids: list[str]) -> None:
@@ -523,7 +530,9 @@ def test_every_endpoint_reports_the_fallback_the_same_way(endpoint_call) -> None
             [
                 {
                     "route_id": "route_a",
-                    "segment_ids": [f"{index:07d}" for index in range(MAX_BATCH_ITEMS + 1)],
+                    "segment_ids": [
+                        f"{index:07d}" for index in range(MAX_ROUTE_SEGMENTS + 1)
+                    ],
                 }
             ],
             id="too-many-segments",
