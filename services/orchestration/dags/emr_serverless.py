@@ -102,6 +102,7 @@ def submit_batch_jobs_command(
         f"--conf spark.pyspark.driver.python={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.driver.cores={_SPARK_DRIVER_CORES}",
         f"--conf spark.driver.memory={_SPARK_DRIVER_MEMORY}",
+        f"--conf spark.driver.memoryOverhead={_SPARK_DRIVER_MEMORY_OVERHEAD}",
         f"--conf spark.executor.cores={_SPARK_EXECUTOR_CORES}",
         f"--conf spark.executor.memory={_SPARK_EXECUTOR_MEMORY}",
         f"--conf spark.executor.memoryOverhead={_SPARK_EXECUTOR_MEMORY_OVERHEAD}",
