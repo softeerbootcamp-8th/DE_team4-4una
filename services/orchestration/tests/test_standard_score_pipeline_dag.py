@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pendulum
 from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.timetables.base import TimeRestriction
 from airflow.timetables.interval import CronDataIntervalTimetable
 
@@ -91,11 +92,16 @@ def test_dag_preserves_retry_policy():
         assert task.retry_delay == datetime.timedelta(minutes=5)
 
 
-def test_all_tasks_submit_to_emr_serverless_with_the_shared_variables():
+def test_all_emr_tasks_submit_with_the_shared_variables():
     module = _load_dag_module()
 
-    for task in module.dag.tasks:
-        assert isinstance(task, EmrServerlessStartJobOperator)
+    # resolve_road_snapshot_date(#402)는 EMR Serverless가 아니라 이 컨테이너 안에서
+    # 도는 PythonOperator라 아래 검증 대상에서 제외한다.
+    emr_tasks = [
+        task for task in module.dag.tasks if isinstance(task, EmrServerlessStartJobOperator)
+    ]
+    assert emr_tasks
+    for task in emr_tasks:
         assert task.application_id == "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
         assert (
             task.execution_role_arn
@@ -111,8 +117,18 @@ def test_sensor_processing_task_group_contains_the_combined_job_and_its_validati
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
+    assert "sensor_processing.resolve_road_snapshot_date" in task_ids
     assert "sensor_processing.run_sensor_processing" in task_ids
     assert "sensor_processing.validate_sensor_processing" in task_ids
+
+
+def test_resolve_road_snapshot_date_is_a_python_operator_not_an_emr_job():
+    """road_environment_uri의 active pointer/manifest를 읽는 건 이 컨테이너에서
+    바로 Python으로 처리하지, EMR Serverless Job Run을 거치지 않는다(#402)."""
+    module = _load_dag_module()
+
+    task = module.dag.get_task("sensor_processing.resolve_road_snapshot_date")
+    assert isinstance(task, PythonOperator)
 
 
 def test_hourly_scoring_task_group_contains_the_scoring_job_and_its_validation():
@@ -133,7 +149,10 @@ def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     assert "--target-hour" in args
     assert "{{ data_interval_start.isoformat() }}" in args
     assert "--road-snapshot-date" in args
-    assert "{{ var.value.HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE }}" in args
+    assert (
+        "{{ ti.xcom_pull(task_ids='sensor_processing.resolve_road_snapshot_date') }}"
+        in args
+    )
     assert "--feature-version" in args
     assert "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}" in args
     assert "--bronze-input-path" in args
@@ -197,6 +216,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
+        "sensor_processing.resolve_road_snapshot_date",
         "sensor_processing.run_sensor_processing",
         "sensor_processing.validate_sensor_processing",
         "hourly_scoring.run_hourly_scoring",
@@ -216,6 +236,9 @@ def test_current_score_task_group_is_removed():
 def test_task_groups_follow_standard_score_pipeline_order():
     module = _load_dag_module()
 
+    resolve_road_snapshot_date = module.dag.get_task(
+        "sensor_processing.resolve_road_snapshot_date"
+    )
     run_sensor_processing = module.dag.get_task(
         "sensor_processing.run_sensor_processing"
     )
@@ -226,6 +249,13 @@ def test_task_groups_follow_standard_score_pipeline_order():
     validate_hourly_scoring = module.dag.get_task("hourly_scoring.validate_hourly_scoring")
     run_standard_score = module.dag.get_task("standard_score.run_standard_score")
 
+    assert resolve_road_snapshot_date.upstream_task_ids == set()
+    assert resolve_road_snapshot_date.downstream_task_ids == {
+        "sensor_processing.run_sensor_processing"
+    }
+    assert run_sensor_processing.upstream_task_ids == {
+        "sensor_processing.resolve_road_snapshot_date"
+    }
     assert run_sensor_processing.downstream_task_ids == {
         "sensor_processing.validate_sensor_processing"
     }

@@ -121,6 +121,11 @@ services:
       BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI: ${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot
       # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다.
       CURRENT_SCORE_ROAD_SEGMENT_PATH: ${AIRFLOW_HOME}/data/processed/road_segment
+      # road_snapshot_date는 road_environment_uri(#389)의 active pointer/manifest에서
+      # 직접 읽는다(#402) — REFERENCE_DATA_LAKE_URI와 같은 값(위 x-airflow-env에
+      # AIRFLOW_VAR_REFERENCE_DATA_LAKE_URI로 이미 배선됨)을 그대로 재사용한다.
+      # 비어 있으면(로컬 개발 등) 아래 CURRENT_SCORE_ROAD_SNAPSHOT_DATE로 폴백한다.
+      CURRENT_SCORE_ROAD_ENVIRONMENT_URI: ${AIRFLOW_VAR_REFERENCE_DATA_LAKE_URI}
       CURRENT_SCORE_ROAD_SNAPSHOT_DATE: ${HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE}
       # 공식 이미지에 없는 최소 의존성을 로컬 개발용으로만 설치한다(운영에는 부적합 —
       # 매 기동마다 pip install이 돌아 느리다). 이미지를 다시 빌드하게 되면 제거한다.
