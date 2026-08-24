@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol
 
+import orjson
 from de4_core import SensorEvent
 
 
@@ -41,24 +42,52 @@ class JsonlPublisher:
 
 
 class KafkaPublisher:
-    def __init__(self, bootstrap_servers: Iterable[str], topic: str):
-        from kafka import KafkaProducer
+    def __init__(
+        self,
+        bootstrap_servers: Iterable[str],
+        topic: str,
+    ):
+        from confluent_kafka import Producer
 
         self.topic = topic
-        self._producer = KafkaProducer(
-            bootstrap_servers=list(bootstrap_servers),
-            acks="all",
-            retries=10,
-            max_in_flight_requests_per_connection=1,
+        self._delivery_errors: list[str] = []
+        self._producer = Producer(
+            {
+                "bootstrap.servers": ",".join(bootstrap_servers),
+                "acks": "all",
+                "enable.idempotence": True,
+                "linger.ms": 20,
+                "batch.size": 131_072,
+                "compression.type": "lz4",
+                "queue.buffering.max.messages": 1_000_000,
+            }
         )
 
     def publish(self, event: SensorEvent) -> None:
-        self._producer.send(
-            self.topic,
-            key=event.message_key,
-            value=event.to_json(),
-        )
+        self._raise_delivery_error()
+        while True:
+            try:
+                self._producer.produce(
+                    self.topic,
+                    key=event.message_key,
+                    value=orjson.dumps(event.to_dict(), option=orjson.OPT_SORT_KEYS),
+                    on_delivery=self._on_delivery,
+                )
+                return
+            except BufferError:
+                # 내부 큐가 찼을 때 메시지를 버리지 않고 delivery callback을 비운다
+                self._producer.poll(0.05)
 
     def flush(self) -> None:
-        self._producer.flush()
-        self._producer.close()
+        remaining = self._producer.flush(30)
+        self._raise_delivery_error()
+        if remaining:
+            raise RuntimeError(f"Kafka flush timed out with {remaining} messages")
+
+    def _on_delivery(self, error: object | None, _message: object) -> None:
+        if error is not None:
+            self._delivery_errors.append(str(error))
+
+    def _raise_delivery_error(self) -> None:
+        if self._delivery_errors:
+            raise RuntimeError(f"Kafka delivery failed: {self._delivery_errors[0]}")

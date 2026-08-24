@@ -13,6 +13,7 @@ from pathlib import Path
 from sensor_producer.domain import (
     VEHICLE_MIXES,
     VEHICLE_PROFILES,
+    PreparedTrip,
     SimulationConfig,
     TripRecord,
 )
@@ -23,9 +24,22 @@ from sensor_producer.nyc_data import (
     fetch_nyc_sample,
     iter_hvfhv_parquet_trips,
 )
+from sensor_producer.parallel_replay import ParallelReplaySpec, run_parallel_replay
+from sensor_producer.prepared_replay import (
+    PREPARED_REPLAY_VERSION,
+    iter_prepared_replay,
+    prepare_replay_bundle,
+    read_replay_bounds,
+)
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
-from sensor_producer.simulation import TIMESTAMP_POLICY, ReplayCoordinator, ReplayResult
+from sensor_producer.simulation import (
+    TIMESTAMP_POLICY,
+    ReplayClock,
+    ReplayCoordinator,
+    ReplayResult,
+    ReplayTimeline,
+)
 
 
 def ratio(value: str) -> float:
@@ -56,7 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--hvfhv-url", default=DEFAULT_HVFHV_URL)
 
     run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--trips-path", type=local_parquet, required=True)
+    trip_input = run_parser.add_mutually_exclusive_group(required=True)
+    trip_input.add_argument("--trips-path", type=local_parquet)
+    trip_input.add_argument("--prepared-replay-dir", type=Path)
     run_parser.add_argument(
         "--road-environment-path",
         type=local_parquet,
@@ -72,16 +88,40 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--summary-output", type=Path)
     run_parser.add_argument("--publisher", choices=("kafka", "jsonl"), default="kafka")
     run_parser.add_argument("--output", type=Path)
-    run_parser.add_argument("--bootstrap-servers", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
-    run_parser.add_argument("--topic", default=os.getenv("KAFKA_SENSOR_TOPIC", "sensor-events"))
+    run_parser.add_argument(
+        "--bootstrap-servers",
+        default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+    )
+    run_parser.add_argument(
+        "--topic", default=os.getenv("KAFKA_SENSOR_TOPIC", "sensor-events")
+    )
     run_parser.add_argument("--run-id", default="nyc-smoke-v1")
     run_parser.add_argument("--sample-hz", type=int, default=10)
     run_parser.add_argument("--time-scale", type=float, default=1.0)
+    run_parser.add_argument(
+        "--max-replay-lag-seconds",
+        type=float,
+        default=5.0,
+        help="실제 시간축보다 허용값 이상 늦어지면 실행을 중단한다",
+    )
+    run_parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.getenv("SENSOR_PRODUCER_WORKERS", "1")),
+    )
     # 배정 모드는 배타적이다. 아무것도 주지 않으면 기존과 같이 프로필 1로 고정한다.
     assignment = run_parser.add_mutually_exclusive_group()
     assignment.add_argument("--vehicle-profile-id", type=int)
     assignment.add_argument("--vehicle-mix", choices=sorted(VEHICLE_MIXES))
     run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
+
+    prepare_parser = subparsers.add_parser("prepare-replay")
+    prepare_parser.add_argument("--trips-path", type=local_parquet, required=True)
+    prepare_parser.add_argument(
+        "--road-environment-path", type=local_parquet, required=True
+    )
+    prepare_parser.add_argument("--taxi-zone-path", type=local_parquet, required=True)
+    prepare_parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -99,9 +139,26 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return
 
+    if arguments.command == "prepare-replay":
+        environment, _, _ = resolve_environment(arguments)
+        manifest = prepare_replay_bundle(
+            arguments.trips_path,
+            RoadRouter(environment.segments),
+            environment.taxi_zones,
+            arguments.output_dir,
+            environment.road_segment_snapshot_date,
+            road_environment_path=arguments.road_environment_path,
+            taxi_zone_path=arguments.taxi_zone_path,
+        )
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        return
+
     execution_started_at = datetime.now(UTC)
+    if arguments.workers <= 0 or arguments.max_replay_lag_seconds < 0:
+        raise ValueError("workers must be positive and replay lag must be non-negative")
     environment, sources, environment_summary = resolve_environment(arguments)
-    trips, trip_source_summary = resolve_trips(arguments)
+    router = RoadRouter(environment.segments)
+    trips, trip_source_summary = resolve_trips(arguments, router, environment)
     use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,
@@ -110,18 +167,61 @@ def main(argv: list[str] | None = None) -> None:
         vehicle_profile_id=None if use_mix else (arguments.vehicle_profile_id or 1),
         vehicle_mix=arguments.vehicle_mix,
     )
-    if arguments.publisher == "kafka":
-        publisher = KafkaPublisher(arguments.bootstrap_servers.split(","), arguments.topic)
+    wall_anchor: datetime | None = None
+    if arguments.workers > 1:
+        if arguments.prepared_replay_dir is None:
+            raise ValueError("parallel replay requires --prepared-replay-dir")
+        if arguments.publisher != "kafka":
+            raise ValueError("parallel replay requires --publisher kafka")
+        bounds = read_replay_bounds(arguments.prepared_replay_dir)
+        result, wall_anchor = run_parallel_replay(
+            ParallelReplaySpec(
+                bundle_dir=arguments.prepared_replay_dir,
+                road_environment_path=arguments.road_environment_path,
+                taxi_zone_path=arguments.taxi_zone_path,
+                road_snapshot_date=environment.road_segment_snapshot_date,
+                source_anchor=bounds.first_request_datetime,
+                simulation=config,
+                worker_count=arguments.workers,
+                bootstrap_servers=tuple(arguments.bootstrap_servers.split(",")),
+                topic=arguments.topic,
+                max_replay_lag_seconds=arguments.max_replay_lag_seconds,
+            )
+        )
     else:
-        output = arguments.output or Path("sensor_events.jsonl")
-        publisher = JsonlPublisher(output)
-    coordinator = ReplayCoordinator(
-        RoadRouter(environment.segments),
-        environment.taxi_zones,
-        publisher,
-        config,
-    )
-    result = coordinator.replay(trips)
+        if arguments.publisher == "kafka":
+            publisher = KafkaPublisher(
+                arguments.bootstrap_servers.split(","), arguments.topic
+            )
+        else:
+            output = arguments.output or Path("sensor_events.jsonl")
+            publisher = JsonlPublisher(output)
+        timeline: ReplayTimeline | None = None
+        clock: ReplayClock | None = None
+        if arguments.prepared_replay_dir is not None:
+            bounds = read_replay_bounds(arguments.prepared_replay_dir)
+            wall_anchor = datetime.now(UTC)
+            timeline = ReplayTimeline(bounds.first_request_datetime, wall_anchor)
+            clock = ReplayClock(
+                config.time_scale,
+                source_anchor=bounds.first_request_datetime,
+                wall_anchor=wall_anchor,
+                max_lag_seconds=arguments.max_replay_lag_seconds,
+            )
+        elif config.time_scale != 0:
+            clock = ReplayClock(
+                config.time_scale,
+                max_lag_seconds=arguments.max_replay_lag_seconds,
+            )
+        coordinator = ReplayCoordinator(
+            router,
+            environment.taxi_zones,
+            publisher,
+            config,
+            clock=clock,
+            timeline=timeline,
+        )
+        result = coordinator.replay(trips)
     summary = {
         "run_id": config.run_id,
         "execution_started_at": execution_started_at.isoformat(),
@@ -131,6 +231,13 @@ def main(argv: list[str] | None = None) -> None:
         "topic": arguments.topic if arguments.publisher == "kafka" else None,
         "sample_hz": config.sample_hz,
         "time_scale": config.time_scale,
+        "worker_count": arguments.workers,
+        "source_timeline_anchor": (
+            bounds.first_request_datetime.isoformat()
+            if arguments.prepared_replay_dir is not None
+            else None
+        ),
+        "wall_timeline_anchor": wall_anchor.isoformat() if wall_anchor else None,
         "vehicle_assignment": vehicle_assignment(config, result),
         "max_trip_skip_ratio": arguments.max_trip_skip_ratio,
         "trips_attempted": result.trips_attempted,
@@ -139,6 +246,9 @@ def main(argv: list[str] | None = None) -> None:
         "trip_skip_ratio": result.trip_skip_ratio,
         "trip_skip_reasons": result.skip_reason_counts,
         "events_published": result.events_published,
+        "final_replay_lag_seconds": result.final_replay_lag_seconds,
+        "max_replay_lag_seconds": result.max_replay_lag_seconds,
+        "replay_lag_limit_seconds": arguments.max_replay_lag_seconds,
         "unique_segments": result.unique_segments,
         "rated_samples": result.rated_samples,
         "hump_samples": result.hump_samples,
@@ -155,7 +265,26 @@ def main(argv: list[str] | None = None) -> None:
 
 def resolve_trips(
     arguments: argparse.Namespace,
-) -> tuple[Iterable[TripRecord], dict[str, object]]:
+    router: RoadRouter | None = None,
+    environment: RoadEnvironment | None = None,
+) -> tuple[Iterable[TripRecord | PreparedTrip], dict[str, object]]:
+    if arguments.prepared_replay_dir is not None:
+        if router is None or environment is None:
+            raise ValueError("prepared replay requires the runtime road environment")
+        return (
+            iter_prepared_replay(
+                arguments.prepared_replay_dir,
+                router,
+                environment.road_segment_snapshot_date,
+            ),
+            {
+                "format": "prepared_od_replay",
+                "path": str(arguments.prepared_replay_dir),
+                "reader_version": PREPARED_REPLAY_VERSION,
+                "selection": "all_prepared_rows",
+            },
+        )
+    assert arguments.trips_path is not None
     return (
         iter_hvfhv_parquet_trips(
             arguments.trips_path,
