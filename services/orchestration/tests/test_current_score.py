@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import UTC, date, datetime
@@ -173,6 +174,118 @@ class TestLoadSegmentZones:
 
         with pytest.raises(ValueError, match="expected snapshot_date"):
             load_segment_zones(path, SNAPSHOT_DATE)
+
+
+def _base_env(**overrides) -> dict:
+    return {
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": "de4",
+        "POSTGRES_USER": "de4",
+        "POSTGRES_PASSWORD": "de4",
+        **overrides,
+    }
+
+
+def _write_active_environment(tmp_path: Path, road_snapshot_date: date) -> str:
+    """test_road_environment.py의 fixture와 같은 pointer/manifest 구조를 만든다 —
+    road_environment_uri(#389) 체인이 실제로 이 config까지 배선됐는지 검증하려면
+    resolve_active_road_snapshot_date()가 읽는 것과 같은 모양이어야 한다."""
+    from de4_core import DataArtifact, RoadEnvironmentManifest, SourceSnapshot
+
+    checksum = "a" * 64
+    manifest = RoadEnvironmentManifest(
+        schema_version="1",
+        environment_id="nyc-20260801-build-1",
+        reference_date=date(2026, 8, 1),
+        road_snapshot_date=road_snapshot_date,
+        build_id="build-1",
+        created_at=datetime(2026, 8, 2, tzinfo=UTC),
+        mapping_version="mapping-v1",
+        status="READY",
+        artifacts=(
+            DataArtifact(
+                "simulation_road_environment",
+                "s3://bucket/environment.parquet",
+                "application/vnd.apache.parquet",
+                checksum,
+                10,
+                1,
+            ),
+            DataArtifact(
+                "taxi_zone",
+                "s3://bucket/taxi.parquet",
+                "application/vnd.apache.parquet",
+                checksum,
+                10,
+                1,
+            ),
+        ),
+        sources=(
+            SourceSnapshot(
+                "nyc_lion",
+                "snapshot-1",
+                "https://example.test/lion",
+                "s3://bucket/lion.geojson",
+                datetime(2026, 8, 2, tzinfo=UTC),
+                "2026-08-01",
+                "geojson",
+                checksum,
+                checksum,
+                10,
+                1,
+                "build-1",
+            ),
+        ),
+        quality={"status": "PASSED"},
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(manifest.to_json())
+
+    pointer_dir = tmp_path / "prepared" / "simulation_environment"
+    pointer_dir.mkdir(parents=True)
+    (pointer_dir / "active.json").write_text(
+        json.dumps({"manifest_uri": manifest_path.resolve().as_uri()})
+    )
+    return str(tmp_path)
+
+
+class TestCurrentScoreJobConfigFromEnv:
+    def test_falls_back_to_the_hardcoded_snapshot_date_when_no_road_environment_uri(self):
+        config = CurrentScoreJobConfig.from_env(
+            _base_env(CURRENT_SCORE_ROAD_SNAPSHOT_DATE="2026-08-20")
+        )
+
+        assert config.road_snapshot_date == date(2026, 8, 20)
+
+    def test_resolves_the_snapshot_date_from_the_active_road_environment_pointer(
+        self, tmp_path
+    ):
+        road_environment_uri = _write_active_environment(tmp_path, date(2026, 8, 21))
+
+        config = CurrentScoreJobConfig.from_env(
+            _base_env(CURRENT_SCORE_ROAD_ENVIRONMENT_URI=road_environment_uri)
+        )
+
+        assert config.road_snapshot_date == date(2026, 8, 21)
+
+    def test_prefers_the_pointer_over_the_hardcoded_fallback_when_both_are_set(
+        self, tmp_path
+    ):
+        road_environment_uri = _write_active_environment(tmp_path, date(2026, 8, 21))
+
+        config = CurrentScoreJobConfig.from_env(
+            _base_env(
+                CURRENT_SCORE_ROAD_ENVIRONMENT_URI=road_environment_uri,
+                CURRENT_SCORE_ROAD_SNAPSHOT_DATE="2026-08-20",
+            )
+        )
+
+        assert config.road_snapshot_date == date(2026, 8, 21)
+
+    def test_raises_when_neither_the_pointer_nor_the_fallback_is_set(self):
+        with pytest.raises(ValueError, match="CURRENT_SCORE_ROAD_ENVIRONMENT_URI"):
+            CurrentScoreJobConfig.from_env(_base_env())
 
 
 class TestFindChangedZones:
