@@ -18,6 +18,7 @@ from de4_core import ObjectStore, join_uri
 from psycopg2.extras import execute_values
 
 from . import current_score_quarantine
+from .road_environment import resolve_active_road_snapshot_date
 from .weather_rules import (
     WEATHER_RULE_VERSION,
     WeatherRuleConfig,
@@ -110,7 +111,7 @@ class CurrentScoreJobConfig:
         source = env if env is not None else os.environ
         return cls(
             road_segment_uri=source.get("CURRENT_SCORE_ROAD_SEGMENT_URI") or DEFAULT_ROAD_SEGMENT_URI,
-            road_snapshot_date=date.fromisoformat(_require(source, "CURRENT_SCORE_ROAD_SNAPSHOT_DATE")),
+            road_snapshot_date=_resolve_road_snapshot_date(source),
             postgres_host=_require(source, "POSTGRES_HOST"),
             postgres_port=int(_require(source, "POSTGRES_PORT")),
             postgres_db=_require(source, "POSTGRES_DB"),
@@ -124,6 +125,28 @@ def _require(source: Mapping[str, str], key: str) -> str:
     if not value:
         raise ValueError(f"{key} must be set")
     return value
+
+
+# road_environment_uri(#389)의 active pointer/manifest에서 최신 build의
+# road_snapshot_date를 직접 읽는다(#402) — 새 road snapshot이 발행되면 사람이
+# CURRENT_SCORE_ROAD_SNAPSHOT_DATE를 수동으로 갱신하지 않아도 다음 실행부터
+# 자동으로 반영된다. URI가 없으면(로컬 개발 등) 기존 하드코딩 값으로 폴백한다.
+def _resolve_road_snapshot_date(source: Mapping[str, str]) -> date:
+    road_environment_uri = source.get("CURRENT_SCORE_ROAD_ENVIRONMENT_URI")
+    if road_environment_uri:
+        return resolve_active_road_snapshot_date(road_environment_uri)
+
+    fallback = source.get("CURRENT_SCORE_ROAD_SNAPSHOT_DATE")
+    if not fallback:
+        raise ValueError(
+            "CURRENT_SCORE_ROAD_ENVIRONMENT_URI or CURRENT_SCORE_ROAD_SNAPSHOT_DATE must be set"
+        )
+    logger.warning(
+        "CURRENT_SCORE_ROAD_ENVIRONMENT_URI not set — falling back to the hardcoded "
+        "CURRENT_SCORE_ROAD_SNAPSHOT_DATE=%s (#402)",
+        fallback,
+    )
+    return date.fromisoformat(fallback)
 
 
 @dataclass(frozen=True, slots=True)

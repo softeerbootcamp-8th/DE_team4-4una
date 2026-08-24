@@ -11,6 +11,9 @@ standard_segment_comfort_score까지만 담당한다. dag_id도
 standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 경로를
 제거하면서 publish 단계도 함께 빠졌다. 이슈 #265: run_standard_score 내부에서
 PostgreSQL 적재 전에 S3 Gold snapshot을 먼저 저장하도록 바뀌었다(Task 구조는 그대로).
+이슈 #402: road_snapshot_date를 하드코딩된 Variable 대신 road_environment_uri의
+active pointer/manifest(#389)에서 읽도록, sensor_processing 맨 앞에
+resolve_road_snapshot_date task를 추가했다.
 
 ## EMR Serverless 실행 방식 (#292, ADR-0001)
 
@@ -35,7 +38,8 @@ from __future__ import annotations
 import datetime
 
 import pendulum
-from airflow.sdk import DAG, TaskGroup
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG, TaskGroup, Variable
 from airflow.timetables.interval import CronDataIntervalTimetable
 from comfort_score_assets import STANDARD_SCORE_ASSET
 from emr_serverless import submit_batch_jobs_command
@@ -87,6 +91,28 @@ _HOURLY_COMFORT_REJECTED_OUTPUT_PATH = (
 )
 
 
+def _resolve_road_snapshot_date() -> str:
+    """road_environment_uri(#389)의 active pointer/manifest에서 최신 build의
+    road_snapshot_date를 읽는다(#402). REFERENCE_DATA_LAKE_URI Variable이
+    비어 있으면(로컬 개발 등) 기존 하드코딩 Variable로 폴백한다. de4_core는
+    dag-processor에 설치돼 있지 않으므로(airflow.yaml 참고) 이 함수 안에서만
+    import한다.
+    """
+    from jobs.road_environment import resolve_active_road_snapshot_date
+
+    road_environment_uri = Variable.get("REFERENCE_DATA_LAKE_URI", default="")
+    if road_environment_uri:
+        return resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+
+    fallback = Variable.get("HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE", default="")
+    if not fallback:
+        raise ValueError(
+            "REFERENCE_DATA_LAKE_URI or HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE "
+            "must be set"
+        )
+    return fallback
+
+
 with DAG(
     dag_id="standard_score_pipeline",
     description="sensor processing -> scoring -> standard 3단계 시간배치 파이프라인",
@@ -107,6 +133,15 @@ with DAG(
     tags=["standard-score-pipeline", "comfort-score"],
 ) as dag:
     with TaskGroup(group_id="sensor_processing") as sensor_processing:
+        # road_snapshot_date는 사람이 관리하는 Variable이 아니라 road_environment_uri의
+        # active pointer/manifest에서 매 실행마다 새로 읽는다(#402) — EMR Serverless
+        # Job Run의 entry_point_arguments는 Jinja 템플릿 문자열일 뿐이라 이 안에서
+        # 직접 pointer를 읽을 수 없으므로, 별도 PythonOperator로 미리 resolve해 XCom에
+        # 남기고 run_sensor_processing이 그 값을 xcom_pull로 참조한다.
+        resolve_road_snapshot_date = PythonOperator(
+            task_id="resolve_road_snapshot_date",
+            python_callable=_resolve_road_snapshot_date,
+        )
         # T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
         # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
         run_sensor_processing = submit_batch_jobs_command(
@@ -118,7 +153,7 @@ with DAG(
                 "--target-hour",
                 "{{ data_interval_start.isoformat() }}",
                 "--road-snapshot-date",
-                "{{ var.value.HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE }}",
+                "{{ ti.xcom_pull(task_ids='sensor_processing.resolve_road_snapshot_date') }}",
                 "--feature-version",
                 "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}",
                 "--bronze-input-path",
@@ -151,7 +186,7 @@ with DAG(
                 _CLEANSING_QUARANTINE_OUTPUT_PATH,
             ],
         )
-        run_sensor_processing >> validate_sensor_processing
+        resolve_road_snapshot_date >> run_sensor_processing >> validate_sensor_processing
 
     with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
         run_hourly_scoring = submit_batch_jobs_command(

@@ -16,7 +16,7 @@ from shapely.ops import transform as reproject_geometry
 
 ROAD_SEGMENT_CRS = "EPSG:32118"
 MAP_CRS = "EPSG:4326"
-ROAD_SEGMENT_COLUMNS = ("segment_id", "street_name", "geometry_wkb")
+ROAD_SEGMENT_COLUMNS = ("segment_id", "street_name", "geometry_wkb", "location_id")
 
 _TO_MAP_CRS = Transformer.from_crs(ROAD_SEGMENT_CRS, MAP_CRS, always_xy=True)
 
@@ -26,6 +26,9 @@ class RoadSegment:
     segment_id: str
     street_name: str | None
     geometry: dict[str, Any]
+    # Null for segments the road environment build could not place in a taxi
+    # zone; those cannot be filtered by borough.
+    location_id: int | None = None
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -100,6 +103,11 @@ def load_road_segments_from_parquet(parquet_bytes: bytes) -> list[RoadSegment]:
                     str(row["street_name"]) if row["street_name"] is not None else None
                 ),
                 geometry=wkb_to_map_geometry(bytes(geometry_wkb)),
+                location_id=(
+                    int(row["location_id"])
+                    if row["location_id"] is not None
+                    else None
+                ),
             )
         )
     return segments
