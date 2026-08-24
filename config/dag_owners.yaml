@@ -6,6 +6,8 @@ users:
     email: alice@example.com   # slack_id가 없으면 알림 시점에 users.lookupByEmail로 조회
   bob:
     slack_id: U0456GHIJKL      # 이미 알고 있으면 email 조회를 건너뛰고 바로 멘션
+  hi653:
+    email: hi653@naver.com     # Slack 알림 수동 검증용(#409)
 
 dags:
   standard_score_pipeline:
