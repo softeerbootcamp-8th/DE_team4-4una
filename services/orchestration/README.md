@@ -147,6 +147,35 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
   기본값(`de4-data-quality-docs`)을 쓴다. AWS 자격증명은 여기 넘기지 않고
   EMR Serverless execution role(IAM)에 위임한다 — role에 이 버킷에 대한
   `s3:PutObject` 권한이 미리 부여돼 있어야 한다.
+- `AIRFLOW_CONN_SLACK_API_DEFAULT`, `AIRFLOW_VAR_SLACK_ALERT_CHANNEL`,
+  `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI`,
+  `AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI`, `AIRFLOW_API_BASE_URL` —
+  DAG 실행 결과 Slack 알림(#409)에 필요하다.
+  - Slack Bot Token 기반 App을 사전에 만들고(Incoming Webhook 아님 —
+    담당자 이메일을 Slack 멘션으로 바꾸려면 Slack Web API 호출이 필요하다),
+    `chat:write`, `users:read.email` 스코프를 부여한다. Bot User OAuth
+    Token(`xoxb-...`)을 `AIRFLOW_CONN_SLACK_API_DEFAULT=slack://:xoxb-...@`
+    형식으로 `.env`에 채운다.
+  - `AIRFLOW_VAR_SLACK_ALERT_CHANNEL`은 알림을 보낼 채널(예: `#de4-alerts`).
+  - `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI`는 EMR Serverless Job Run의
+    원본 Spark driver/executor 로그를 영구 저장할 S3 버킷(예:
+    `s3://de4-emr-serverless-logs/`, 콘솔에서 사전 생성). 비우면
+    `dags/emr_serverless.py`의 같은 기본값을 쓴다. EMR execution role
+    (IAM)에 이 버킷에 대한 `s3:PutObject` 권한이 미리 부여돼 있어야 한다
+    (다른 EMR 관련 버킷과 마찬가지로 콘솔에서 사람이 준비).
+  - `AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI`는 `on_failure_callback`이
+    실패할 때마다 남기는 구조화된 요약 기록(JSON — dag_id/task_id/처리
+    일자/담당자/심각도/예외/처리 건수)을 쓸 S3 버킷이다. 기본값은 사용자가
+    사전에 만들어 둔 `s3://de4-observability-473551908409-ap-northeast-2-a/airflow/failed-tasks/`.
+    `airflow-scheduler`가 쓰는 AWS 자격증명(로컬은 boto3 기본 체인, 운영은
+    EC2 Instance Role)에 이 버킷에 대한 `s3:PutObject` 권한이 미리 부여돼
+    있어야 한다. §6의 EMR 원본 로그와는 별개다 — 이건 5개 DAG 전부에서
+    남고, 사람이 Slack에서 바로 읽을 수 있게 우리가 직접 구조화한
+    요약이다.
+  - `AIRFLOW_API_BASE_URL`은 DAG Run/Task Instance Slack 알림 링크가 가리킬
+    기준 URL이다(Airflow 3.3.1은 `[api] base_url` 설정, `webserver` 섹션이
+    아니다). 로컬 기본값은 `http://localhost:8080`, 운영(EC2)에서는 실제
+    접속 URL로 채운다.
 
 ## standard_score_pipeline — EMR Serverless 실행 (#292, ADR-0001)
 
@@ -475,6 +504,41 @@ docker stop de4-airflow-backfill-scheduler
 
    가장 최근 run의 `state`가 `success`인지 확인한다.
 
+## DAG 실행 결과 Slack 알림 + 담당자 레지스트리 (#409)
+
+`standard_score_pipeline`, `current_score_pipeline`, `zone_weather_pipeline`,
+`data_quality_audit`, `bronze_compaction` 5개 DAG(`hello_world` 제외)는
+`dags/notifications.py`의 공용 콜백을 쓴다. task가 재시도까지 소진하고
+최종 실패하면 담당자 멘션·심각도·처리 일자·처리 건수(이미 성공한 상위
+task가 있을 때만, 없으면 정직하게 "집계되지 않음")·Task Instance URL을
+담아 Slack에 알리고, 같은 정보를 구조화된 JSON으로도
+`AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI`(기본값: 사용자가 준비한
+관측 버킷)에 남긴 뒤 그 링크도 함께 붙인다(EMR 기반 task라면 원본 Spark
+로그 링크도 추가). DagRun이 성공하면 처리 건수 요약과 함께 1회 알린다.
+
+담당자/심각도는 저장소 루트의 `config/dag_owners.yaml`에서 관리한다
+(`jobs/dag_owners.py`가 로드). 새 DAG나 task에 담당자를 지정하려면:
+
+1. `users`에 담당자가 없으면 추가한다 — `email`(알림 시점에
+   `users.lookupByEmail`로 Slack ID를 조회) 또는 `slack_id`(이미 알면 조회
+   생략) 중 하나 이상 채운다.
+2. `dags.<dag_id>`에 `owner`(위 `users`의 키)와 `severity`
+   (`critical`/`high`/`medium`/`low` 중 하나)를 채운다 — DAG 전체의 기본값이다.
+3. 특정 task/TaskGroup만 다른 담당자·심각도를 쓰려면 `dags.<dag_id>.tasks`에
+   그 task의 전체 dotted id(예: `sensor_processing.run_sensor_processing`)
+   또는 TaskGroup id(예: `sensor_processing`)를 키로 추가한다. 조회 순서는
+   task_id -> task_group_id -> DAG 기본값이다.
+4. `owner`가 `users`에 없거나 `severity`가 유효하지 않으면 DAG 파싱
+   시점이 아니라 콜백이 처음 로드를 시도할 때(다음 실행) 에러가 난다 —
+   `uv run --package orchestration pytest services/orchestration/tests/test_dag_owners.py`로
+   미리 검증할 수 있다.
+
+`report_processing_counts`(`standard_score_pipeline`)와
+`report_audit_counts`(`data_quality_audit`)는 EMR Serverless로 제출된
+task가 방금 쓴 output을 orchestration 프로세스에서 직접 다시 세어(S3
+Parquet/Postgres COUNT) 성공 알림에 넣는 전용 task다 — EMR Job Run
+자체는 XCom을 만들 수 없어서다(`jobs/pipeline_counts.py`).
+
 ## 웹 UI
 
 `http://localhost:8080`에서 접속할 수 있다. 기본 인증 방식은
@@ -497,7 +561,6 @@ docker compose -f infra/compose/postgres.yaml down
 
 ## 범위 밖
 
-- Great Expectations 검증 task, Slack 실패 알림
 - `data_quality_audit`/`standard_score_pipeline` 모두, batch-jobs 커스텀
   이미지 완성 후 실제 EMR Serverless Job Run 트리거 검증과 Airflow의 EC2
   이전(#289 후속 이슈)
