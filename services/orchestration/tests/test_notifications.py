@@ -238,7 +238,7 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
     assert len(_fake_object_store) == 1
     written_uri, written_bytes = next(iter(_fake_object_store.items()))
     assert written_uri.startswith(
-        "s3://de4-observability-473551908409-ap-northeast-2-a/airflow/failed-tasks/"
+        "s3://de4-observability-473551908409-ap-northeast-2-an/airflow/failed-tasks/"
         "bronze_compaction/compact_zone_weather_snapshot/"
     )
     record = json.loads(written_bytes)
@@ -252,7 +252,7 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
     text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
     assert "실패 상세 기록 열기" in text
     assert (
-        "console.aws.amazon.com/s3/object/de4-observability-473551908409-ap-northeast-2-a"
+        "console.aws.amazon.com/s3/object/de4-observability-473551908409-ap-northeast-2-an"
         in text
     )
 

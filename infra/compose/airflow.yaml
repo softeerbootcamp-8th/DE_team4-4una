@@ -63,7 +63,7 @@ x-airflow-env: &airflow-env
     AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI: ${AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI}
     # notifications.py의 on_failure_callback이 구조화된 실패 기록(JSON)을 쓰는
     # 관측 버킷. 비어 있으면 notifications.py의 기본값(사용자가 사전에 만든
-    # de4-observability-473551908409-ap-northeast-2-a 버킷)을 쓴다.
+    # de4-observability-473551908409-ap-northeast-2-an 버킷)을 쓴다.
     AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI: ${AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI}
     # jobs/dag_owners.py가 config/dag_owners.yaml을 읽는 경로 — 아래
     # airflow-scheduler/airflow-dag-processor volumes의 마운트 위치와 맞춘다.

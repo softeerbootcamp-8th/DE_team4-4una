@@ -28,7 +28,7 @@ _SUMMARY_TASK_IDS: dict[str, str] = {
 # 사용자가 콘솔에서 미리 만들어 둔 관측 버킷(#409) — Airflow Variable
 # OBSERVABILITY_FAILED_TASKS_S3_URI로 override 가능.
 _DEFAULT_FAILED_TASKS_S3_ROOT = (
-    "s3://de4-observability-473551908409-ap-northeast-2-a/airflow/failed-tasks/"
+    "s3://de4-observability-473551908409-ap-northeast-2-an/airflow/failed-tasks/"
 )
 
 
