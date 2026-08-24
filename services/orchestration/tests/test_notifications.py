@@ -324,6 +324,46 @@ def test_success_callback_without_summary_task_still_posts(_fake_slack_hook):
     _fake_slack_hook.client.chat_postMessage.assert_called_once()
 
 
+def test_failure_callback_still_posts_when_slack_email_lookup_fails(
+    _fake_slack_hook, _fake_object_store
+):
+    # 담당자 멘션은 부가 정보다 — 이메일이 Slack에 없거나 API가 실패해도 핵심
+    # 알림까지 막아서는 안 된다(#409). standard_score_pipeline의 담당자 alice는
+    # slack_id가 없어 users_lookupByEmail 경로를 탄다.
+    _fake_slack_hook.client.users_lookupByEmail.side_effect = RuntimeError("users_not_found")
+    context = _context(
+        "standard_score_pipeline", _FakeTaskInstance(task_id="report_processing_counts")
+    )
+
+    notifications.on_failure_callback(context)
+
+    _fake_slack_hook.client.chat_postMessage.assert_called_once()
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "alice" in text  # 멘션이 안 되더라도 누구 담당인지는 남아야 한다
+
+
+def test_failure_callback_still_posts_when_s3_record_write_fails(_fake_slack_hook, monkeypatch):
+    # S3 실패 기록도 부가 정보다 — 버킷 오설정/권한 문제로 쓰기가 실패해도 Slack
+    # 알림 자체는 나가야 한다(#409 EC2 검증에서 이것 때문에 알림이 침묵했다).
+    def _boom(*args, **kwargs):
+        raise ValueError("file URI must contain a path")
+
+    monkeypatch.setattr(notifications, "_write_failure_record", _boom)
+    context = _context(
+        "bronze_compaction",
+        _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
+        exception=ValueError("boom"),
+    )
+
+    notifications.on_failure_callback(context)
+
+    _fake_slack_hook.client.chat_postMessage.assert_called_once()
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "compact_zone_weather_snapshot" in text
+    assert "boom" in text
+    assert "실패 상세 기록 열기" not in text  # 링크만 빠지고 나머지는 그대로
+
+
 def test_failed_tasks_s3_root_falls_back_to_default_when_variable_is_empty_string(monkeypatch):
     # infra/compose/airflow.yaml이 AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI를
     # 항상 선언해서, 호스트 .env에 값이 없으면 docker compose가 컨테이너에 빈

@@ -66,7 +66,13 @@ def on_failure_callback(context: dict) -> None:
         "log_url": task_instance.log_url,
         "counts": counts,
     }
-    record_url = _write_failure_record(record, context["run_id"])
+    # S3 기록도 부가 정보다 — 버킷 오설정/권한 문제로 쓰기가 실패해도 Slack 알림은
+    # 나가야 한다(#409 EC2 검증에서 정확히 이것 때문에 알림이 침묵했다). 실패하면
+    # 링크 줄만 빠진다.
+    try:
+        record_url = _write_failure_record(record, context["run_id"])
+    except Exception:  # noqa: BLE001
+        record_url = None
 
     lines = [
         f"{SEVERITY_LABELS[severity]} *{dag_id}* task 실패: `{task_id}`",
@@ -77,8 +83,9 @@ def on_failure_callback(context: dict) -> None:
         if counts is not None
         else "처리 건수: 이 실행에서 아직 집계되지 않음",
         f"<{task_instance.log_url}|Task Instance 열기>",
-        f"<{record_url}|실패 상세 기록 열기(S3)>",
     ]
+    if record_url:
+        lines.append(f"<{record_url}|실패 상세 기록 열기(S3)>")
     s3_logs_link = _emr_s3_logs_link(context)
     if s3_logs_link:
         lines.append(f"<{s3_logs_link}|EMR Serverless 원본 로그 열기>")
@@ -148,12 +155,16 @@ def _emr_s3_logs_link(context: dict) -> str | None:
     from airflow.providers.amazon.aws.links.emr import EmrServerlessS3LogsLink
 
     task_instance = context["task_instance"]
-    link_data = task_instance.xcom_pull(
-        task_ids=task_instance.task_id, key=EmrServerlessS3LogsLink.key
-    )
-    if not link_data:
+    # 이 링크도 부가 정보다 — XCom 조회/포맷이 실패해도 알림을 막지 않는다(#409).
+    try:
+        link_data = task_instance.xcom_pull(
+            task_ids=task_instance.task_id, key=EmrServerlessS3LogsLink.key
+        )
+        if not link_data:
+            return None
+        return EmrServerlessS3LogsLink().format_link(**link_data)
+    except Exception:  # noqa: BLE001
         return None
-    return EmrServerlessS3LogsLink().format_link(**link_data)
 
 
 def _write_failure_record(record: dict, run_id: str) -> str:
@@ -201,7 +212,12 @@ def _build_slack_hook():
 def _resolve_mention(owner, hook) -> str:
     if owner.slack_id:
         return f"<@{owner.slack_id}>"
-    response = hook.client.users_lookupByEmail(email=owner.email)
+    # 멘션은 부가 정보다 — 이메일이 Slack에 없거나(레지스트리 오타, 퇴사 등) API가
+    # 실패해도 알림 자체를 막아서는 안 된다(#409). 멘션 없이 이름/이메일만 남긴다.
+    try:
+        response = hook.client.users_lookupByEmail(email=owner.email)
+    except Exception:  # noqa: BLE001
+        return f"{owner.name}({owner.email} — Slack 멘션 조회 실패)"
     return f"<@{response['user']['id']}>"
 
 
