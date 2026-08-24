@@ -33,6 +33,13 @@ _DAGS_DIR = str(DAG_PATH.parent)
 if _DAGS_DIR not in sys.path:
     sys.path.insert(0, _DAGS_DIR)
 
+# _resolve_road_snapshot_date가 함수 안에서 `from jobs.road_environment import ...`를
+# 지연 import하므로, top-level `jobs` 패키지가 보이도록 services/orchestration도
+# 추가한다(test_notifications.py와 같은 방식).
+_ORCHESTRATION_DIR = str(DAG_PATH.parents[1])
+if _ORCHESTRATION_DIR not in sys.path:
+    sys.path.insert(0, _ORCHESTRATION_DIR)
+
 from comfort_score_assets import STANDARD_SCORE_ASSET
 
 
@@ -360,3 +367,53 @@ def test_dag_wires_shared_slack_notification_callbacks():
 
     assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
     assert module.dag.on_success_callback is notifications.on_success_callback
+
+
+def test_resolve_road_snapshot_date_logs_what_it_resolved(monkeypatch, capsys):
+    # 어떤 snapshot을 골랐는지가 XCom에만 담기고 Airflow Log 탭에는 전혀 안 보였다(#406).
+    # 같은 파일의 다른 PythonOperator가 쓰는 print({...}) 요약 관례를 따른다.
+    import datetime as dt
+
+    import jobs.road_environment
+
+    module = _load_dag_module()
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(
+            lambda key, default=None: "s3://ref-bucket/road-environment"
+            if key == "REFERENCE_DATA_LAKE_URI"
+            else default
+        ),
+    )
+    monkeypatch.setattr(
+        jobs.road_environment,
+        "resolve_active_road_snapshot_date",
+        lambda uri: dt.date(2026, 8, 1),
+    )
+
+    assert module._resolve_road_snapshot_date() == "2026-08-01"
+
+    output = capsys.readouterr().out
+    assert "s3://ref-bucket/road-environment" in output
+    assert "2026-08-01" in output
+
+
+def test_resolve_road_snapshot_date_logs_the_fallback_source(monkeypatch, capsys):
+    # 폴백 경로로 갔을 때도 "어디서 온 값인지"가 로그로 구분돼야 한다(#406).
+    module = _load_dag_module()
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(
+            lambda key, default=None: ""
+            if key == "REFERENCE_DATA_LAKE_URI"
+            else "2026-07-15"
+        ),
+    )
+
+    assert module._resolve_road_snapshot_date() == "2026-07-15"
+
+    output = capsys.readouterr().out
+    assert "2026-07-15" in output
+    assert "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE" in output

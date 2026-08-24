@@ -16,6 +16,7 @@ Data Docs를 S3에서 열람 가능해야 하므로(완료 조건), 다른 GX �
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Mapping
@@ -54,6 +55,8 @@ DEFAULT_SUMMARY_SUITE_PATHS: dict[str, Path] = {
 
 DEFAULT_S3_BUCKET = "de4-data-quality-docs"
 S3_PREFIX = "data-quality-audit/gold"
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_table(table: str) -> None:
@@ -250,6 +253,41 @@ def run_gold_audit(
         )
 
     summary = GoldAuditSummary(table=table, row_count=row_count, success=result.success)
+    # 실패해도 추적이 되도록 raise 이전에 남긴다(#406).
+    _log_summary(
+        config,
+        table=table,
+        row_count=row_count,
+        success=summary.success,
+        data_docs_uri=f"s3://{config.s3_bucket}/{S3_PREFIX}/{table}",
+    )
     if not summary.success:
         raise GoldAuditValidationFailed(f"gold audit failed for table={table}: {summary}")
     return summary
+
+
+def _log_summary(
+    config: GoldAuditValidationConfig,
+    *,
+    table: str,
+    row_count: int,
+    success: bool,
+    data_docs_uri: str,
+) -> None:
+    """무엇을 감사했고 Data Docs가 어디에 올라갔는지 남긴다(#406).
+
+    이 job은 at-rest 감사라 대상 시간대라는 개념이 없다 — 대신 감사 대상 테이블과
+    조회한 Postgres를 남긴다. config.connection_string에는 비밀번호가 평문으로
+    들어 있으므로 절대 로그에 넣지 않고, host:port/db만 남긴다.
+    """
+    logger.info(
+        "gold audit finished table=%s postgres=%s:%d/%s row_count=%d success=%s "
+        "data_docs=%s",
+        table,
+        config.postgres_host,
+        config.postgres_port,
+        config.postgres_db,
+        row_count,
+        success,
+        data_docs_uri,
+    )
