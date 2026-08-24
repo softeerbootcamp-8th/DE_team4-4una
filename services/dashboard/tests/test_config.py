@@ -17,6 +17,7 @@ def test_config_uses_vehicle_agnostic_profile_and_api_batch_contract_defaults() 
 
     assert config.vehicle_profile_id == DEFAULT_VEHICLE_PROFILE_ID
     assert config.batch_chunk_size == DEFAULT_BATCH_CHUNK_SIZE
+    assert DEFAULT_BATCH_CHUNK_SIZE == 1000
     assert config.batch_endpoint == (
         "http://localhost:8000/api/v1/comfort-scores/batch"
     )
