@@ -779,6 +779,7 @@ source = { editable = "services/dashboard" }
 dependencies = [
     { name = "boto3" },
     { name = "de4-core" },
+    { name = "fastapi" },
     { name = "folium" },
     { name = "httpx" },
     { name = "pyarrow" },
@@ -786,6 +787,7 @@ dependencies = [
     { name = "shapely" },
     { name = "streamlit" },
     { name = "streamlit-folium" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -797,6 +799,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.40,<2.0" },
     { name = "de4-core", editable = "libs/de4-core" },
+    { name = "fastapi", specifier = ">=0.120.0" },
     { name = "folium", specifier = ">=0.20.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -804,6 +807,7 @@ requires-dist = [
     { name = "shapely", specifier = ">=2.1.2" },
     { name = "streamlit", specifier = ">=1.62.0" },
     { name = "streamlit-folium", specifier = ">=0.27.4" },
+    { name = "uvicorn", specifier = ">=0.38.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1151,8 +1155,8 @@ name = "httpcore2"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/83/a896fc59940fc5a6e2aff3a4be1d92fa890112936803b331cae75a993c34/httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc", size = 67427, upload-time = "2026-08-09T09:11:32.123Z" }
 wheels = [
