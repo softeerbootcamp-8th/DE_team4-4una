@@ -51,14 +51,11 @@ class _FakeDag:
 
 @dataclass
 class _FakeDagRun:
-    task_instances: dict
-    absolute_url: str = "http://localhost:8080/dags/x/grid"
-
-    def get_absolute_url(self):
-        return self.absolute_url
-
-    def get_task_instance(self, task_id):
-        return self.task_instances.get(task_id)
+    # 실제 Airflow 3 콜백 context의 dag_run(Pydantic 모델)에 맞춰 dag_id/run_id만
+    # 흉내 낸다 — get_absolute_url()/get_task_instance()는 구버전 ORM DagRun 전용이라
+    # 더 이상 없다(#409 로컬 검증 중 실제 발견).
+    dag_id: str
+    run_id: str = "manual__2026-08-24T04:17:00+00:00"
 
 
 def _context(
@@ -75,7 +72,7 @@ def _context(
             task_group=_FakeTaskGroup(task_group_id) if task_group_id is not None else None
         ),
         "task_instance": task_instance,
-        "dag_run": dag_run if dag_run is not None else _FakeDagRun(task_instances={}),
+        "dag_run": dag_run if dag_run is not None else _FakeDagRun(dag_id=dag_id),
         "run_id": "manual__2026-08-24T04:17:00+00:00",
         "logical_date": "2026-08-24T04:17:00+00:00",
         "exception": exception,
@@ -263,16 +260,14 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
 def test_failure_callback_includes_counts_when_upstream_summary_already_succeeded(
     _fake_slack_hook, _fake_object_store
 ):
-    summary_ti = _FakeTaskInstance(task_id="report_processing_counts")
-    summary_ti.xcom_store[("report_processing_counts", "return_value")] = {
+    # 실제 Airflow에서 task_instance.xcom_pull(task_ids=X)은 호출한 task_instance
+    # 자신이 아니라 dag run 내 임의 task X의 XCom을 조회한다 — dag_run.get_task_instance()는
+    # 더 이상 쓰지 않는다(#409 로컬 검증 중 실제 발견).
+    task_instance = _FakeTaskInstance(task_id="some_later_task")
+    task_instance.xcom_store[("report_processing_counts", "return_value")] = {
         "standard_segment_comfort_score_count": 80
     }
-    dag_run = _FakeDagRun(task_instances={"report_processing_counts": summary_ti})
-    context = _context(
-        "standard_score_pipeline",
-        _FakeTaskInstance(task_id="some_later_task"),
-        dag_run=dag_run,
-    )
+    context = _context("standard_score_pipeline", task_instance)
 
     notifications.on_failure_callback(context)
 
@@ -282,12 +277,15 @@ def test_failure_callback_includes_counts_when_upstream_summary_already_succeede
 
 
 def test_success_callback_posts_summary_from_mapped_task(_fake_slack_hook):
-    summary_ti = _FakeTaskInstance(task_id="run_current_score")
-    summary_ti.xcom_store[("run_current_score", "return_value")] = {"upserted_count": 42}
-    dag_run = _FakeDagRun(task_instances={"run_current_score": summary_ti})
+    # 실제 Airflow 3의 DAG-level 성공 콜백 context에도 "마지막으로 실행된 task"의
+    # RuntimeTaskInstance가 context["task_instance"]로 들어온다 — 그 xcom_pull(task_ids=X)로
+    # dag run 내 임의 task X의 XCom을 조회할 수 있다(#409 로컬 검증 중 실제 발견).
+    task_instance = _FakeTaskInstance(task_id="run_current_score")
+    task_instance.xcom_store[("run_current_score", "return_value")] = {"upserted_count": 42}
     context = {
         "dag": _FakeDag("current_score_pipeline"),
-        "dag_run": dag_run,
+        "dag_run": _FakeDagRun(dag_id="current_score_pipeline"),
+        "task_instance": task_instance,
     }
 
     notifications.on_success_callback(context)
@@ -299,10 +297,10 @@ def test_success_callback_posts_summary_from_mapped_task(_fake_slack_hook):
 
 
 def test_success_callback_without_summary_task_still_posts(_fake_slack_hook):
-    dag_run = _FakeDagRun(task_instances={})
     context = {
         "dag": _FakeDag("bronze_compaction"),
-        "dag_run": dag_run,
+        "dag_run": _FakeDagRun(dag_id="bronze_compaction"),
+        "task_instance": _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
     }
 
     notifications.on_success_callback(context)
