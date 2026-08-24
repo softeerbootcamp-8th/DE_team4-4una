@@ -23,16 +23,25 @@ from sensor_producer.nyc_data import (
     TLC_TRIP_READER_VERSION,
     fetch_nyc_sample,
     iter_hvfhv_parquet_trips,
+    read_hvfhv_request_bounds,
 )
 from sensor_producer.parallel_replay import ParallelReplaySpec, run_parallel_replay
 from sensor_producer.prepared_replay import (
     PREPARED_REPLAY_VERSION,
+    TRIPS_FILE_NAME,
+    ReplayBounds,
     iter_prepared_replay,
     prepare_replay_bundle,
     read_replay_bounds,
+    source_anchor_for_wall_time,
 )
 from sensor_producer.publisher import JsonlPublisher, KafkaPublisher
 from sensor_producer.routing import RoadRouter
+from sensor_producer.sampling import (
+    DEFAULT_HOURLY_EVENT_TARGET,
+    HourlySamplingPlan,
+    build_hourly_sampling_plan,
+)
 from sensor_producer.simulation import (
     TIMESTAMP_POLICY,
     ReplayClock,
@@ -46,6 +55,13 @@ def ratio(value: str) -> float:
     parsed = float(value)
     if not 0 <= parsed <= 1:
         raise argparse.ArgumentTypeError("ratio must be between 0 and 1")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
 
@@ -97,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--run-id", default="nyc-smoke-v1")
     run_parser.add_argument("--sample-hz", type=int, default=10)
+    run_parser.add_argument(
+        "--hourly-event-target",
+        type=positive_int,
+        default=DEFAULT_HOURLY_EVENT_TARGET,
+        help="시간당 예상 센서 이벤트 상한",
+    )
     run_parser.add_argument("--time-scale", type=float, default=1.0)
     run_parser.add_argument(
         "--max-replay-lag-seconds",
@@ -153,12 +175,10 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return
 
-    execution_started_at = datetime.now(UTC)
     if arguments.workers <= 0 or arguments.max_replay_lag_seconds < 0:
         raise ValueError("workers must be positive and replay lag must be non-negative")
     environment, sources, environment_summary = resolve_environment(arguments)
     router = RoadRouter(environment.segments)
-    trips, trip_source_summary = resolve_trips(arguments, router, environment)
     use_mix = arguments.vehicle_mix is not None
     config = SimulationConfig(
         run_id=arguments.run_id,
@@ -167,26 +187,47 @@ def main(argv: list[str] | None = None) -> None:
         vehicle_profile_id=None if use_mix else (arguments.vehicle_profile_id or 1),
         vehicle_mix=arguments.vehicle_mix,
     )
+    bounds, sampling_path, prepared = resolve_replay_input(arguments)
+    sampling_plan = build_hourly_sampling_plan(
+        sampling_path,
+        sample_hz=config.sample_hz,
+        target_events_per_hour=arguments.hourly_event_target,
+        seed=config.seed,
+        cycle_hours=bounds.cycle_hours,
+        prepared=prepared,
+    )
+    execution_started_at = datetime.now(UTC)
     wall_anchor: datetime | None = None
+    source_anchor: datetime | None = None
+    trip_source_summary: dict[str, object]
     if arguments.workers > 1:
         if arguments.prepared_replay_dir is None:
             raise ValueError("parallel replay requires --prepared-replay-dir")
         if arguments.publisher != "kafka":
             raise ValueError("parallel replay requires --publisher kafka")
-        bounds = read_replay_bounds(arguments.prepared_replay_dir)
-        result, wall_anchor = run_parallel_replay(
+        result, wall_anchor, source_anchor = run_parallel_replay(
             ParallelReplaySpec(
                 bundle_dir=arguments.prepared_replay_dir,
                 road_environment_path=arguments.road_environment_path,
                 taxi_zone_path=arguments.taxi_zone_path,
                 road_snapshot_date=environment.road_segment_snapshot_date,
-                source_anchor=bounds.first_request_datetime,
+                source_bounds=bounds,
+                sampling_plan=sampling_plan,
                 simulation=config,
                 worker_count=arguments.workers,
                 bootstrap_servers=tuple(arguments.bootstrap_servers.split(",")),
                 topic=arguments.topic,
                 max_replay_lag_seconds=arguments.max_replay_lag_seconds,
             )
+        )
+        _, trip_source_summary = resolve_trips(
+            arguments,
+            router,
+            environment,
+            source_anchor=source_anchor,
+            bounds=bounds,
+            sampling_plan=sampling_plan,
+            create_iterator=False,
         )
     else:
         if arguments.publisher == "kafka":
@@ -196,23 +237,23 @@ def main(argv: list[str] | None = None) -> None:
         else:
             output = arguments.output or Path("sensor_events.jsonl")
             publisher = JsonlPublisher(output)
-        timeline: ReplayTimeline | None = None
-        clock: ReplayClock | None = None
-        if arguments.prepared_replay_dir is not None:
-            bounds = read_replay_bounds(arguments.prepared_replay_dir)
-            wall_anchor = datetime.now(UTC)
-            timeline = ReplayTimeline(bounds.first_request_datetime, wall_anchor)
-            clock = ReplayClock(
-                config.time_scale,
-                source_anchor=bounds.first_request_datetime,
-                wall_anchor=wall_anchor,
-                max_lag_seconds=arguments.max_replay_lag_seconds,
-            )
-        elif config.time_scale != 0:
-            clock = ReplayClock(
-                config.time_scale,
-                max_lag_seconds=arguments.max_replay_lag_seconds,
-            )
+        wall_anchor = datetime.now(UTC)
+        source_anchor = source_anchor_for_wall_time(bounds, wall_anchor)
+        trips, trip_source_summary = resolve_trips(
+            arguments,
+            router,
+            environment,
+            source_anchor=source_anchor,
+            bounds=bounds,
+            sampling_plan=sampling_plan,
+        )
+        timeline = ReplayTimeline(source_anchor, wall_anchor)
+        clock = ReplayClock(
+            config.time_scale,
+            source_anchor=source_anchor,
+            wall_anchor=wall_anchor,
+            max_lag_seconds=arguments.max_replay_lag_seconds,
+        )
         coordinator = ReplayCoordinator(
             router,
             environment.taxi_zones,
@@ -232,12 +273,9 @@ def main(argv: list[str] | None = None) -> None:
         "sample_hz": config.sample_hz,
         "time_scale": config.time_scale,
         "worker_count": arguments.workers,
-        "source_timeline_anchor": (
-            bounds.first_request_datetime.isoformat()
-            if arguments.prepared_replay_dir is not None
-            else None
-        ),
+        "source_timeline_anchor": source_anchor.isoformat(),
         "wall_timeline_anchor": wall_anchor.isoformat() if wall_anchor else None,
+        "trip_sampling": sampling_plan.summary(),
         "vehicle_assignment": vehicle_assignment(config, result),
         "max_trip_skip_ratio": arguments.max_trip_skip_ratio,
         "trips_attempted": result.trips_attempted,
@@ -267,35 +305,63 @@ def resolve_trips(
     arguments: argparse.Namespace,
     router: RoadRouter | None = None,
     environment: RoadEnvironment | None = None,
+    *,
+    source_anchor: datetime | None = None,
+    bounds: ReplayBounds | None = None,
+    sampling_plan: HourlySamplingPlan | None = None,
+    create_iterator: bool = True,
 ) -> tuple[Iterable[TripRecord | PreparedTrip], dict[str, object]]:
+    if source_anchor is None or bounds is None or sampling_plan is None:
+        raise ValueError("replay selection requires bounds, anchor, and sampling plan")
     if arguments.prepared_replay_dir is not None:
         if router is None or environment is None:
             raise ValueError("prepared replay requires the runtime road environment")
-        return (
-            iter_prepared_replay(
+        iterator: Iterable[TripRecord | PreparedTrip] = ()
+        if create_iterator:
+            iterator = iter_prepared_replay(
                 arguments.prepared_replay_dir,
                 router,
                 environment.road_segment_snapshot_date,
-            ),
+                start_at=source_anchor,
+                sampling_plan=sampling_plan,
+            )
+        return (
+            iterator,
             {
                 "format": "prepared_od_replay",
                 "path": str(arguments.prepared_replay_dir),
                 "reader_version": PREPARED_REPLAY_VERSION,
-                "selection": "all_prepared_rows",
+                "selection": "hourly_budgeted_trip_sample",
+                "source_anchor": source_anchor.isoformat(),
             },
         )
     assert arguments.trips_path is not None
     return (
         iter_hvfhv_parquet_trips(
             arguments.trips_path,
+            start_at=source_anchor,
+            cycle_duration=bounds.cycle_duration,
+            sampling_plan=sampling_plan,
         ),
         {
             "format": "parquet",
             "path": str(arguments.trips_path),
             "reader_version": TLC_TRIP_READER_VERSION,
-            "selection": "all_valid_rows",
+            "selection": "hourly_budgeted_trip_sample",
+            "source_anchor": source_anchor.isoformat(),
         },
     )
+
+
+def resolve_replay_input(
+    arguments: argparse.Namespace,
+) -> tuple[ReplayBounds, Path, bool]:
+    if arguments.prepared_replay_dir is not None:
+        bounds = read_replay_bounds(arguments.prepared_replay_dir)
+        return bounds, arguments.prepared_replay_dir / TRIPS_FILE_NAME, True
+    assert arguments.trips_path is not None
+    first_request, last_request = read_hvfhv_request_bounds(arguments.trips_path)
+    return ReplayBounds(first_request, last_request), arguments.trips_path, False
 
 
 def resolve_environment(

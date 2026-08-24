@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: active
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-24
 ---
 
 # Open Questions and Decision Register
@@ -45,7 +45,8 @@ ADR when the choice affects multiple components.
 | OQ-016 | Is each sampled trip simulated for one vehicle type or all supported vehicle types, and how does that affect `trip_id`? | Changes event volume and determines whether `(trip_id, trip_seq)` is unique | Open |
 | OQ-017 | Are overlapping trips replayed concurrently, and are long idle gaps preserved or capped? | Prototype interleaves overlapping trips and preserves gaps; explicit `time_scale=0` removes waits in tests | Prototype accepted 2026-08-10 |
 | OQ-018 | How is speed determined along each route: source average, road class, synthetic profile, or another source? | Prototype uses a smoothstep profile over route length and source passenger duration; calibration remains open | Prototype accepted 2026-08-10 |
-| OQ-043 | How are historical TLC timestamps mapped to replay `event_time`? | Source time schedules replay; each Trip captures its actual dispatch UTC date and combines it with TLC time-of-day while retaining intra-Trip source-day offsets | Prototype accepted 2026-08-23 by issue #353 |
+| OQ-043 | How are historical TLC timestamps mapped to replay `event_time`? | The UTC run anchor is converted to New York local time; replay rotates from the source month's matching weekday occurrence and local clock time, then maps all source-relative offsets onto that one UTC anchor | Accepted 2026-08-24 by issue #411; supersedes issue #353 policy |
+| OQ-044 | How is 10 Hz replay volume bounded for Kafka and Spark? | `hourly-trip-budget-v1` selects whole Trips with a stable hash; a month-wide base ratio preserves quiet-hour sparsity and per-hour ratios cap projected busy-hour output at the configured default of 10 million events | Prototype accepted 2026-08-24 by issue #411 |
 
 ## Product decisions
 

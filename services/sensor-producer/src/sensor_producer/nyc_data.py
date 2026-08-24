@@ -7,14 +7,18 @@ import json
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import duckdb
 
 from sensor_producer.domain import TripRecord
 from sensor_producer.environment import load_taxi_zones
+
+if TYPE_CHECKING:
+    from sensor_producer.sampling import HourlySamplingPlan
 
 NYC_TIMEZONE = ZoneInfo("America/New_York")
 TAXI_ZONE_URL = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip"
@@ -150,11 +154,21 @@ def iter_hvfhv_parquet_trips(
     path: Path,
     *,
     batch_size: int = TLC_TRIP_FETCH_BATCH_SIZE,
+    start_at: datetime | None = None,
+    cycle_duration: timedelta | None = None,
+    sampling_plan: HourlySamplingPlan | None = None,
 ) -> Iterator[TripRecord]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if (start_at is None) != (cycle_duration is None):
+        raise ValueError("start_at and cycle_duration must be set together")
+    if start_at is not None and start_at.utcoffset() is None:
+        raise ValueError("start_at must be timezone-aware")
 
     query = """
+        WITH replay_config AS (
+            SELECT CAST(? AS TIMESTAMP) AS start_at, ?::DOUBLE AS cycle_seconds
+        ), valid AS (
         SELECT
             request_datetime,
             pickup_datetime,
@@ -174,22 +188,50 @@ def iter_hvfhv_parquet_trips(
           AND pickup_datetime < dropoff_datetime
           AND trip_miles > 0
           AND isfinite(trip_miles)
-        ORDER BY
+        )
+        SELECT
             request_datetime,
+            pickup_datetime,
+            dropoff_datetime,
+            pu_location_id,
+            do_location_id,
+            trip_miles,
+            file_row_number,
+            CASE WHEN request_datetime < start_at
+                THEN request_datetime + cycle_seconds * INTERVAL '1 second'
+                ELSE request_datetime END AS replay_request_datetime,
+            CASE WHEN request_datetime < start_at
+                THEN pickup_datetime + cycle_seconds * INTERVAL '1 second'
+                ELSE pickup_datetime END AS replay_pickup_datetime,
+            CASE WHEN request_datetime < start_at
+                THEN dropoff_datetime + cycle_seconds * INTERVAL '1 second'
+                ELSE dropoff_datetime END AS replay_dropoff_datetime
+        FROM valid, replay_config
+        ORDER BY
+            replay_request_datetime,
             file_row_number
     """
 
     connection = duckdb.connect()
     yielded = False
     try:
-        cursor = connection.execute(query, [str(path)])
+        source_start = (
+            start_at.astimezone(NYC_TIMEZONE).replace(tzinfo=None)
+            if start_at is not None
+            else datetime.min.replace(tzinfo=NYC_TIMEZONE).replace(tzinfo=None)
+        )
+        cycle_seconds = cycle_duration.total_seconds() if cycle_duration else 0
+        cursor = connection.execute(
+            query,
+            [source_start, cycle_seconds, str(path)],
+        )
         # Python 메모리에 전체 원천을 올리지 않고 정렬된 결과를 일정 건수씩 읽는다
         while rows := cursor.fetchmany(batch_size):
             for row in rows:
                 request_time = parse_nyc_datetime(row[0])
                 pickup_time = parse_nyc_datetime(row[1])
                 dropoff_time = parse_nyc_datetime(row[2])
-                trip = TripRecord(
+                source_trip = TripRecord(
                     trip_id=stable_trip_id(
                         int(row[6]),
                         request_time,
@@ -206,12 +248,50 @@ def iter_hvfhv_parquet_trips(
                     do_location_id=int(row[4]),
                     trip_miles=float(row[5]),
                 )
+                if sampling_plan is not None and not sampling_plan.includes(source_trip):
+                    continue
+                trip = TripRecord(
+                    trip_id=source_trip.trip_id,
+                    request_datetime=parse_nyc_datetime(row[7]),
+                    pickup_datetime=parse_nyc_datetime(row[8]),
+                    dropoff_datetime=parse_nyc_datetime(row[9]),
+                    pu_location_id=source_trip.pu_location_id,
+                    do_location_id=source_trip.do_location_id,
+                    trip_miles=source_trip.trip_miles,
+                )
                 yielded = True
                 yield trip
         if not yielded:
             raise ValueError(f"no valid HVFHV trips found in {path}")
     finally:
         connection.close()
+
+
+def read_hvfhv_request_bounds(path: Path) -> tuple[datetime, datetime]:
+    connection = duckdb.connect()
+    try:
+        first_request, last_request = connection.execute(
+            """
+            SELECT min(request_datetime), max(request_datetime)
+            FROM read_parquet(?)
+            WHERE request_datetime IS NOT NULL
+              AND pickup_datetime IS NOT NULL
+              AND dropoff_datetime IS NOT NULL
+              AND PULocationID IS NOT NULL
+              AND DOLocationID IS NOT NULL
+              AND trip_miles IS NOT NULL
+              AND request_datetime <= pickup_datetime
+              AND pickup_datetime < dropoff_datetime
+              AND trip_miles > 0
+              AND isfinite(trip_miles)
+            """,
+            [str(path)],
+        ).fetchone()
+    finally:
+        connection.close()
+    if first_request is None or last_request is None:
+        raise ValueError(f"no valid HVFHV trips found in {path}")
+    return parse_nyc_datetime(first_request), parse_nyc_datetime(last_request)
 
 
 def stable_trip_id(

@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-24
 ---
 
 # Project Definition
@@ -68,15 +68,18 @@ monthly batch pipeline.
 ### Simulation input and replay
 
 - Use NYC TLC High Volume For-Hire Vehicle trip records.
-- Treat every valid completed trip in one pinned monthly Parquet as a dispatch event.
+- Treat every valid completed trip in one pinned monthly Parquet as the eligible
+  replay population, then select whole Trips deterministically so the projected
+  10 Hz output stays near or below 10 million events per hour.
 - Use the source request timestamp for dispatch ordering and wall-clock gaps when
-  it is present; the passenger-motion simulation starts at pickup. Published
-  timestamps use each Trip's actual UTC dispatch date with the TLC clock time.
+  it is present; the passenger-motion simulation starts at pickup. Start at the
+  source replay interval's matching New York weekday and clock time, and map that
+  source anchor to one current UTC run anchor for publication.
 - Simulate only the occupied passenger journey from pickup to drop-off.
 - Because records identify taxi zones rather than exact coordinates, choose
   deterministic valid road points inside the pickup and drop-off zones.
-- Replay the complete valid-row set from the configured monthly Parquet in
-  deterministic request-time and source-row order.
+- Rotate the complete valid-row set from the selected source anchor, then apply
+  the versioned deterministic Trip sample in request-time and source-row order.
 - Replay dispatch gaps and movement in wall-clock time: one simulated second is
   one real second.
 - Find a reasonable road route between the chosen points.
@@ -124,7 +127,7 @@ score"); the request and response grain is in `context/data/contracts.md`.
 
 - A runnable local end-to-end demonstration
 - Monthly ingestion of road reference datasets
-- Deterministic full-file FHV trip replay
+- Deterministic, hourly-budgeted FHV Trip replay from a full monthly file
 - Synthetic vehicle-motion and comfort-related events at a configurable sampling
   frequency
 - Kafka transport and lake persistence

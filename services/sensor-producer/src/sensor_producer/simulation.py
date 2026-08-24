@@ -33,7 +33,7 @@ from sensor_producer.publisher import EventPublisher
 from sensor_producer.routing import METERS_PER_MILE, RoadRouter
 
 EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
-TIMESTAMP_POLICY = "run-utc-anchor-with-source-offset-v1"
+TIMESTAMP_POLICY = "current-ny-clock-to-run-utc-anchor-v2"
 MPH_TO_MPS = 0.44704
 DEFAULT_SPEED_LIMIT_MPH = 25.0
 MAX_ACCELERATION_PHASE_SECONDS = 8.0

@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import duckdb
 import pyarrow as pa
@@ -16,8 +18,11 @@ import pyarrow.parquet as pq
 
 from sensor_producer.domain import PreparedTrip, TripRecord
 from sensor_producer.errors import TripSkipReason
-from sensor_producer.nyc_data import parse_nyc_datetime, stable_trip_id
+from sensor_producer.nyc_data import NYC_TIMEZONE, parse_nyc_datetime, stable_trip_id
 from sensor_producer.routing import METERS_PER_MILE, GraphEdge, RoadRouter
+
+if TYPE_CHECKING:
+    from sensor_producer.sampling import HourlySamplingPlan
 
 PREPARED_REPLAY_VERSION = "od-route-replay-v1"
 PREPARED_REPLAY_BATCH_SIZE = 1000
@@ -56,6 +61,23 @@ class OdStat:
 class ReplayBounds:
     first_request_datetime: datetime
     last_request_datetime: datetime
+
+    @property
+    def cycle_start(self) -> datetime:
+        return self.first_request_datetime.astimezone(NYC_TIMEZONE)
+
+    @property
+    def cycle_end(self) -> datetime:
+        # 월초 pickup을 미리 요청한 행이 있어도 source 월을 잘못 추론하지 않는다
+        return self.last_request_datetime.astimezone(NYC_TIMEZONE) + timedelta(seconds=1)
+
+    @property
+    def cycle_duration(self) -> timedelta:
+        return self.cycle_end - self.cycle_start
+
+    @property
+    def cycle_hours(self) -> int:
+        return max(1, math.ceil(self.cycle_duration.total_seconds() / 3600))
 
 
 def prepare_replay_bundle(
@@ -128,6 +150,8 @@ def iter_prepared_replay(
     batch_size: int = PREPARED_REPLAY_BATCH_SIZE,
     worker_index: int = 0,
     worker_count: int = 1,
+    start_at: datetime | None = None,
+    sampling_plan: HourlySamplingPlan | None = None,
 ):
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -146,38 +170,98 @@ def iter_prepared_replay(
     if len(templates) != expected_templates:
         raise ValueError("route template count differs from manifest")
 
+    if start_at is not None and start_at.utcoffset() is None:
+        raise ValueError("start_at must be timezone-aware")
+    cycle_duration = read_replay_bounds(bundle_dir).cycle_duration
     previous_order: tuple[datetime, int] | None = None
-    for batch in parquet.iter_batches(batch_size=batch_size):
-        for row in batch.to_pylist():
-            trip = _trip_from_row(row)
-            order = (trip.request_datetime, int(row["source_file_row_number"]))
-            if previous_order is not None and order < previous_order:
-                raise ValueError("prepared replay is not ordered by request_datetime")
-            previous_order = order
-            if stable_worker_index(trip.trip_id, worker_count) != worker_index:
-                continue
+    for row, wrapped in _iter_rotated_rows(parquet, start_at, batch_size):
+        source_trip = _trip_from_row(row)
+        if sampling_plan is not None and not sampling_plan.includes(source_trip):
+            continue
+        trip = (
+            _shift_trip(source_trip, cycle_duration)
+            if wrapped
+            else source_trip
+        )
+        order = (trip.request_datetime, int(row["source_file_row_number"]))
+        if previous_order is not None and order < previous_order:
+            raise ValueError("prepared replay is not ordered by request_datetime")
+        previous_order = order
+        if stable_worker_index(trip.trip_id, worker_count) != worker_index:
+            continue
 
-            key = (trip.pu_location_id, trip.do_location_id)
-            try:
-                template = templates[key]
-            except KeyError as error:
-                raise ValueError(
-                    f"prepared replay is missing OD template {key}"
-                ) from error
-            if template["skip_reason"] is not None:
-                yield PreparedTrip(
-                    trip, None, TripSkipReason(str(template["skip_reason"]))
-                )
-                continue
-            route = router.plan_from_segments(
-                trip.trip_id,
-                trip.request_datetime,
-                str(template["start_node_id"]),
-                str(template["end_node_id"]),
-                tuple(template["route_segment_ids"]),
-                tuple(template["route_reverse_flags"]),
+        key = (trip.pu_location_id, trip.do_location_id)
+        try:
+            template = templates[key]
+        except KeyError as error:
+            raise ValueError(f"prepared replay is missing OD template {key}") from error
+        if template["skip_reason"] is not None:
+            yield PreparedTrip(
+                trip, None, TripSkipReason(str(template["skip_reason"]))
             )
-            yield PreparedTrip(trip, route)
+            continue
+        route = router.plan_from_segments(
+            trip.trip_id,
+            trip.request_datetime,
+            str(template["start_node_id"]),
+            str(template["end_node_id"]),
+            tuple(template["route_segment_ids"]),
+            tuple(template["route_reverse_flags"]),
+        )
+        yield PreparedTrip(trip, route)
+
+
+def _iter_rotated_rows(
+    parquet: pq.ParquetFile,
+    start_at: datetime | None,
+    batch_size: int,
+):
+    if start_at is None:
+        for batch in parquet.iter_batches(batch_size=batch_size):
+            yield from ((row, False) for row in batch.to_pylist())
+        return
+
+    start_value = start_at.astimezone(NYC_TIMEZONE).replace(tzinfo=None)
+    request_index = parquet.schema_arrow.names.index("request_datetime")
+    start_group = parquet.metadata.num_row_groups
+    for row_group in range(parquet.metadata.num_row_groups):
+        statistics = parquet.metadata.row_group(row_group).column(
+            request_index
+        ).statistics
+        if statistics is None or statistics.max >= start_value:
+            start_group = row_group
+            break
+
+    for row_group in range(start_group, parquet.metadata.num_row_groups):
+        for batch in parquet.iter_batches(
+            batch_size=batch_size,
+            row_groups=[row_group],
+        ):
+            for row in batch.to_pylist():
+                if parse_nyc_datetime(row["request_datetime"]) >= start_at:
+                    yield row, False
+
+    wrapped_groups = range(min(start_group + 1, parquet.metadata.num_row_groups))
+    for row_group in wrapped_groups:
+        for batch in parquet.iter_batches(
+            batch_size=batch_size,
+            row_groups=[row_group],
+        ):
+            for row in batch.to_pylist():
+                if parse_nyc_datetime(row["request_datetime"]) < start_at:
+                    yield row, True
+
+
+def _shift_trip(trip: TripRecord, offset: timedelta) -> TripRecord:
+    return TripRecord(
+        trip_id=trip.trip_id,
+        request_datetime=trip.request_datetime + offset,
+        pickup_datetime=trip.pickup_datetime + offset,
+        dropoff_datetime=trip.dropoff_datetime + offset,
+        pu_location_id=trip.pu_location_id,
+        do_location_id=trip.do_location_id,
+        trip_miles=trip.trip_miles,
+    )
 
 
 def stable_worker_index(trip_id: str, worker_count: int) -> int:
@@ -193,6 +277,32 @@ def read_replay_bounds(bundle_dir: Path) -> ReplayBounds:
         parse_nyc_datetime(manifest["first_request_datetime"]),
         parse_nyc_datetime(manifest["last_request_datetime"]),
     )
+
+
+def source_anchor_for_wall_time(
+    bounds: ReplayBounds,
+    wall_anchor: datetime,
+) -> datetime:
+    """Select the source month's matching weekday and New York clock time."""
+    if wall_anchor.utcoffset() is None:
+        raise ValueError("wall_anchor must be timezone-aware")
+    local_wall = wall_anchor.astimezone(NYC_TIMEZONE)
+    candidates: list[date] = []
+    current = bounds.cycle_start.date()
+    last_date = bounds.last_request_datetime.astimezone(NYC_TIMEZONE).date()
+    while current <= last_date:
+        if current.weekday() == local_wall.weekday():
+            candidates.append(current)
+        current += timedelta(days=1)
+    occurrence = min((local_wall.day - 1) // 7, len(candidates) - 1)
+    source_date = candidates[occurrence]
+    source_clock = time(
+        local_wall.hour,
+        local_wall.minute,
+        local_wall.second,
+        local_wall.microsecond,
+    )
+    return datetime.combine(source_date, source_clock, tzinfo=NYC_TIMEZONE)
 
 
 def _write_sorted_trips(
