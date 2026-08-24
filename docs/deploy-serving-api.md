@@ -1,6 +1,6 @@
 # Serving API 배포
 
-`main`에 머지된 커밋을 EC2의 serving-api 컨테이너로 배포하는 절차와 사전 조건을
+`develop`에 머지된 커밋을 EC2의 serving-api 컨테이너로 배포하는 절차와 사전 조건을
 정리한다. 파이프라인은 [.github/workflows/deploy-serving-api.yml](../.github/workflows/deploy-serving-api.yml)과
 [services/serving-api/deploy/deploy_on_instance.sh](../services/serving-api/deploy/deploy_on_instance.sh)
 두 파일로 구성된다.
@@ -8,23 +8,35 @@
 ## 흐름
 
 ```
-main에 머지 → CI 통과 → ci.yml이 배포 워크플로 호출
-  → repository variables 확인
+develop에 머지 (경로 감지) → repository variables 확인
   → 이미지 빌드, ECR push (태그 = commit SHA)
   → SSH로 EC2에 배포 스크립트 전송
        인스턴스: pull → 컨테이너 교체 → /health 확인
+                 성공하면 현재와 직전 이미지만 남기고 정리
                  실패하면 이전 이미지로 되돌리고 실패 처리
   → job summary에 commit, image, host 기록
 ```
 
-배포는 독립 워크플로가 아니라 `ci.yml`이 `workflow_call`로 호출하는 reusable
-workflow다. `ci.yml`의 `ci-passed` 뒤에 붙어 있고, `push` 이벤트이면서 `main`
-브랜치일 때만 호출된다.
+독립 워크플로다. `develop` push 중 아래 경로가 바뀌었을 때만 실행되고,
+Actions 탭에서 `Run workflow`로 수동 실행할 수도 있다.
+
+```
+services/serving-api/**   libs/de4-core/**   pyproject.toml   uv.lock
+.github/workflows/deploy-serving-api.yml
+```
+
+공유 경로(`libs/de4-core/**`, `pyproject.toml`, `uv.lock`)가 바뀌면 다른 서비스의
+배포도 함께 도는 것이 정상이다. 이미지에 실제로 들어가는 것이 이 서비스와 공유
+코드뿐이라 이 목록으로 잡는다.
+
+**CI를 기다리지 않는다.** `develop` 병합은 branch protection의 required status
+check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 시점에 이미 검증된
+커밋이다. 게이트는 PR 쪽에 있다.
 
 `workflow_run`으로 받지 않는 이유는 OIDC 때문이다. `workflow_run`으로 실행되는
-워크플로는 기본 브랜치 컨텍스트로 돌아서 `sub` 클레임이 `main`을 가리키지 않고,
-`main`으로 제한한 trust policy와 어긋난다. 호출 방식으로 두면 호출자의 `main` push
-컨텍스트를 그대로 물려받는다.
+워크플로는 기본 브랜치 컨텍스트로 돌아서 `sub` 클레임이 배포 브랜치를 가리키지
+않고, 브랜치로 제한한 trust policy와 어긋난다. `push`로 직접 받으면 그 push의
+컨텍스트가 그대로 쓰인다.
 
 ## GitHub 설정
 
@@ -40,10 +52,10 @@ workflow다. `ci.yml`의 `ci-passed` 뒤에 붙어 있고, `push` 이벤트이�
 | --- | --- |
 | `AWS_REGION` | `ap-northeast-2` |
 | `AWS_DEPLOY_ROLE_ARN` | `arn:aws:iam::123456789012:role/github-actions-deploy` |
-| `ECR_REPOSITORY` | `de4/serving-api` |
+| `SERVING_API_ECR_REPOSITORY` | `de4/serving-api` |
 | `EC2_HOST` | EC2의 퍼블릭 IP 또는 DNS |
 
-`ECR_REPOSITORY`에는 **리포지토리 이름만** 넣는다. 워크플로가
+`SERVING_API_ECR_REPOSITORY`에는 **리포지토리 이름만** 넣는다. 워크플로가
 `<레지스트리>/<이 값>:<커밋 SHA>`로 조립하고 레지스트리 주소는 ECR 로그인 스텝이
 알려주므로, 전체 URI를 넣으면 주소가 중복되어 push가 실패한다.
 
@@ -105,7 +117,7 @@ trust policy에 브랜치 조건을 반드시 넣는다. 이 조건이 없으면
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:softeerbootcamp-8th/DE_team4-4una:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub": "repo:softeerbootcamp-8th/DE_team4-4una:ref:refs/heads/develop"
         }
       }
     }
@@ -113,7 +125,8 @@ trust policy에 브랜치 조건을 반드시 넣는다. 이 조건이 없으면
 }
 ```
 
-배포는 `main` push로 실행되는 `ci.yml`에서 호출되므로 `sub`가 위 값이 된다.
+배포가 `develop` push로 실행되므로 `sub`가 위 값이 된다. `workflow_dispatch`로
+다른 브랜치에서 수동 실행하면 `sub`가 그 브랜치를 가리켜 자격증명 획득에 실패한다.
 
 권한 policy:
 
@@ -137,7 +150,7 @@ trust policy에 브랜치 조건을 반드시 넣는다. 이 조건이 없으면
         "ecr:CompleteLayerUpload",
         "ecr:PutImage"
       ],
-      "Resource": "arn:aws:ecr:<REGION>:<ACCOUNT_ID>:repository/<ECR_REPOSITORY>"
+      "Resource": "arn:aws:ecr:<REGION>:<ACCOUNT_ID>:repository/<SERVING_API_ECR_REPOSITORY>"
     }
   ]
 }
@@ -170,8 +183,8 @@ ECR 권한이 필요하다. 이걸 빼면 배포가 `docker pull`에서 실패�
 
 ### 4. ECR 리포지토리
 
-태그가 commit SHA라서 `main`에 머지될 때마다 이미지가 하나씩 쌓이고, ECR은 아무것도
-자동으로 지우지 않는다. 리포지토리를 만들 때 lifecycle policy를 함께 붙인다.
+태그가 commit SHA라서 `develop`에 머지될 때마다 이미지가 하나씩 쌓이고, ECR은
+아무것도 자동으로 지우지 않는다. EC2 쪽은 배포 스크립트가 정리하지만 ECR은 별개다. 리포지토리를 만들 때 lifecycle policy를 함께 붙인다.
 
 ```json
 {
@@ -294,6 +307,24 @@ docker inspect --format \
   '{{index .Config.Labels "org.opencontainers.image.revision"}}' serving-api
 ```
 
+### 이미지 정리
+
+health를 통과한 뒤 인스턴스에서 **현재 이미지와 rollback용 직전 이미지만 남기고**
+이 리포지토리의 나머지 태그를 지운다. 태그가 commit SHA라 배포마다 하나씩 쌓이는데,
+전에 쓰던 `docker image prune --force`는 dangling(태그 없는) 이미지만 지워서
+`<repo>:<sha>`가 계속 남았다.
+
+`docker image prune -af`는 쓰지 않는다. 이 EC2에는 Kafka, Airflow, exporter 등 다른
+서비스의 이미지가 함께 있어 전부 지워진다. 대상은 `--filter reference=<repo>:*`로
+이 리포지토리에 한정한다.
+
+직전 이미지를 남기는 것은 자동 rollback 때문이 아니다. 다음 배포의 rollback 대상은
+언제나 "현재 이미지"라 그것만 있으면 된다. 직전 이미지는 **되돌린 것마저 정상이 아닐
+때** 수동으로 한 단계 더 내려가기 위한 여지다.
+
+`docker rmi`가 실패하면(다른 컨테이너가 사용 중인 경우) 로그만 남기고 넘어간다.
+정리는 부가 작업이라 배포를 실패시키지 않는다.
+
 ## 실패했을 때
 
 워크플로 로그에 인스턴스가 남긴 출력이 그대로 찍힌다. 먼저 그것을 본다.
@@ -302,7 +333,7 @@ docker inspect --format \
 | --- | --- |
 | `repository variables가 비어 있습니다` | 위 필수 variables 미설정 |
 | 자격증명 획득 실패 | OIDC provider 미등록, trust policy의 `sub` 불일치 |
-| `docker push` 실패 | 배포 Role의 ECR 권한, 또는 `ECR_REPOSITORY`에 전체 URI를 넣음 |
+| `docker push` 실패 | 배포 Role의 ECR 권한, 또는 `SERVING_API_ECR_REPOSITORY`에 전체 URI를 넣음 |
 | SSH 연결 시간 초과 | 보안그룹 22번 인바운드 없음, 또는 퍼블릭 IP 없음 |
 | `Permission denied (publickey)` | `EC2_SSH_PRIVATE_KEY`가 키페어와 불일치, 또는 `EC2_USER` 틀림 |
 | `docker` 관련 `permission denied` | `EC2_USER`가 docker 그룹에 없음 |

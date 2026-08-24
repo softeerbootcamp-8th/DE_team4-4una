@@ -1,6 +1,6 @@
 # Orchestration(Airflow) 배포
 
-`main`에 머지된 커밋으로 EC2의 Airflow docker compose 스택
+`develop`에 머지된 커밋으로 EC2의 Airflow docker compose 스택
 (`airflow-dag-processor`/`airflow-scheduler`/`airflow-webserver`)을 기동하는
 절차와 사전 조건을 정리한다. 파이프라인은
 [.github/workflows/deploy-orchestration.yml](../.github/workflows/deploy-orchestration.yml)과
@@ -13,20 +13,48 @@ AWS OIDC/배포 Role/EC2 인스턴스 자체의 계정 단위 설정은
 ## 흐름
 
 ```
-main에 머지 → CI 통과 → ci.yml이 배포 워크플로 호출
-  → repository variables 확인
-  → (기존) orchestration 이미지 빌드, ECR push, EC2에 pull
+develop에 머지 (경로 감지) → repository variables 확인
+  → orchestration 이미지 빌드, ECR push, EC2에 pull
   → rsync로 러너가 checkout한 저장소를 EC2 고정 경로에 동기화
   → SSH로 EC2에서 docker compose --env-file ... up -d
   → /api/v2/monitor/health 폴링 (metadatabase+scheduler 모두 healthy일 때까지)
        타임아웃되면 컨테이너 로그를 출력하고 실패 처리 (자동 롤백 없음)
+  → EC2에 쌓인 orchestration 이미지를 최신 2개만 남기고 정리
   → job summary에 commit, repo dir, health 엔드포인트 기록
 ```
 
-`services/orchestration/Dockerfile`로 빌드해 ECR에 올리고 EC2에 pull하는 기존
-스텝은 그대로 둔다. 다만 `infra/compose/airflow.yaml`은 이 이미지를 쓰지 않고
-공식 `apache/airflow` 이미지를 직접 쓰므로, 실제 Airflow 컨테이너 기동은 이
-문서가 다루는 rsync + compose 단계가 담당한다.
+독립 워크플로다. `develop` push 중 아래 경로가 바뀌었을 때만 실행되고, Actions
+탭에서 `Run workflow`로 수동 실행할 수도 있다.
+
+```
+services/orchestration/**   libs/de4-core/**
+infra/compose/airflow.yaml  infra/monitoring/statsd/**
+pyproject.toml              uv.lock
+.github/workflows/deploy-orchestration.yml
+```
+
+경로 목록이 "orchestration 코드"보다 넓은 이유는 아래 rsync가 저장소 트리를 통째로
+밀기 때문이다. 기준은 **`airflow.yaml`이 bind mount하는 것 전부**다.
+
+| mount | 경로 필터 |
+| --- | --- |
+| `services/orchestration/{dags,jobs}` | 포함 |
+| `libs/de4-core/src/de4_core` | 포함 |
+| `infra/monitoring/statsd/airflow-mapping.yml` | 포함 |
+| `data/{reference,processed,local-lake}` | rsync가 `data/`를 제외하므로 미포함 |
+
+statsd 매핑은 `infra/monitoring/` 아래 있지만 `deploy-monitoring.yml`이 아니라 이
+워크플로가 담당한다. bind mount라 내용만 바뀌면 `up -d`가 아무 일도 하지 않으므로,
+compose 스텝이 `airflow-statsd-exporter`를 명시적으로 재기동한다.
+
+**CI를 기다리지 않는다.** `develop` 병합은 branch protection의 required status
+check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 시점에 이미 검증된
+커밋이다.
+
+`services/orchestration/Dockerfile`로 빌드해 ECR에 올리고 EC2에 pull하는 스텝은
+그대로 두었다. 다만 `infra/compose/airflow.yaml`은 이 이미지를 쓰지 않고 공식
+`apache/airflow` 이미지를 직접 쓰므로, **실제로 이 이미지를 사용하는 곳은 없다.**
+제거는 별도 이슈로 다룬다.
 
 저장소 동기화에 `git clone/pull`이 아니라 `rsync`를 쓴 이유는, 러너가 이미
 `actions/checkout`으로 받아온 트리를 기존 SSH 연결(`EC2_SSH_PRIVATE_KEY`)로 그대로
@@ -116,6 +144,28 @@ condition: service_completed_successfully`) 나머지 세 컨테이너가 뜨므
 고정돼 있다(필요하면 워크플로 파일을 수정한다). 타임아웃되면 4개 컨테이너의
 최근 로그(`docker compose logs --tail=200`)를 출력하고 워크플로를 실패로 끝낸다 —
 serving-api와 달리 이전 이미지로 자동 롤백하지 않는다.
+
+### 이미지 정리
+
+health를 통과한 뒤 EC2에서 orchestration 이미지를 **최신 2개만 남기고** 지운다.
+배포마다 ECR 태그(`<registry>/<repo>:<sha>`)와 로컬 태그(`orchestration:<sha>`)가
+하나씩 쌓이는데 지우는 곳이 없었다. 같은 EC2에서 stream-processor가
+`no space left on device`를 낸 것과 같은 구조다.
+
+두 태그는 같은 이미지를 가리키므로 둘 다 지워야 실제로 디스크가 빈다.
+`docker image prune -af`는 쓰지 않는다 — 이 EC2에는 Kafka, Airflow, exporter 등
+다른 서비스 이미지가 함께 있다.
+
+serving-api와 방식이 다르다. 거기서는 돌고 있는 컨테이너에서 직전 이미지를 알아낼
+수 있지만, orchestration은 이 이미지로 컨테이너를 띄우지 않아 그럴 수 없다. 그래서
+생성 시각 기준으로 최신 2개를 고른다.
+
+이 워크플로를 도입하기 전에 쌓인 이미지는 자동으로 지워지지 않는다. 필요하면
+인스턴스에서 직접 확인하고 정리한다.
+
+```bash
+docker images --filter "reference=orchestration:*" --format '{{.Repository}}:{{.Tag}}'
+```
 
 ## 실패했을 때
 
