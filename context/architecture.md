@@ -95,11 +95,15 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 
 The implemented Streamlit dashboard (issue #376) reads one configured
 `road_segment` snapshot Parquet object from S3 through the AWS default
-credential chain. It converts the stored `EPSG:32118` WKB geometry to
-`EPSG:4326`, then sends the snapshot's `segment_id` values to
-`POST /api/v1/comfort-scores/batch` in contract-sized chunks. The dashboard
-joins geometry and score responses by `segment_id` and visualizes score bands;
-segments absent from the API response remain visible as unavailable.
+credential chain and converts the stored `EPSG:32118` WKB geometry to
+`EPSG:4326`. A borough selection narrows candidates first (issue #407); the
+map viewport narrows further to what is actually rendered (issue #414), and
+only that visible set's `segment_id` values are sent to
+`POST /api/v1/comfort-scores/batch` in contract-sized chunks — a borough
+selection alone never triggers a request for every one of its segments. The
+dashboard joins geometry and score responses by `segment_id` and visualizes
+score bands; segments absent from the API response remain visible as
+unavailable.
 
 The dashboard has no PostgreSQL configuration and never reimplements the
 serving API's current-to-standard fallback. Its long-lived geometry cache and
