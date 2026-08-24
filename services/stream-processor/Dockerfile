@@ -25,9 +25,40 @@ COPY . .
 RUN uv sync --locked --package stream-processor --no-dev --no-editable \
     && rm -rf /root/.cache/uv
 
-# 운영 EC2가 Maven Central에 연결되지 않아도 시작하도록 Kafka/S3A JAR를 미리 받는다
-RUN SPARK_LOCAL_IP=127.0.0.1 uv run --no-sync --package stream-processor python -c \
-    "from pyspark.sql import SparkSession; from stream_processor.cli import SPARK_PACKAGES; session = SparkSession.builder.master('local[1]').config('spark.ui.enabled', 'false').config('spark.jars.packages', SPARK_PACKAGES).getOrCreate(); session.stop()"
+# 운영 EC2가 Maven Central에 접근하지 않아도 실행할 수 있도록
+# 빌드 시 Kafka/S3A 의존성을 resolve한 뒤 PySpark에 없는 JAR만 번들한다.
+RUN set -eux; \
+    SPARK_LOCAL_IP=127.0.0.1 uv run --no-sync --package stream-processor python -c \
+        "from pyspark.sql import SparkSession; \
+        from stream_processor.cli import SPARK_PACKAGES; \
+        session = SparkSession.builder \
+            .master('local[1]') \
+            .config('spark.ui.enabled', 'false') \
+            .config('spark.jars.packages', SPARK_PACKAGES) \
+            .getOrCreate(); \
+        session.stop()"; \
+    \
+    PYSPARK_JARS_DIR="$(uv run --no-sync --package stream-processor python -c \
+        'from pathlib import Path; import pyspark; print(Path(pyspark.__file__).resolve().parent / "jars")')"; \
+    IVY_JARS_DIR="$(find /root -maxdepth 2 -type d -path '/root/.ivy2*/jars' -print -quit)"; \
+    \
+    test -n "$IVY_JARS_DIR"; \
+    \
+    for pattern in \
+        'software.amazon.awssdk_bundle-*.jar' \
+        'org.apache.hadoop_hadoop-aws-*.jar' \
+        'org.apache.spark_spark-sql-kafka-0-10_2.13-*.jar' \
+        'org.apache.spark_spark-token-provider-kafka-0-10_2.13-*.jar' \
+        'org.apache.kafka_kafka-clients-*.jar' \
+        'org.apache.commons_commons-pool2-*.jar' \
+        'org.wildfly.openssl_wildfly-openssl-*.jar'; \
+    do \
+        jar="$(find "$IVY_JARS_DIR" -maxdepth 1 -type f -name "$pattern" -print -quit)"; \
+        test -n "$jar"; \
+        cp "$jar" "$PYSPARK_JARS_DIR/"; \
+    done; \
+    \
+    rm -rf /root/.ivy2* /tmp/spark-*
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uv", "run", "--no-sync", "--package", "stream-processor", "stream-processor"]
