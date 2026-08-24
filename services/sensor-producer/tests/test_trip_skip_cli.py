@@ -6,9 +6,10 @@ from sensor_producer.cli import (
     build_parser,
     enforce_trip_skip_ratio,
     local_parquet,
+    positive_int,
     ratio,
-    resolve_trips,
 )
+from sensor_producer.sampling import DEFAULT_HOURLY_EVENT_TARGET
 from sensor_producer.simulation import ReplayResult
 
 
@@ -41,6 +42,12 @@ def test_ratio_rejects_values_outside_unit_interval(value: str) -> None:
         ratio(value)
 
 
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_positive_int_rejects_non_positive_values(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int(value)
+
+
 def test_local_parquet_accepts_an_existing_parquet_file(tmp_path: Path) -> None:
     path = tmp_path / "input.parquet"
     path.touch()
@@ -59,7 +66,7 @@ def test_run_requires_all_local_parquet_inputs() -> None:
         build_parser().parse_args(["run"])
 
 
-def test_run_replays_the_whole_trip_file_without_date_or_count_options(
+def test_run_defaults_to_the_hourly_event_budget(
     tmp_path: Path,
 ) -> None:
     paths = [
@@ -82,10 +89,5 @@ def test_run_replays_the_whole_trip_file_without_date_or_count_options(
 
     assert not hasattr(arguments, "source_date")
     assert not hasattr(arguments, "max_trips")
-    _, summary = resolve_trips(arguments)
-    assert summary == {
-        "format": "parquet",
-        "path": str(paths[0].resolve()),
-        "reader_version": "tlc-hvfhv-parquet-v2",
-        "selection": "all_valid_rows",
-    }
+    assert arguments.sample_hz == 10
+    assert arguments.hourly_event_target == DEFAULT_HOURLY_EVENT_TARGET

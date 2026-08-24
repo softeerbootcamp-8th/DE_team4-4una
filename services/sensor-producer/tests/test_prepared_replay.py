@@ -5,12 +5,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from sensor_producer.domain import RoadSegment, SimulationConfig
+from sensor_producer.nyc_data import NYC_TIMEZONE
 from sensor_producer.prepared_replay import (
     MANIFEST_FILE_NAME,
     ROUTES_FILE_NAME,
     TRIPS_FILE_NAME,
+    ReplayBounds,
     iter_prepared_replay,
     prepare_replay_bundle,
+    source_anchor_for_wall_time,
     stable_worker_index,
 )
 from sensor_producer.publisher import MemoryPublisher
@@ -143,6 +146,64 @@ def test_prepared_replay_assigns_each_trip_to_one_stable_worker(tmp_path: Path) 
         for index, items in enumerate(workers)
         for item in items
     )
+
+
+def test_source_anchor_matches_current_new_york_weekday_and_clock() -> None:
+    bounds = ReplayBounds(
+        datetime(2024, 2, 1, 0, tzinfo=NYC_TIMEZONE),
+        datetime(2024, 2, 29, 23, 59, tzinfo=NYC_TIMEZONE),
+    )
+
+    source_anchor = source_anchor_for_wall_time(
+        bounds,
+        datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC),
+    )
+
+    assert source_anchor.weekday() == 0
+    assert (source_anchor.hour, source_anchor.minute, source_anchor.second) == (
+        6,
+        15,
+        30,
+    )
+    assert source_anchor.date() == date(2024, 2, 26)
+
+
+def test_source_anchor_uses_actual_replay_interval_across_month_boundary() -> None:
+    bounds = ReplayBounds(
+        datetime(2024, 1, 31, 23, 42, tzinfo=NYC_TIMEZONE),
+        datetime(2024, 2, 29, 23, 59, tzinfo=NYC_TIMEZONE),
+    )
+
+    source_anchor = source_anchor_for_wall_time(
+        bounds,
+        datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC),
+    )
+
+    assert source_anchor == datetime(
+        2024, 2, 26, 6, 15, 30, tzinfo=NYC_TIMEZONE
+    )
+    assert bounds.cycle_start == datetime(
+        2024, 1, 31, 23, 42, tzinfo=NYC_TIMEZONE
+    )
+    assert bounds.cycle_hours == 697
+
+
+def test_prepared_replay_rotates_the_month_from_source_anchor(tmp_path: Path) -> None:
+    output_dir, router, _, _ = prepare_test_bundle(tmp_path)
+
+    replay = list(
+        iter_prepared_replay(
+            output_dir,
+            router,
+            date(2026, 8, 19),
+            start_at=datetime(2024, 2, 1, 10, 1, 30, tzinfo=NYC_TIMEZONE),
+        )
+    )
+
+    request_times = [item.trip.request_datetime for item in replay]
+    assert request_times == sorted(request_times)
+    assert [value.minute for value in request_times] == [2, 2, 3]
+    assert request_times[1] > source_time(2).replace(tzinfo=NYC_TIMEZONE)
 
 
 def test_prepared_replay_bypasses_runtime_route_search(

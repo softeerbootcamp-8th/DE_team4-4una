@@ -83,6 +83,7 @@ uv run --package sensor-producer sensor-producer run \
   --topic sensor-events \
   --run-id nyc-202402-v1 \
   --sample-hz 10 \
+  --hourly-event-target 10000000 \
   --time-scale 1
 ```
 
@@ -103,26 +104,25 @@ the replay if its skipped-trip ratio is too high. The option is disabled by
 default. The producer still flushes published events and writes the run summary
 before enforcing the threshold.
 
-DuckDB reads every valid row from the single local TLC Parquet supplied by
-`--trips-path`. It selects only the timestamps, pickup and drop-off zone IDs, trip
-distance, and Parquet row number needed by the simulator, then yields rows in bounded
-batches. Trips are ordered by request time and physical row number. The row number is
-also part of the deterministic `trip_id`, so the input file must be treated as
-immutable. Directory discovery and multi-file replay are not supported.
+DuckDB reads every valid row from the configured monthly TLC Parquet to estimate the
+full 10 Hz workload. The default policy uses a stable `trip_id` hash to select whole
+Trips under an expected 10-million-event hourly budget. Busy hours receive a lower
+selection ratio, while quiet hours are not filled artificially. Because sampling is
+Trip-level, selected trips retain contiguous `trip_seq` values and 100 ms intervals.
 
-When each Trip is actually dispatched, the producer captures that moment's UTC
-date. Published request, pickup, drop-off, and sensor timestamps combine that date
-with the original TLC clock time. TLC day offsets within the Trip are retained, so
-a passenger journey crossing midnight remains ordered. The source timestamps remain
-the separate wall-clock schedule used to preserve dispatch and movement gaps.
+At startup, the current UTC anchor is converted to `America/New_York`. Replay
+rotates from the source replay interval's matching weekday occurrence and local
+clock time. That source anchor maps to one current UTC wall anchor, so all dispatch
+and event gaps remain unchanged while published `event_time` stays on the current
+UTC timeline.
 
 ## Timing and delivery contracts
 
 - Dispatch actions are ordered and scheduled by the source `request_datetime`;
   route planning happens in that action.
-- Sensor `event_time` uses the dispatch moment's UTC date and the TLC clock time,
-  starts at the rebased pickup, ends at the rebased drop-off, and uses zero-based
-  contiguous `trip_seq` values.
+- Sensor `event_time` maps the selected TLC source clock onto one current UTC run
+  anchor, starts at the mapped pickup, ends at the mapped drop-off, and uses
+  zero-based contiguous `trip_seq` values.
 - Kafka values follow `de4_core.SensorEvent`; the message key is `trip_id`, so
   one trip stays ordered within one partition.
 - Kafka assigns the record timestamp independently from the logical sensor

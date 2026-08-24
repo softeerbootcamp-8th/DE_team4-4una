@@ -1,15 +1,16 @@
 ---
 owner: simulation-team
 status: implemented-prototype
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-24
 ---
 
 # Deterministic Trip Simulation
 
 ## Purpose
 
-Convert every valid completed HVFHV trip in one pinned monthly Parquet into a
-reproducible wall-clock stream of dispatch and vehicle sensor observations. The
+Convert a deterministic, capacity-bounded sample of every valid completed HVFHV
+trip in one pinned monthly Parquet into a reproducible wall-clock stream of
+dispatch and vehicle sensor observations. The
 simulation creates engineering data for pipeline development; it does not claim
 to reconstruct the vehicles' actual routes or physical motion.
 
@@ -27,13 +28,14 @@ A simulation run should record at least:
   mix version, and assignment seed
 - motion-model version
 - sensor sampling frequency
+- hourly event target and Trip-sampling policy version
 - event-contract version
-- replay start time and time-scale value
+- source and UTC wall-clock anchors, replay start time, and time-scale value
 
 The same inputs and logical seeds must produce the same eligible trips, endpoints,
-routes, segment traversal order, and synthetic measurements. Event dates may differ
-because each Trip uses its actual UTC dispatch date, while TLC clock time and
-Trip-relative offsets remain stable.
+routes, segment traversal order, and synthetic measurements. Event timestamps may
+differ between runs because the selected source clock is mapped to the current UTC
+run anchor, while source gaps and Trip-relative offsets remain stable.
 
 ## Implemented prototype pipeline
 
@@ -48,28 +50,36 @@ batches rather than building a Python list.
    cannot support a passenger-trip simulation.
 2. Sort by request timestamp and the immutable file's physical Parquet row number.
    The row number also participates in the versioned `trip_id`, so rewriting the
-   input file in place is outside the reproducibility contract. The producer does
-   not apply a source-date filter, row limit, or sampling policy.
-3. Use source timestamps only for dispatch ordering and wall-clock scheduling. At
-   each actual dispatch, capture the current UTC date and combine it with the TLC
-   request clock time. Rebase pickup and drop-off the same way while retaining their
-   source-day offsets from request, so a Trip crossing midnight remains valid.
-4. Find valid canonical-road points inside pickup and drop-off taxi zones using a
+   input file in place is outside the reproducibility contract.
+3. Project the full 10 Hz workload into source event-hour buckets. Apply one base
+   Trip-sampling ratio to preserve quiet-hour sparsity and lower that ratio for busy
+   hours whose expected output would exceed the configured hourly target. A stable
+   hash of policy version, seed, and `trip_id` selects whole Trips, so selected
+   `trip_seq` values remain continuous.
+4. Convert the UTC run anchor to `America/New_York`, choose the source replay
+   interval's matching weekday occurrence and local clock time, and rotate the
+   sorted monthly input from that point. Rows before the point follow after the
+   actual first-to-last request interval. This avoids treating a previous-month
+   dispatch request for a month-start pickup as the source month.
+5. Map the selected source anchor to one current UTC run anchor. Request, pickup,
+   drop-off, and sensor timestamps retain their source-relative offsets, including
+   midnight crossings.
+6. Find valid canonical-road points inside pickup and drop-off taxi zones using a
    stable spatial ordering plus a deterministic seed derived from the trip ID.
-5. Route between endpoints over the canonical road graph.
-6. Assign one vehicle profile per trip. Two exclusive modes exist: a fixed profile
+7. Route between endpoints over the canonical road graph.
+8. Assign one vehicle profile per trip. Two exclusive modes exist: a fixed profile
    for every trip (`--vehicle-profile-id`, the default) or a deterministic draw from
    a configured share table (`--vehicle-mix`). The draw is
    `sha256("vehicle-mix:{seed}:{trip_id}")` mapped onto the cumulative shares, so it
    is reproducible rather than random. The mix name is deliberately excluded from the
    hash input: adjusting one share then moves only the trips near the shifted
    boundary instead of reshuffling every assignment.
-7. Convert route geometry and the pickup-to-drop-off duration into
+9. Convert route geometry and the pickup-to-drop-off duration into
    configured-frequency passenger-journey progress and motion states.
-8. Apply road attributes, humps, turns, speed changes, and vehicle parameters to
+10. Apply road attributes, humps, turns, speed changes, and vehicle parameters to
    generate comfort-related measurements.
-9. Replay inter-dispatch gaps and movement at `time_scale = 1.0`.
-10. Assign zero-based `trip_seq` values and publish keyed, versioned events to
+11. Replay inter-dispatch gaps and movement at `time_scale = 1.0`.
+12. Assign zero-based `trip_seq` values and publish keyed, versioned events to
     Kafka.
 
 ## Candidate simulation inputs per sample
@@ -121,6 +131,12 @@ The demonstration frequency is 10 Hz, so the producer emits one sample every
 100 ms. It is configurable for test and experiment runs. Every trip uses
 `trip_seq = 0, 1, 2, ...` independent of clock jitter.
 
+The default hourly target is 10 million events. `hourly-trip-budget-v1` samples
+whole Trips rather than individual events. It first computes a month-wide base
+ratio and then caps busy source hours; quiet hours are not upsampled to fill the
+budget. A Trip spanning several hours uses the strictest ratio among those hours.
+The target is an expected capacity bound, not an exact row-count guarantee.
+
 Bronze sensor events carry GPS coordinates but no `segment_id`. Even though the
 simulator uses a LION route internally, Spark performs the authoritative
 GPS-to-LION match later and writes the result to `sensor_events_matched`. This
@@ -139,12 +155,13 @@ active trip in memory. `time_scale = 0` is an explicit no-wait verification
 mode; no implicit idle-gap cap is applied.
 
 Scheduling time and published event time are deliberately separate. Queue actions
-remain on the source TLC timeline so gaps are preserved, while published timestamps
-remain independent of the historical calendar year. Route `planned_at` and sensor
-`event_time` use timestamp policy `dispatch-utc-date-with-tlc-clock-v1`: capture the
-UTC date once per Trip when its
-dispatch action runs, combine it with TLC time-of-day, and retain only intra-Trip
-source date differences. The run summary records this policy and execution start.
+remain on the rotated source TLC timeline so gaps are preserved, while published
+timestamps remain independent of the historical calendar year. Route `planned_at`
+and sensor `event_time` use timestamp policy
+`current-ny-clock-to-run-utc-anchor-v2`: the source replay interval's matching New
+York weekday and clock time maps to one UTC run anchor, and every Trip retains its
+offset from that shared source anchor. The run summary records both anchors, the
+sampling plan, and the execution start.
 
 ## Prototype signal model
 

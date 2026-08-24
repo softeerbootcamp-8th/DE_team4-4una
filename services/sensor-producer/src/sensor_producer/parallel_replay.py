@@ -13,9 +13,14 @@ from queue import Empty
 
 from sensor_producer.domain import SimulationConfig
 from sensor_producer.environment import RoadEnvironment
-from sensor_producer.prepared_replay import iter_prepared_replay
+from sensor_producer.prepared_replay import (
+    ReplayBounds,
+    iter_prepared_replay,
+    source_anchor_for_wall_time,
+)
 from sensor_producer.publisher import KafkaPublisher
 from sensor_producer.routing import RoadRouter
+from sensor_producer.sampling import HourlySamplingPlan
 from sensor_producer.simulation import (
     ReplayClock,
     ReplayCoordinator,
@@ -32,7 +37,8 @@ class ParallelReplaySpec:
     road_environment_path: Path
     taxi_zone_path: Path
     road_snapshot_date: date
-    source_anchor: datetime
+    source_bounds: ReplayBounds
+    sampling_plan: HourlySamplingPlan
     simulation: SimulationConfig
     worker_count: int
     bootstrap_servers: tuple[str, ...]
@@ -44,7 +50,9 @@ class ParallelReplaySpec:
             raise ValueError("parallel replay requires at least two workers")
 
 
-def run_parallel_replay(spec: ParallelReplaySpec) -> tuple[ReplayResult, datetime]:
+def run_parallel_replay(
+    spec: ParallelReplaySpec,
+) -> tuple[ReplayResult, datetime, datetime]:
     """Load workers first, then release all of them onto one shared timeline."""
     context = multiprocessing.get_context("spawn")
     status_queue = context.Queue()
@@ -70,8 +78,9 @@ def run_parallel_replay(spec: ParallelReplaySpec) -> tuple[ReplayResult, datetim
                 raise RuntimeError(f"unexpected worker message: {kind}")
 
         wall_anchor = datetime.now(UTC) + timedelta(seconds=STARTUP_DELAY_SECONDS)
+        source_anchor = source_anchor_for_wall_time(spec.source_bounds, wall_anchor)
         for _ in processes:
-            start_queue.put(wall_anchor)
+            start_queue.put((wall_anchor, source_anchor))
 
         for _ in processes:
             kind, _, result = _next_message(status_queue, processes)
@@ -95,7 +104,7 @@ def run_parallel_replay(spec: ParallelReplaySpec) -> tuple[ReplayResult, datetim
     if failed:
         names = ", ".join(process.name for process in failed)
         raise RuntimeError(f"parallel replay workers failed: {names}")
-    return _merge_results(worker_results), wall_anchor
+    return _merge_results(worker_results), wall_anchor, source_anchor
 
 
 def _run_worker(
@@ -116,22 +125,29 @@ def _run_worker(
         if environment.road_segment_snapshot_date != spec.road_snapshot_date:
             raise ValueError("worker road snapshot differs from prepared replay")
         router = RoadRouter(environment.segments)
+        publisher = KafkaPublisher(spec.bootstrap_servers, spec.topic)
+        status_queue.put(("ready", worker_index, None))
+        start_signal = start_queue.get()
+        if (
+            not isinstance(start_signal, tuple)
+            or len(start_signal) != 2
+            or not all(isinstance(value, datetime) for value in start_signal)
+        ):
+            raise TypeError("parallel replay start signal must contain two datetimes")
+        wall_anchor, source_anchor = start_signal
         trips = iter_prepared_replay(
             spec.bundle_dir,
             router,
             spec.road_snapshot_date,
             worker_index=worker_index,
             worker_count=spec.worker_count,
+            start_at=source_anchor,
+            sampling_plan=spec.sampling_plan,
         )
-        publisher = KafkaPublisher(spec.bootstrap_servers, spec.topic)
-        status_queue.put(("ready", worker_index, None))
-        wall_anchor = start_queue.get()
-        if not isinstance(wall_anchor, datetime):
-            raise TypeError("parallel replay start signal must be a datetime")
-        timeline = ReplayTimeline(spec.source_anchor, wall_anchor)
+        timeline = ReplayTimeline(source_anchor, wall_anchor)
         clock = ReplayClock(
             spec.simulation.time_scale,
-            source_anchor=spec.source_anchor,
+            source_anchor=source_anchor,
             wall_anchor=wall_anchor,
             max_lag_seconds=spec.max_replay_lag_seconds,
         )
@@ -157,6 +173,16 @@ def _next_message(
         try:
             return status_queue.get(timeout=1)
         except Empty:
+            failed = [
+                process
+                for process in processes
+                if process.exitcode not in (None, 0)
+            ]
+            if failed:
+                names = ", ".join(process.name for process in failed)
+                raise RuntimeError(
+                    f"parallel replay workers exited unexpectedly: {names}"
+                )
             if any(process.is_alive() for process in processes):
                 continue
             raise RuntimeError("parallel replay workers exited without a result")

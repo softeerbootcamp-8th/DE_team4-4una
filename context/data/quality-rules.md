@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-24
 ---
 
 # Data Quality and Idempotency Rules
@@ -12,7 +12,8 @@ last_reviewed: 2026-08-21
 - `trip_seq` starts at zero and increases by one per expected sensor sample.
 - At sampling frequency `n` Hz, the nominal interval is `1000 / n` milliseconds.
   Examples: 1 Hz = 1000 ms, 10 Hz = 100 ms, 50 Hz = 20 ms, and 100 Hz = 10 ms.
-- The selected production sampling frequency remains open.
+- The demonstration sampling frequency is 10 Hz; lower frequencies remain valid
+  only for explicit tests and experiments.
 - `event_id` is the declared primary key.
 - `(trip_id, trip_seq)` is the deterministic replay, ordering, and deduplication
   key, provided `trip_id` uniquely identifies a vehicle-specific simulation.
