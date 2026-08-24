@@ -1,0 +1,293 @@
+"""Borough 단위 segment 조회, UI 프레임워크에 의존하지 않는다.
+
+한 borough를 고르면 그 안의 segment를 전부 만들어 gzip으로 눌러 캐시한다. 지도를
+움직이는 동안에는 서버를 부르지 않으므로, 요청은 borough를 바꿀 때만 나간다.
+
+스냅샷(segment 목록, borough 인덱스)과 이 캐시를 프로세스 메모리에
+들고 있어서 uvicorn worker는 1개여야 한다. worker를 늘리면 worker마다 통째로
+중복해 올리고 각자 따로 콜드 스타트를 한다.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import logging
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from dashboard.config import (
+    ROAD_SEGMENT_CACHE_TTL_SECONDS,
+    SCORE_CACHE_TTL_SECONDS,
+    SNAPSHOT_FALLBACK_MAX_SEGMENTS,
+    DashboardConfig,
+)
+from dashboard.geojson import build_feature_collection, join_road_segments_with_scores
+from dashboard.road_geometry import RoadSegment, load_road_segments
+from dashboard.serving_api_client import ComfortScore, fetch_comfort_scores
+from dashboard.zone_master import (
+    Borough,
+    borough_outlines,
+    load_zone_master,
+    zone_boroughs,
+)
+
+logger = logging.getLogger(__name__)
+
+# 만료된 borough를 다시 만들어두기 위해 백그라운드 스레드가 도는 주기. TTL보다
+# 훨씬 짧게 잡아 만료 직후 채워지게 하되, 캐시가 살아 있으면 dict 조회만 하고
+# 넘어가므로 이 주기 자체는 거의 공짜다.
+PREWARM_TICK_SECONDS = 60
+
+
+class UnknownBoroughError(ValueError):
+    """Raised when a borough name is not in the loaded zone reference."""
+
+
+@dataclass(frozen=True, slots=True)
+class BoroughSummary:
+    name: str
+    center: tuple[float, float]
+    bounds: tuple[float, float, float, float]
+    segment_count: int
+    geometry: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class Bootstrap:
+    total_segment_count: int
+    boroughs: tuple[BoroughSummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentPayload:
+    """gzip으로 눌러둔 GeoJSON 응답 본문과 그 메타데이터.
+
+    dict가 아니라 눌린 bytes로 들고 있는다 -- borough 하나가 GeoJSON으로 18MB인데
+    파이썬 dict로 두면 그보다 훨씬 커진다. gzip 후에는 4MB대라 borough 다섯 개를
+    전부 캐시해도 20MB 남짓이다.
+    """
+
+    segment_count: int
+    truncated: bool
+    body: bytes
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Snapshot:
+    segments: tuple[RoadSegment, ...]
+    boroughs: tuple[Borough, ...]
+    # borough 이름 -> segment 위치.
+    borough_indices: Mapping[str, frozenset[int]]
+    expires_at: float
+
+
+def group_indices_by_borough(
+    segments: Sequence[RoadSegment],
+    boroughs: Mapping[int, str],
+) -> dict[str, frozenset[int]]:
+    """모든 segment를 한 번만 순회해 borough 이름 -> segment 위치로 묶는다(#414)."""
+    grouped: dict[str, list[int]] = {}
+    for index, segment in enumerate(segments):
+        if segment.location_id is None:
+            continue
+        borough = boroughs.get(segment.location_id)
+        if borough is not None:
+            grouped.setdefault(borough, []).append(index)
+    return {name: frozenset(indices) for name, indices in grouped.items()}
+
+
+class DashboardService:
+    """S3 스냅샷과 Serving API 앞에 놓인, 요청 하나를 처리하는 계층."""
+
+    def __init__(
+        self,
+        config: DashboardConfig,
+        *,
+        now: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._config = config
+        self._now = now
+        self._snapshot: _Snapshot | None = None
+        # 스냅샷 로딩 중에는 다른 요청도 막힌다. 첫 요청이 느려지는 대신 동시에
+        # 들어온 요청들이 S3를 중복해서 읽지 않는다.
+        self._snapshot_lock = threading.Lock()
+        # (vehicle_profile_id, borough) -> 눌러둔 응답.
+        self._payloads: dict[tuple[int, str | None], SegmentPayload] = {}
+        # borough마다 따로 잠근다. 하나를 만드는 동안(Serving API 왕복이 포함되어
+        # 수 초가 걸린다) 이미 캐시된 다른 borough 요청까지 막히면 안 된다.
+        self._build_locks: dict[tuple[int, str | None], threading.Lock] = {}
+        self._build_locks_guard = threading.Lock()
+        self._prewarm_started = False
+
+    def bootstrap(self) -> Bootstrap:
+        snapshot = self._ensure_snapshot()
+        return Bootstrap(
+            total_segment_count=len(snapshot.segments),
+            boroughs=tuple(
+                BoroughSummary(
+                    name=borough.name,
+                    center=borough.center,
+                    bounds=borough.bounds,
+                    segment_count=len(snapshot.borough_indices.get(borough.name, ())),
+                    geometry=borough.geometry,
+                )
+                for borough in snapshot.boroughs
+            ),
+        )
+
+    def get_segments(self, borough: str | None) -> SegmentPayload:
+        """borough 안의 segment 전부를 gzip된 GeoJSON 응답으로 돌려준다.
+
+        살아 있는 캐시가 있으면 그대로 쓴다. 없으면 이 borough에 대해서만 잠그고
+        만든다 -- 같은 borough를 동시에 요청한 두 번째 요청은 첫 번째가 만든 것을
+        받는다.
+        """
+        snapshot = self._ensure_snapshot()
+        key = (self._config.vehicle_profile_id, borough)
+        cached = self._payloads.get(key)
+        if cached is not None and cached.expires_at > self._now():
+            return cached
+
+        with self._build_lock(key):
+            cached = self._payloads.get(key)
+            if cached is not None and cached.expires_at > self._now():
+                return cached
+            payload = self._build_payload(snapshot, borough)
+            self._payloads[key] = payload
+            return payload
+
+    def start_prewarm(self) -> None:
+        """borough별 응답을 미리 만들어두는 백그라운드 스레드를 띄운다.
+
+        사용자가 outline을 보며 borough를 고르는 사이에 서버가 미리 만들어두면,
+        첫 클릭이 캐시 히트가 된다. 만료된 것도 다음 tick에 다시 채운다.
+        """
+        if self._prewarm_started:
+            return
+        self._prewarm_started = True
+        threading.Thread(
+            target=self._prewarm_loop, name="dashboard-prewarm", daemon=True
+        ).start()
+
+    def _prewarm_loop(self) -> None:
+        while True:
+            try:
+                snapshot = self._ensure_snapshot()
+                # zone master가 없으면 borough 개념이 없다. 스냅샷 전체를 미리
+                # 만들어둘 이유는 없으므로(상한이 걸린 fallback이다) 건너뛴다.
+                for borough in snapshot.boroughs:
+                    self.get_segments(borough.name)
+            except Exception:
+                # 스레드가 죽으면 다시 뜨지 않는다. Serving API가 잠깐 내려간
+                # 정도로 프리워밍을 영구히 잃지 않도록 다음 tick에 재시도한다.
+                logger.exception("prewarm tick failed")
+            time.sleep(PREWARM_TICK_SECONDS)
+
+    def _build_lock(self, key: tuple[int, str | None]) -> threading.Lock:
+        with self._build_locks_guard:
+            return self._build_locks.setdefault(key, threading.Lock())
+
+    def _build_payload(self, snapshot: _Snapshot, borough: str | None) -> SegmentPayload:
+        segments, truncated = self._segments_for(snapshot, borough)
+        scores, effective_profile_id, fallback = self._scores_for(segments)
+        body = {
+            "segment_count": len(segments),
+            "truncated": truncated,
+            "requested_vehicle_profile_id": self._config.vehicle_profile_id,
+            "effective_vehicle_profile_id": effective_profile_id,
+            "vehicle_profile_fallback": fallback,
+            "features": build_feature_collection(
+                join_road_segments_with_scores(segments, scores)
+            ),
+        }
+        return SegmentPayload(
+            segment_count=len(segments),
+            truncated=truncated,
+            body=gzip.compress(json.dumps(body, separators=(",", ":")).encode(), 6),
+            expires_at=self._now() + SCORE_CACHE_TTL_SECONDS,
+        )
+
+    def _segments_for(
+        self,
+        snapshot: _Snapshot,
+        borough: str | None,
+    ) -> tuple[list[RoadSegment], bool]:
+        """그릴 segment 전부. 두 번째 값은 상한에 걸려 잘렸는지 여부다."""
+        if borough is not None:
+            if borough not in snapshot.borough_indices:
+                raise UnknownBoroughError(borough)
+            indices = sorted(snapshot.borough_indices[borough])
+            return [snapshot.segments[index] for index in indices], False
+        if snapshot.boroughs:
+            # 아직 아무 borough도 고르지 않았다. outline만 보여주는 상태라
+            # 도로는 하나도 그리지 않는다.
+            return [], False
+        # zone master가 없어 borough 개념 자체가 없는 배포. 기준이 스냅샷
+        # 전체뿐이라 상한을 걸지 않으면 응답이 20MB를 넘는다.
+        segments = list(snapshot.segments[:SNAPSHOT_FALLBACK_MAX_SEGMENTS])
+        return segments, len(snapshot.segments) > len(segments)
+
+    def _ensure_snapshot(self) -> _Snapshot:
+        snapshot = self._snapshot
+        if snapshot is not None and snapshot.expires_at > self._now():
+            return snapshot
+        with self._snapshot_lock:
+            # 락을 기다리는 사이 다른 스레드가 이미 읽어왔을 수 있다.
+            snapshot = self._snapshot
+            if snapshot is not None and snapshot.expires_at > self._now():
+                return snapshot
+            snapshot = self._load_snapshot()
+            self._snapshot = snapshot
+            # 새 스냅샷의 segment는 예전 응답과 다를 수 있다.
+            self._payloads.clear()
+            return snapshot
+
+    def _load_snapshot(self) -> _Snapshot:
+        config = self._config
+        segments = load_road_segments(config.road_segment_s3_uri, config.aws_region)
+
+        boroughs: tuple[Borough, ...] = ()
+        borough_indices: dict[str, frozenset[int]] = {}
+        if config.zone_master_s3_uri:
+            # outline과 zone 조회가 다운로드 하나를 나눠 쓴다.
+            zone_master = load_zone_master(config.zone_master_s3_uri, config.aws_region)
+            boroughs = tuple(borough_outlines(zone_master))
+            borough_indices = group_indices_by_borough(segments, zone_boroughs(zone_master))
+
+        return _Snapshot(
+            segments=tuple(segments),
+            boroughs=boroughs,
+            borough_indices=borough_indices,
+            expires_at=self._now() + ROAD_SEGMENT_CACHE_TTL_SECONDS,
+        )
+
+    def _scores_for(
+        self,
+        segments: Sequence[RoadSegment],
+    ) -> tuple[dict[str, ComfortScore], int, bool]:
+        """borough 전체 점수를 한 번에 조회한다.
+
+        serving API가 요청 하나에 1000건까지 받으므로 3만 건이면 30번으로 쪼개져
+        나가고, fetch_comfort_scores가 그중 8개씩 병렬로 던진다.
+        """
+        profile_id = self._config.vehicle_profile_id
+        if not segments:
+            return {}, profile_id, False
+
+        result = fetch_comfort_scores(
+            endpoint=self._config.batch_endpoint,
+            vehicle_profile_id=profile_id,
+            segment_ids=[segment.segment_id for segment in segments],
+            batch_size=self._config.batch_chunk_size,
+            timeout_seconds=self._config.request_timeout_seconds,
+        )
+        return (
+            result.scores,
+            result.effective_vehicle_profile_id,
+            result.vehicle_profile_fallback,
+        )
