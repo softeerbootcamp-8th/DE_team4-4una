@@ -53,10 +53,13 @@ def on_failure_callback(context: dict) -> None:
     # S3에 남기는 원본은 가공 없이 이 dict 그대로 JSON 직렬화한다(#409) — 가독성은
     # 아래 Slack 메시지 쪽에서 챙긴다. 값을 지어내지 않는다: 아직 아무 상위 task도
     # 성공하지 않았으면 counts는 그대로 None이다.
+    # data_interval 없이 트리거된 bare manual run은 context에 logical_date 키
+    # 자체가 없다(#409 EC2 검증 중 KeyError로 실제 발견) — 없으면 None으로 남긴다.
+    logical_date = context.get("logical_date")
     record = {
         "dag_id": dag_id,
         "task_id": task_id,
-        "logical_date": str(context["logical_date"]),
+        "logical_date": str(logical_date) if logical_date is not None else None,
         "owner": owner.name,
         "severity": severity,
         "exception": str(exception) if exception else None,
@@ -68,7 +71,7 @@ def on_failure_callback(context: dict) -> None:
     lines = [
         f"{SEVERITY_LABELS[severity]} *{dag_id}* task 실패: `{task_id}`",
         f"담당자: {mention}",
-        f"처리 일자(logical_date): {record['logical_date']}",
+        f"처리 일자(logical_date): {record['logical_date'] or '알 수 없음(수동 트리거)'}",
         f"예외: {exception}" if exception else "예외 정보 없음(수동 확인 필요)",
         f"처리 건수: {counts}"
         if counts is not None

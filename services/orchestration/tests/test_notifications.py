@@ -257,6 +257,22 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
     )
 
 
+def test_failure_callback_handles_missing_logical_date(_fake_slack_hook, _fake_object_store):
+    # data_interval 없이 트리거된 bare manual run은 context에 logical_date 키
+    # 자체가 없다 — EC2 검증 중 KeyError로 실제 발견(#409). 이 경우에도 Slack
+    # 알림 자체는 반드시 나가야 한다.
+    context = _context(
+        "bronze_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    )
+    del context["logical_date"]
+
+    notifications.on_failure_callback(context)
+
+    _fake_slack_hook.client.chat_postMessage.assert_called_once()
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "처리 일자" in text
+
+
 def test_failure_callback_includes_counts_when_upstream_summary_already_succeeded(
     _fake_slack_hook, _fake_object_store
 ):
