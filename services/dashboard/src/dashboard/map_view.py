@@ -54,29 +54,43 @@ def join_road_segments_with_scores(
     ]
 
 
-def build_map(
-    segments: Sequence[ScoredRoadSegment],
-    center: tuple[float, float] = NYC_MAP_CENTER,
-    zoom: int = NYC_MAP_ZOOM,
+def build_base_map(
     boroughs: Sequence[Borough] = (),
     selected_borough: str | None = None,
 ) -> folium.Map:
-    """Draw the borough outlines, and the segments of the selected borough.
+    """Draw the stable part of the map: borough outlines and the legend.
+
+    Never carries road segments -- those go into a separate FeatureGroup added
+    via st_folium's feature_group_to_add so pan/zoom only updates that layer
+    instead of rebuilding this one (#421). Always created at the default
+    center/zoom regardless of the current viewport, for the same reason: the
+    live center/zoom are passed to st_folium directly rather than baked in here.
 
     The outlines stay on the map after a borough is picked so that zooming out
     and clicking another one is possible; the selected borough is drawn without
     a fill so clicks reach the segments inside it.
     """
-    fmap = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+    fmap = folium.Map(location=NYC_MAP_CENTER, zoom_start=NYC_MAP_ZOOM, control_scale=True)
     _add_borough_layers(fmap, boroughs, selected_borough)
+    fmap.get_root().html.add_child(folium.Element(_legend_html()))
+    return fmap
+
+
+def build_segment_feature_group(
+    segments: Sequence[ScoredRoadSegment],
+) -> folium.FeatureGroup:
+    """Road segments as a FeatureGroup meant for st_folium's feature_group_to_add.
+
+    Kept separate from the base map so pan/zoom only replaces this layer (#421).
+    """
+    group = folium.FeatureGroup(name="NYC road comfort score")
 
     # GeoJsonTooltip reads its field names off the first feature, so an empty
     # collection makes it assert that every field is missing. Nothing would be
     # drawn anyway -- the viewport can legitimately contain no segments, and the
     # first render always does, since it happens before the viewport is known.
     if not segments:
-        fmap.get_root().html.add_child(folium.Element(_legend_html()))
-        return fmap
+        return group
     folium.GeoJson(
         _feature_collection(segments),
         name="NYC road comfort score",
@@ -105,9 +119,8 @@ def build_map(
             ],
             sticky=False,
         ),
-    ).add_to(fmap)
-    fmap.get_root().html.add_child(folium.Element(_legend_html()))
-    return fmap
+    ).add_to(group)
+    return group
 
 
 BOROUGH_TOOLTIP_FIELD = "borough"
@@ -166,6 +179,18 @@ def _add_borough_layers(
         ).add_to(fmap)
 
 
+# ~11cm at NYC's latitude -- visually identical to full float64 precision but
+# meaningfully shorter once serialized across up to MAX_RENDERED_SEGMENTS
+# features per render (#421).
+_COORDINATE_PRECISION = 6
+
+
+def _rounded_coordinates(coordinates: Any) -> Any:
+    if isinstance(coordinates, (int, float)):
+        return round(coordinates, _COORDINATE_PRECISION)
+    return [_rounded_coordinates(value) for value in coordinates]
+
+
 def _feature_collection(segments: Sequence[ScoredRoadSegment]) -> dict[str, Any]:
     return {
         "type": "FeatureCollection",
@@ -175,9 +200,13 @@ def _feature_collection(segments: Sequence[ScoredRoadSegment]) -> dict[str, Any]
 
 def _feature(segment: ScoredRoadSegment) -> dict[str, Any]:
     score = segment.score
+    geometry = segment.road_segment.geometry
     return {
         "type": "Feature",
-        "geometry": segment.road_segment.geometry,
+        "geometry": {
+            "type": geometry["type"],
+            "coordinates": _rounded_coordinates(geometry["coordinates"]),
+        },
         "properties": {
             "segment_id": segment.road_segment.segment_id,
             "street_name": segment.road_segment.street_name or "N/A",

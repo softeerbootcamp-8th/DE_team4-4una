@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 import httpx
 import streamlit as st
 from botocore.exceptions import BotoCoreError, ClientError
+from shapely.geometry import box
+from shapely.strtree import STRtree
 from streamlit_folium import st_folium
 
 from dashboard.config import (
@@ -20,7 +22,9 @@ from dashboard.config import (
     DashboardConfig,
 )
 from dashboard.map_view import (
-    build_map,
+    ScoredRoadSegment,
+    build_base_map,
+    build_segment_feature_group,
     join_road_segments_with_scores,
 )
 from dashboard.road_geometry import RoadSegment, load_road_segments
@@ -69,6 +73,26 @@ def _load_segment_bounds_cached(
     """
     segments = _load_road_segments_cached(road_segment_s3_uri, aws_region)
     return [_geometry_bounds(segment.geometry) for segment in segments]
+
+
+@st.cache_resource(ttl=ROAD_SEGMENT_CACHE_TTL_SECONDS, show_spinner=False)
+def _spatial_index_cached(
+    road_segment_s3_uri: str,
+    aws_region: str | None,
+) -> STRtree:
+    """segment bounding box들의 R-tree, segment 목록과 같은 순서로 만든다(#421 후속).
+
+    뷰포트와 겹치는 segment를 O(log N + k)로 찾기 위한 것 -- 이전에는 pan/zoom마다
+    borough 전체를 순회하며 bounding box를 하나씩 비교했다(borough가 클수록 느려짐).
+
+    st.cache_data 대신 st.cache_resource를 쓰는 이유: st.cache_data는 캐시 히트마다
+    값을 복사해서 돌려주는데, STRtree는 읽기 전용으로만 쓰이니 안전하게 그대로
+    공유해도 되고, 매번 복사하기엔 크다.
+    """
+    bounds = _load_segment_bounds_cached(road_segment_s3_uri, aws_region)
+    return STRtree(
+        [box(min_lon, min_lat, max_lon, max_lat) for min_lon, min_lat, max_lon, max_lat in bounds]
+    )
 
 
 @st.cache_data(ttl=ROAD_SEGMENT_CACHE_TTL_SECONDS, show_spinner=False)
@@ -120,6 +144,23 @@ def _borough_segment_indices_cached(
     return _group_indices_by_borough(segments, boroughs)
 
 
+@st.cache_data(ttl=ROAD_SEGMENT_CACHE_TTL_SECONDS, show_spinner=False)
+def _borough_segment_index_sets_cached(
+    road_segment_s3_uri: str,
+    zone_master_s3_uri: str,
+    aws_region: str | None,
+) -> dict[str, frozenset[int]]:
+    """borough별 segment index를 frozenset으로 미리 만들어둔다(#421 후속).
+
+    공간 인덱스 쿼리 결과가 이 borough 소속인지 pan/zoom마다 O(1)로 확인하기
+    위한 것 -- borough를 고를 때 한 번만 만들고, 그 뒤로는 다시 만들지 않는다.
+    """
+    grouped = _borough_segment_indices_cached(
+        road_segment_s3_uri, zone_master_s3_uri, aws_region
+    )
+    return {name: frozenset(indices) for name, indices in grouped.items()}
+
+
 def _geometry_bounds(geometry: dict) -> SegmentBounds:
     coordinates = geometry["coordinates"]
     points = (
@@ -154,14 +195,6 @@ def _parse_viewport(bounds: dict | None) -> Viewport | None:
     return corners
 
 
-def _intersects(segment_bounds: SegmentBounds, viewport: Viewport) -> bool:
-    min_lon, min_lat, max_lon, max_lat = segment_bounds
-    south, west, north, east = viewport
-    return not (
-        max_lon < west or min_lon > east or max_lat < south or min_lat > north
-    )
-
-
 def _rounded(viewport: Viewport | None) -> tuple[float, ...] | None:
     if viewport is None:
         return None
@@ -186,26 +219,54 @@ def _load_scores_cached(
 
 
 def _visible_segments(
-    candidate_indices: Sequence[int],
     road_segments: Sequence[RoadSegment],
-    segment_bounds: Sequence[SegmentBounds],
+    spatial_index: STRtree,
+    candidate_set: frozenset[int] | None,
     viewport: Viewport | None,
     max_rendered: int,
 ) -> tuple[list[RoadSegment], int]:
-    """그릴 segment이자 score를 조회할 segment — viewport로 걸러내고 상한을 적용한다(#414).
+    """그릴 segment이자 score를 조회할 segment(#421 후속으로 R-tree 사용).
+
+    공간 인덱스로 뷰포트와 겹치는 segment를 먼저 찾는다 -- 도시 전체 기준으로
+    O(log N + k)이고 borough 크기와 무관하다. 그 결과가 candidate_set(현재
+    borough)에 속하는지는 frozenset 조회라 O(1)이다. candidate_set이 None이면
+    전체 스냅샷 모드라는 뜻이라 걸러내지 않는다.
 
     viewport를 아직 모르면 ([], 0)을 반환한다. 두 번째 값은 상한 적용 전
     교차 개수로, "N개 더 있음, 확대하라" 안내에 쓴다.
     """
     if viewport is None:
         return [], 0
-    in_viewport = [
-        index
-        for index in candidate_indices
-        if _intersects(segment_bounds[index], viewport)
-    ]
-    visible = [road_segments[i] for i in in_viewport[:max_rendered]]
-    return visible, len(in_viewport)
+    south, west, north, east = viewport
+    query_result = spatial_index.query(box(west, south, east, north), predicate="intersects")
+    if candidate_set is None:
+        matched = [int(index) for index in query_result]
+    else:
+        matched = [int(index) for index in query_result if int(index) in candidate_set]
+    visible = [road_segments[index] for index in matched[:max_rendered]]
+    return visible, len(matched)
+
+
+SegmentRenderKey = tuple[tuple[str, float | None, float | None, str | None, str | None], ...]
+
+
+def _segment_render_key(joined_segments: Sequence[ScoredRoadSegment]) -> SegmentRenderKey:
+    """가벼운 값 튜플로 만든, 지금 그릴 segment+score 조합의 지문(#421 후속).
+
+    Folium 객체는 매번 새로 만들면 내부 요소 id가 달라져서, 실제로는 똑같은
+    segment를 그리는데도 프론트엔드가 레이어를 다시 그린다. 이 키가 직전과
+    같으면 새로 만들지 않고 이전 FeatureGroup을 그대로 재사용한다.
+    """
+    return tuple(
+        (
+            segment.road_segment.segment_id,
+            segment.score.comfort_score if segment.score is not None else None,
+            segment.score.confidence_score if segment.score is not None else None,
+            segment.score.source if segment.score is not None else None,
+            segment.score.weather_time if segment.score is not None else None,
+        )
+        for segment in joined_segments
+    )
 
 
 def main() -> None:
@@ -223,7 +284,7 @@ def main() -> None:
                 config.road_segment_s3_uri,
                 config.aws_region,
             )
-            segment_bounds = _load_segment_bounds_cached(
+            spatial_index = _spatial_index_cached(
                 config.road_segment_s3_uri,
                 config.aws_region,
             )
@@ -251,9 +312,10 @@ def main() -> None:
         )
     selected = _borough_selector(boroughs)
     borough = None if selected == ALL_BOROUGHS else selected
-    candidate_indices = _candidate_indices(config, road_segments, boroughs, borough)
+    candidate_set = _candidate_set(config, boroughs, borough)
+    candidate_count = len(candidate_set) if candidate_set is not None else len(road_segments)
 
-    _render_metrics(len(candidate_indices), borough, len(road_segments))
+    _render_metrics(candidate_count, borough, len(road_segments))
 
     if boroughs and borough is None:
         st.caption("Click a borough to load its road segments.")
@@ -261,30 +323,35 @@ def main() -> None:
     _render_map(
         config,
         road_segments,
-        segment_bounds,
+        spatial_index,
         boroughs,
         borough,
-        candidate_indices,
+        candidate_set,
+        candidate_count,
     )
 
 
-def _candidate_indices(
+def _candidate_set(
     config: DashboardConfig,
-    road_segments: Sequence[RoadSegment],
     boroughs: Sequence[Borough],
     borough: str | None,
-) -> Sequence[int]:
+) -> frozenset[int] | None:
+    """현재 선택 기준으로 그릴 수 있는 segment index 집합(#421 후속).
+
+    None이면 "전체가 후보"라는 뜻이라 뷰포트 쿼리 결과를 걸러낼 필요가 없다
+    (zone master가 없어 borough 개념 자체가 없는 경우).
+    """
     if borough is not None:
-        all_indices = _borough_segment_indices_cached(
+        sets = _borough_segment_index_sets_cached(
             config.road_segment_s3_uri,
             config.zone_master_s3_uri,
             config.aws_region,
         )
-        return all_indices.get(borough, ())
+        return sets.get(borough, frozenset())
     if boroughs:
         # Outlines only: drawing the whole network is what made the map unusable.
-        return ()
-    return range(len(road_segments))
+        return frozenset()
+    return None
 
 
 def _render_metrics(
@@ -363,10 +430,11 @@ def _clicked_borough(
 def _render_map(
     config: DashboardConfig,
     road_segments: Sequence[RoadSegment],
-    segment_bounds: Sequence[SegmentBounds],
+    spatial_index: STRtree,
     boroughs: Sequence[Borough],
     borough: str | None,
-    candidate_indices: Sequence[int],
+    candidate_set: frozenset[int] | None,
+    candidate_count: int,
 ) -> None:
     """One map holding both layers.
 
@@ -382,7 +450,7 @@ def _render_map(
     zoom = st.session_state.get("zoom", NYC_MAP_ZOOM)
 
     visible_segments, in_viewport_count = _visible_segments(
-        candidate_indices, road_segments, segment_bounds, viewport, MAX_RENDERED_SEGMENTS
+        road_segments, spatial_index, candidate_set, viewport, MAX_RENDERED_SEGMENTS
     )
     if in_viewport_count > MAX_RENDERED_SEGMENTS:
         st.info(
@@ -418,14 +486,29 @@ def _render_map(
         score_result.scores if score_result is not None else {},
     )
 
+    # base map은 borough outline과 legend만 담고, 항상 기본 center/zoom으로
+    # 만든다 -- pan/zoom마다 바뀌면 base map 자체가 다시 만들어지면서 이 이슈가
+    # 없애려는 재생성 비용이 그대로 남는다(#421). 실제 보고 있는 위치는
+    # st_folium의 center/zoom 인자로만 전달한다.
+    base_map = build_base_map(boroughs=boroughs, selected_borough=borough)
+
+    # 드래그 중에는 실제 viewport가 안 바뀌었는데도 fragment가 자주 재실행된다
+    # -- 그릴 segment 조합이 직전과 같으면 새로 만들지 않고 재사용해서, 바뀐 것도
+    # 없는데 프론트엔드가 레이어를 다시 그리는 걸 막는다(#421 후속).
+    render_key = _segment_render_key(joined_segments)
+    if (
+        st.session_state.get("_segment_render_key") == render_key
+        and "_segment_feature_group" in st.session_state
+    ):
+        road_layer = st.session_state["_segment_feature_group"]
+    else:
+        road_layer = build_segment_feature_group(joined_segments)
+        st.session_state["_segment_render_key"] = render_key
+        st.session_state["_segment_feature_group"] = road_layer
+
     map_state = st_folium(
-        build_map(
-            joined_segments,
-            center=center,
-            zoom=zoom,
-            boroughs=boroughs,
-            selected_borough=borough,
-        ),
+        base_map,
+        feature_group_to_add=road_layer,
         width=None,
         height=720,
         center=center,
@@ -437,7 +520,7 @@ def _render_map(
 
     scope = borough if borough is not None else "the snapshot"
     st.caption(
-        f"Rendered: {len(visible_segments):,} of {len(candidate_indices):,} "
+        f"Rendered: {len(visible_segments):,} of {candidate_count:,} "
         f"segments in {scope} · "
         f"Road geometry cache: {ROAD_SEGMENT_CACHE_TTL_SECONDS // 3600}h · "
         f"Comfort score cache: {SCORE_CACHE_TTL_SECONDS // 60}m · "
