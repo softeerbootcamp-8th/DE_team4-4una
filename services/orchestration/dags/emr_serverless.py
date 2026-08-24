@@ -41,6 +41,7 @@ _SPARK_EXECUTOR_INSTANCES = "1"
 # 총 사용량은 driver(1c/2g) + executor(2c/8g+6g=14g) = 3 vCPU/16 GB로
 # 여유 있게 들어간다.
 _SPARK_EXECUTOR_MEMORY_OVERHEAD = "6g"
+_SPARK_DRIVER_MEMORY_OVERHEAD = "6g"
 
 # EMR Serverless는 dynamic allocation이 기본 켜져 있어서, 실제 목표 executor 수는
 # spark.executor.instances가 아니라 max(dynamicAllocation.initialExecutors,
