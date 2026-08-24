@@ -101,9 +101,20 @@ def _resolve_road_snapshot_date() -> str:
     """
     from jobs.road_environment import resolve_active_road_snapshot_date
 
+    # 어느 snapshot을 골랐는지 XCom에만 담기면 Airflow Log 탭에서 확인할 길이
+    # 없다(#406) — 같은 파일의 다른 PythonOperator처럼 print({...}) 요약을 남긴다.
+    # S3 URI는 자격증명이 아니라 로그에 남겨도 안전하다(#406 논의).
     road_environment_uri = Variable.get("REFERENCE_DATA_LAKE_URI", default="")
     if road_environment_uri:
-        return resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+        road_snapshot_date = resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+        print(
+            {
+                "source": "REFERENCE_DATA_LAKE_URI",
+                "road_environment_uri": road_environment_uri,
+                "road_snapshot_date": road_snapshot_date,
+            }
+        )
+        return road_snapshot_date
 
     fallback = Variable.get("HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE", default="")
     if not fallback:
@@ -111,6 +122,13 @@ def _resolve_road_snapshot_date() -> str:
             "REFERENCE_DATA_LAKE_URI or HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE "
             "must be set"
         )
+    print(
+        {
+            "source": "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE",
+            "road_environment_uri": None,
+            "road_snapshot_date": fallback,
+        }
+    )
     return fallback
 
 
