@@ -14,7 +14,10 @@ from pathlib import Path
 
 from airflow.providers.standard.operators.python import PythonOperator
 
-DAG_PATH = Path(__file__).resolve().parents[1] / "dags" / "bronze_compaction.py"
+DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
+DAG_PATH = DAGS_DIR / "bronze_compaction.py"
+
+sys.path.insert(0, str(DAGS_DIR))
 
 
 def _load_dag_module():
@@ -82,3 +85,12 @@ def test_dag_preserves_retry_policy():
     for task in module.dag.tasks:
         assert task.retries == 1
         assert task.retry_delay == datetime.timedelta(minutes=5)
+
+
+def test_dag_wires_shared_slack_notification_callbacks():
+    import notifications
+
+    module = _load_dag_module()
+
+    assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
+    assert module.dag.on_success_callback is notifications.on_success_callback

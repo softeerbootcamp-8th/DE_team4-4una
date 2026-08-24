@@ -22,9 +22,10 @@ import datetime
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from notifications import on_failure_callback, on_success_callback
 
 
-def _compact_zone_weather_snapshot(data_interval_end) -> None:
+def _compact_zone_weather_snapshot(data_interval_end) -> dict:
     from jobs.bronze_compaction import (
         BronzeCompactionConfig,
         run_zone_weather_snapshot_compaction,
@@ -32,13 +33,13 @@ def _compact_zone_weather_snapshot(data_interval_end) -> None:
 
     config = BronzeCompactionConfig.from_env()
     summary = run_zone_weather_snapshot_compaction(config, data_interval_end)
-    print(
-        {
-            "root_uri": summary.root_uri,
-            "compacted_group_count": len(summary.compacted_groups),
-            "skipped_group_count": summary.skipped_group_count,
-        }
-    )
+    result = {
+        "root_uri": summary.root_uri,
+        "compacted_group_count": len(summary.compacted_groups),
+        "skipped_group_count": summary.skipped_group_count,
+    }
+    print(result)
+    return result
 
 
 with DAG(
@@ -52,7 +53,9 @@ with DAG(
     default_args={
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
+        "on_failure_callback": on_failure_callback,
     },
+    on_success_callback=on_success_callback,
     tags=["bronze-compaction"],
 ) as dag:
     compact_zone_weather_snapshot = PythonOperator(
