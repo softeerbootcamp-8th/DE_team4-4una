@@ -19,17 +19,30 @@ Sensor Producer를 실행하는 공인 IP의 `/32`에만 허용해야 한다. 90
 ## 자동 배포 흐름
 
 ```text
-main push → CI 성공 → deploy-kafka 호출
-  → kafka.yaml 구문 검증
+main push (경로 감지) → kafka.yaml 구문 검증
   → SSH로 EC2 고정 경로에 kafka.yaml 복사
   → docker compose up -d --wait
   → sensor-events topic 생성 또는 partition 수 증가
   → topic 상태 출력
 ```
 
-`develop`에 병합할 때는 배포하지 않는다. 검증된 `develop`을 `main`에 병합하고 해당
-push의 CI가 성공한 뒤에만 Kafka를 배포한다. 기존 `develop` 대상 서비스 CD는 이
-워크플로와 독립적으로 유지한다.
+독립 워크플로다. `main` push 중 아래 경로가 바뀌었을 때만 실행되고, Actions 탭에서
+`Run workflow`로 수동 실행할 수도 있다. 고정 이미지(`apache/kafka`)를 쓰므로 배포에
+영향을 주는 것은 compose 설정뿐이다.
+
+```
+infra/compose/kafka.yaml   .github/workflows/deploy-kafka.yml
+```
+
+**다른 서비스와 달리 `main` 기준이다.** broker를 건드리면 스트림 전체가 멈추므로
+`develop` 병합만으로는 반영하지 않는다. 검증된 `develop`을 `main`에 병합할 때만
+배포된다.
+
+CI 게이트는 branch protection이 맡는다. 전에는 이 배포가 `ci.yml` 안에서
+`needs: ci-passed`로 CI 완료를 기다렸지만, 지금은 독립 워크플로라 그럴 수 없다.
+**`main`의 Require status checks에 `CI Passed`가 걸려 있어야** 검증되지 않은
+커밋이 `main`에 들어가는 것을 막을 수 있다. `ci.yml`은 `main`으로 향하는 PR에서도
+실행되므로 이 설정이 가능하다.
 
 ## GitHub 설정
 
