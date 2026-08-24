@@ -162,3 +162,12 @@ def test_static_files_are_optional(monkeypatch, tmp_path):
 
     (tmp_path / "index.html").write_text("<html></html>")
     assert resolve_static_dir() == tmp_path
+
+
+def test_a_configuration_error_is_reported_in_the_response():
+    """Streamlit이 화면에 띄워주던 설정 오류 안내를 API 응답이 대신한다."""
+    with _client_raising(bootstrap=ValueError("DASHBOARD_ROAD_SEGMENT_S3_URI must be set")) as client:
+        response = client.get("/api/bootstrap")
+
+    assert response.status_code == 500
+    assert "DASHBOARD_ROAD_SEGMENT_S3_URI must be set" in response.text

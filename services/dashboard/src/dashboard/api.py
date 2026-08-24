@@ -52,6 +52,16 @@ async def _s3_unavailable(_request: Request, exc: Exception) -> PlainTextRespons
     return PlainTextResponse(f"unable to load reference data from S3: {exc}", status_code=502)
 
 
+# 설정 오류(필수 환경변수 누락 등)와 serving API 응답 계약 위반이 여기로 온다.
+# Streamlit이 화면에 띄워주던 안내를 대신한다. UnknownBoroughError는 ValueError의
+# 하위 타입이지만 Starlette이 MRO 순으로 찾으므로 위의 404 핸들러가 먼저 잡는다.
+@app.exception_handler(ValueError)
+async def _invalid_configuration(_request: Request, exc: ValueError) -> PlainTextResponse:
+    return PlainTextResponse(
+        f"dashboard configuration or data is invalid: {exc}", status_code=500
+    )
+
+
 @app.exception_handler(httpx.HTTPError)
 async def _serving_api_unavailable(_request: Request, exc: httpx.HTTPError) -> PlainTextResponse:
     return PlainTextResponse(

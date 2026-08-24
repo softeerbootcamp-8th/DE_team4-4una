@@ -6,6 +6,11 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+# Streamlit이 쓰던 주소와 포트를 그대로 유지한다 -- 배포 스크립트와 health
+# check가 이 포트를 가리킨다.
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8501
+
 DEFAULT_SERVING_API_URL = "http://localhost:8000"
 DEFAULT_VEHICLE_PROFILE_ID = 0
 
