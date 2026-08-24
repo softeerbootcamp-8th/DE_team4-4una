@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-25
 ---
 
 # Data Lineage
@@ -58,9 +58,10 @@ The implemented `batch-jobs` hourly path now follows this dependency order:
 ```text
 Bronze `sensor_event`
   -> hourly contract validation and cleansing
-     -> target-hour cleansing quarantine (persisted)
+     -> target-hour sensor-event quarantine (cleansing + map matching, persisted)
      -> accepted typed events (execution-local DataFrame)
         -> hourly GPS-to-road-segment matching
+        -> unmatched events join the target-hour quarantine
         -> segment x vehicle-profile features (persisted)
   -> hourly comfort scoring + rejected output
   -> Gold window aggregation

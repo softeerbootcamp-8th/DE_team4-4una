@@ -164,7 +164,13 @@ def run_cleansing(arguments: argparse.Namespace) -> None:
         print(
             json.dumps(
                 {
+                    "input_count": summary.input_count,
                     "processed_count": summary.processed_count,
+                    "accepted_count": summary.accepted_count,
+                    "cleansing_quarantined_count": summary.cleansing_quarantined_count,
+                    "map_matching_quarantined_count": (
+                        summary.map_matching_quarantined_count
+                    ),
                     "quarantined_count": summary.quarantined_count,
                     "result_count": summary.feature_summary.result_count,
                     "output_path": summary.feature_summary.output_path,
@@ -348,7 +354,15 @@ def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
                     "feature_row_count": summary.feature_row_count,
                     "accepted_sample_count": summary.accepted_sample_count,
                     "quarantine_row_count": summary.quarantine_row_count,
+                    "cleansing_quarantine_row_count": (
+                        summary.cleansing_quarantine_row_count
+                    ),
+                    "map_matching_quarantine_row_count": (
+                        summary.map_matching_quarantine_row_count
+                    ),
                     "quarantine_rate": summary.quarantine_rate,
+                    "cleansing_quarantine_rate": summary.cleansing_quarantine_rate,
+                    "map_matching_quarantine_rate": summary.map_matching_quarantine_rate,
                     "success": summary.success,
                 },
                 sort_keys=True,
