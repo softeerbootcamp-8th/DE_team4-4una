@@ -144,3 +144,12 @@ def test_retries_faster_than_the_hourly_pipeline():
     # 15분 주기라 hourly_pipeline의 5분 재시도 간격은 너무 길다(주기의 1/3).
     assert module.dag.default_args["retries"] == 2
     assert module.dag.default_args["retry_delay"] == pendulum.duration(minutes=2)
+
+
+def test_dag_wires_shared_slack_notification_callbacks():
+    import notifications
+
+    module = _load_dag_module()
+
+    assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
+    assert module.dag.on_success_callback is notifications.on_success_callback
