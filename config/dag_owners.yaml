@@ -27,5 +27,5 @@ dags:
     owner: alice
     severity: medium
   bronze_compaction:
-    owner: bob
+    owner: hi653   # Slack 알림 수동 검증(#409) — 검증 끝나면 bob으로 되돌린다
     severity: low
