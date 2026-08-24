@@ -5,9 +5,11 @@ description = "Produces vehicle sensor events"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "de4-core",
+    "confluent-kafka>=2.11.1",
     "duckdb>=1.4.3",
     "geopandas>=1.1.4",
-    "kafka-python-ng>=2.2.3",
+    "numpy>=2.2.0",
+    "orjson>=3.11.3",
     "pandas>=3.0.5",
     "pyarrow>=25.0.1",
     "pyproj>=3.7.2",

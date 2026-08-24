@@ -51,21 +51,28 @@ def test_jsonl_publisher_writes_sensor_event_contract(tmp_path) -> None:
 
 def test_kafka_publisher_keys_records_by_trip(monkeypatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
+    configurations: list[dict[str, object]] = []
 
     class FakeProducer:
-        def __init__(self, **configuration: object):
-            self.configuration = configuration
+        def __init__(self, configuration: dict[str, object]):
+            configurations.append(configuration)
 
-        def send(self, topic: str, **message: object) -> None:
+        def produce(
+            self,
+            topic: str,
+            **message: object,
+        ) -> None:
             calls.append((topic, message))
 
-        def flush(self) -> None:
-            return
+        def poll(self, timeout: float) -> None:
+            return None
 
-        def close(self) -> None:
-            return
+        def flush(self, timeout: float) -> int:
+            return 0
 
-    monkeypatch.setitem(sys.modules, "kafka", SimpleNamespace(KafkaProducer=FakeProducer))
+    monkeypatch.setitem(
+        sys.modules, "confluent_kafka", SimpleNamespace(Producer=FakeProducer)
+    )
     publisher = KafkaPublisher(["localhost:9092"], "sensor-events")
 
     publisher.publish(event())
@@ -75,3 +82,5 @@ def test_kafka_publisher_keys_records_by_trip(monkeypatch) -> None:
     assert calls[0][1]["key"] == b"trip-1"
     assert json.loads(calls[0][1]["value"])["trip_seq"] == 0
     assert "timestamp_ms" not in calls[0][1]
+    assert configurations[0]["enable.idempotence"] is True
+    assert configurations[0]["compression.type"] == "lz4"

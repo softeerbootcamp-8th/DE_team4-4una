@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
+import numpy as np
 import pytest
 from sensor_producer.domain import (
     VEHICLE_PROFILES,
@@ -13,9 +14,11 @@ from sensor_producer.errors import TripInfeasibleError, TripSkipReason
 from sensor_producer.publisher import MemoryPublisher
 from sensor_producer.simulation import (
     MotionSimulator,
+    ReplayClock,
     ReplayCoordinator,
+    ReplayTimeline,
     SpeedProfile,
-    rebase_trip_to_dispatch_date,
+    rebase_trip_to_replay_timeline,
 )
 from shapely.geometry import LineString
 
@@ -327,7 +330,7 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
 
     result = coordinator.replay([source_trip])
 
-    assert router.planned_at == datetime(2026, 8, 23, 10, tzinfo=UTC)
+    assert router.planned_at == datetime(2026, 8, 23, 23, 50, tzinfo=UTC)
     assert clock.times == [
         source_trip.request_datetime,
         source_trip.pickup_datetime,
@@ -335,14 +338,47 @@ def test_replay_plans_at_request_and_publishes_from_pickup() -> None:
         source_trip.dropoff_datetime,
     ]
     assert [event.event_time for event in publisher.events] == [
-        datetime(2026, 8, 23, 10, 5, tzinfo=UTC),
-        datetime(2026, 8, 23, 10, 5, 1, tzinfo=UTC),
-        datetime(2026, 8, 23, 10, 5, 2, tzinfo=UTC),
+        datetime(2026, 8, 23, 23, 55, tzinfo=UTC),
+        datetime(2026, 8, 23, 23, 55, 1, tzinfo=UTC),
+        datetime(2026, 8, 23, 23, 55, 2, tzinfo=UTC),
     ]
     assert result.events_published == 3
 
 
-def test_rebase_trip_preserves_tlc_clock_and_midnight_offset() -> None:
+def test_replay_clock_reports_lag_and_enforces_limit(monkeypatch) -> None:
+    moments = iter([100.0, 102.0, 100.0, 102.0])
+    monkeypatch.setattr(
+        "sensor_producer.simulation.time.monotonic",
+        lambda: next(moments),
+    )
+    clock = ReplayClock(time_scale=1)
+    source_time = datetime(2024, 2, 1, 10, tzinfo=UTC)
+
+    clock.wait_until(source_time)
+    clock.wait_until(source_time + timedelta(seconds=1))
+
+    assert clock.final_lag_seconds == pytest.approx(1.0)
+    assert clock.max_lag_seconds == pytest.approx(1.0)
+
+    clock = ReplayClock(time_scale=1, max_lag_seconds=0.5)
+    clock.wait_until(source_time)
+    with pytest.raises(RuntimeError, match="replay lag 1.000s"):
+        clock.wait_until(source_time + timedelta(seconds=1))
+
+
+def test_vectorized_speed_profile_matches_scalar_states() -> None:
+    planned_route = route(8.0, length_m=100.0)
+    profile = SpeedProfile.for_route(planned_route, duration_seconds=20.0)
+    elapsed = np.linspace(0.0, 20.0, 201)
+
+    distances, speeds = profile.states_for(elapsed)
+    scalar = [profile.state_at(float(value)) for value in elapsed]
+
+    assert distances == pytest.approx([state.distance_m for state in scalar])
+    assert speeds == pytest.approx([state.speed_mps for state in scalar])
+
+
+def test_rebase_trip_preserves_source_offsets_on_one_run_timeline() -> None:
     source_trip = TripRecord(
         trip_id="overnight-trip",
         request_datetime=datetime(2024, 2, 1, 23, 58, tzinfo=UTC),
@@ -353,18 +389,24 @@ def test_rebase_trip_preserves_tlc_clock_and_midnight_offset() -> None:
         trip_miles=0.5,
     )
 
-    replay_trip = rebase_trip_to_dispatch_date(
-        source_trip,
+    timeline = ReplayTimeline(
+        source_trip.request_datetime,
         datetime(2026, 8, 23, 15, tzinfo=UTC),
     )
+    replay_trip = rebase_trip_to_replay_timeline(
+        source_trip,
+        timeline,
+    )
 
-    assert replay_trip.request_datetime == datetime(2026, 8, 23, 23, 58, tzinfo=UTC)
-    assert replay_trip.pickup_datetime == datetime(2026, 8, 24, 0, 1, tzinfo=UTC)
-    assert replay_trip.dropoff_datetime == datetime(2026, 8, 24, 0, 3, tzinfo=UTC)
-    assert replay_trip.passenger_duration_seconds == source_trip.passenger_duration_seconds
+    assert replay_trip.request_datetime == datetime(2026, 8, 23, 15, tzinfo=UTC)
+    assert replay_trip.pickup_datetime == datetime(2026, 8, 23, 15, 3, tzinfo=UTC)
+    assert replay_trip.dropoff_datetime == datetime(2026, 8, 23, 15, 5, tzinfo=UTC)
+    assert (
+        replay_trip.passenger_duration_seconds == source_trip.passenger_duration_seconds
+    )
 
 
-def test_replay_uses_the_utc_date_captured_for_each_dispatch() -> None:
+def test_replay_uses_one_utc_anchor_for_every_dispatch() -> None:
     class StaticRouter:
         def plan_for_zones(
             self,
@@ -376,19 +418,20 @@ def test_replay_uses_the_utc_date_captured_for_each_dispatch() -> None:
         ) -> RoutePlan:
             return route(8.0, length_m=10.0)
 
-    dispatch_times = iter(
-        [
-            datetime(2026, 8, 23, 23, 59, 59, tzinfo=UTC),
-            datetime(2026, 8, 24, 0, 0, 1, tzinfo=UTC),
-        ]
-    )
+    utc_calls = 0
+
+    def utc_now() -> datetime:
+        nonlocal utc_calls
+        utc_calls += 1
+        return datetime(2026, 8, 23, 23, 59, 59, tzinfo=UTC)
+
     publisher = MemoryPublisher()
     coordinator = ReplayCoordinator(
         StaticRouter(),  # type: ignore[arg-type]
         {181: object()},
         publisher,
         SimulationConfig("test-run", sample_hz=1, time_scale=0),
-        utc_now=lambda: next(dispatch_times),
+        utc_now=utc_now,
     )
 
     coordinator.replay(
@@ -398,24 +441,20 @@ def test_replay_uses_the_utc_date_captured_for_each_dispatch() -> None:
         ]
     )
 
-    first_dates = {
-        event.event_time.date()
-        for event in publisher.events
-        if event.trip_id == "trip-before-midnight"
-    }
-    second_dates = {
-        event.event_time.date()
-        for event in publisher.events
-        if event.trip_id == "trip-after-midnight"
-    }
-    assert first_dates == {datetime(2026, 8, 23, tzinfo=UTC).date()}
-    assert second_dates == {datetime(2026, 8, 24, tzinfo=UTC).date()}
+    first_event = next(
+        event for event in publisher.events if event.trip_id == "trip-before-midnight"
+    )
+    second_event = next(
+        event for event in publisher.events if event.trip_id == "trip-after-midnight"
+    )
+    assert second_event.event_time - first_event.event_time == timedelta(seconds=1)
+    assert utc_calls == 1
 
 
-def test_rebase_trip_rejects_naive_dispatch_time() -> None:
+def test_replay_timeline_rejects_naive_anchor() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        rebase_trip_to_dispatch_date(
-            trip(),
+        ReplayTimeline(
+            trip().request_datetime,
             datetime(2026, 8, 23),  # noqa: DTZ001
         )
 

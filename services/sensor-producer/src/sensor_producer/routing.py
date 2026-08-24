@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from shapely.geometry import Point
+from shapely.strtree import STRtree
 
 from sensor_producer.domain import RoadSegment, RouteLeg, RoutePlan
 from sensor_producer.errors import TripInfeasibleError, TripSkipReason
@@ -32,6 +33,9 @@ class RoadRouter:
     def __init__(self, segments: list[RoadSegment]):
         self.adjacency: dict[str, list[GraphEdge]] = defaultdict(list)
         self.node_coordinates: dict[str, tuple[float, float]] = {}
+        self.segments_by_id = {segment.segment_id: segment for segment in segments}
+        if len(self.segments_by_id) != len(segments):
+            raise ValueError("road segments must have unique segment_id values")
         for segment in segments:
             coordinates = list(segment.geometry.coords)
             self.node_coordinates.setdefault(segment.from_node_id, coordinates[0])
@@ -46,6 +50,37 @@ class RoadRouter:
                 )
         for edges in self.adjacency.values():
             edges.sort(key=lambda edge: (edge.segment.segment_id, edge.destination))
+        self._routable_node_ids = tuple(sorted(self.adjacency))
+        self._node_points = [
+            Point(self.node_coordinates[node]) for node in self._routable_node_ids
+        ]
+        self._node_tree = STRtree(self._node_points)
+
+    def zone_anchor_nodes(self, polygon: object) -> tuple[str, ...]:
+        """택시존을 대표할 서로 떨어진 LION 노드를 결정론적으로 고른다"""
+        nodes = self._nodes_inside(polygon)
+        if not nodes:
+            return ()
+        representative = polygon.representative_point()  # type: ignore[union-attr]
+        primary = min(
+            nodes,
+            key=lambda node: (
+                representative.distance(Point(self.node_coordinates[node])),
+                node,
+            ),
+        )
+        remaining = [node for node in nodes if node != primary]
+        if not remaining:
+            return (primary,)
+        primary_point = Point(self.node_coordinates[primary])
+        secondary = max(
+            remaining,
+            key=lambda node: (
+                primary_point.distance(Point(self.node_coordinates[node])),
+                node,
+            ),
+        )
+        return primary, secondary
 
     def plan_for_zones(
         self,
@@ -78,11 +113,15 @@ class RoadRouter:
 
         # TLC 주행거리와 가장 가까운 결정론적 경로를 유지한다.
         best: tuple[float, str, str, tuple[GraphEdge, ...]] | None = None
+        candidate_ends = dropoff_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]
         for start_node in pickup_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:
-            for end_node in dropoff_order[:MAX_ROUTE_CANDIDATES_PER_ZONE]:
-                if start_node == end_node:
-                    continue
-                edges = self.shortest_path(start_node, end_node)
+            # 출발 노드마다 Dijkstra를 한 번만 실행해 모든 도착 후보 경로를 얻는다
+            paths = self.shortest_paths(
+                start_node,
+                {end_node for end_node in candidate_ends if end_node != start_node},
+            )
+            for end_node in candidate_ends:
+                edges = paths.get(end_node, ())
                 if not edges:
                     continue
                 if target_distance_m is None:
@@ -105,38 +144,85 @@ class RoadRouter:
         )
 
     def shortest_path(self, start_node: str, end_node: str) -> tuple[GraphEdge, ...]:
+        return self.shortest_paths(start_node, {end_node}).get(end_node, ())
+
+    def shortest_paths(
+        self,
+        start_node: str,
+        end_nodes: set[str],
+    ) -> dict[str, tuple[GraphEdge, ...]]:
+        if not end_nodes:
+            return {}
         queue: list[tuple[float, str]] = [(0.0, start_node)]
         distances = {start_node: 0.0}
         previous: dict[str, tuple[str, GraphEdge]] = {}
+        remaining = set(end_nodes)
         while queue:
             distance, node = heapq.heappop(queue)
-            if node == end_node:
-                break
             if distance != distances.get(node):
                 continue
+            remaining.discard(node)
+            if not remaining:
+                break
             for edge in self.adjacency.get(node, []):
                 candidate = distance + edge.segment.length_m
                 if candidate < distances.get(edge.destination, float("inf")):
                     distances[edge.destination] = candidate
                     previous[edge.destination] = (node, edge)
                     heapq.heappush(queue, (candidate, edge.destination))
-        if end_node not in previous:
-            return ()
-        route: list[GraphEdge] = []
-        current = end_node
-        while current != start_node:
-            current, edge = previous[current]
-            route.append(edge)
-        route.reverse()
-        return tuple(route)
+        routes: dict[str, tuple[GraphEdge, ...]] = {}
+        for end_node in end_nodes:
+            if end_node not in previous:
+                continue
+            route: list[GraphEdge] = []
+            current = end_node
+            while current != start_node:
+                current, edge = previous[current]
+                route.append(edge)
+            route.reverse()
+            routes[end_node] = tuple(route)
+        return routes
+
+    def plan_from_segments(
+        self,
+        trip_id: str,
+        planned_at: datetime,
+        start_node: str,
+        end_node: str,
+        segment_ids: tuple[str, ...],
+        reverse_flags: tuple[bool, ...],
+    ) -> RoutePlan:
+        if not segment_ids or len(segment_ids) != len(reverse_flags):
+            raise ValueError("prepared route segments and directions must align")
+
+        edges: list[GraphEdge] = []
+        current_node = start_node
+        for segment_id, reverse in zip(segment_ids, reverse_flags, strict=True):
+            try:
+                segment = self.segments_by_id[segment_id]
+            except KeyError as error:
+                raise ValueError(
+                    f"prepared route references unknown segment {segment_id}"
+                ) from error
+            origin = segment.to_node_id if reverse else segment.from_node_id
+            destination = segment.from_node_id if reverse else segment.to_node_id
+            if origin != current_node:
+                raise ValueError("prepared route segments are not contiguous")
+            edges.append(GraphEdge(destination, segment, reverse))
+            current_node = destination
+        if current_node != end_node:
+            raise ValueError("prepared route does not end at end_node_id")
+        return self._to_plan(
+            trip_id,
+            planned_at,
+            start_node,
+            end_node,
+            tuple(edges),
+        )
 
     def _nodes_inside(self, polygon: object) -> list[str]:
-        return sorted(
-            node_id
-            for node_id, coordinate in self.node_coordinates.items()
-            if polygon.covers(Point(coordinate))  # type: ignore[union-attr]
-            and node_id in self.adjacency
-        )
+        indices = self._node_tree.query(polygon, predicate="covers")
+        return sorted(self._routable_node_ids[int(index)] for index in indices)
 
     @staticmethod
     def _to_plan(

@@ -10,15 +10,18 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
+import shapely
 from de4_core import SensorEvent
 
 from sensor_producer.domain import (
     BASELINE_DAMPING,
     VEHICLE_MIXES,
     VEHICLE_PROFILES,
+    PreparedTrip,
     RouteLeg,
     RoutePlan,
     SimulationConfig,
@@ -26,12 +29,11 @@ from sensor_producer.domain import (
     VehicleProfile,
 )
 from sensor_producer.errors import TripInfeasibleError, TripSkipReason
-from sensor_producer.geo import point_and_heading
 from sensor_producer.publisher import EventPublisher
 from sensor_producer.routing import METERS_PER_MILE, RoadRouter
 
 EVENT_NAMESPACE = uuid.UUID("a8ad2dcf-cbb4-4ca8-9173-a48958caa85e")
-TIMESTAMP_POLICY = "dispatch-utc-date-with-tlc-clock-v1"
+TIMESTAMP_POLICY = "run-utc-anchor-with-source-offset-v1"
 MPH_TO_MPS = 0.44704
 DEFAULT_SPEED_LIMIT_MPH = 25.0
 MAX_ACCELERATION_PHASE_SECONDS = 8.0
@@ -43,6 +45,7 @@ SWAY_WAVENUMBER_RAD_PER_M = 0.35
 SWAY_WEIGHT = 0.25
 MAX_STEERING_ANGLE_DEG = 35.0
 STEERING_ANGLE_DEADBAND_DEG = 0.05
+SAMPLE_BATCH_SIZE = 512
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +60,9 @@ class ReplayResult:
     rated_samples: int
     hump_samples: int
     profile_trip_counts: dict[str, int]
+    final_replay_lag_seconds: float = 0.0
+    max_replay_lag_seconds: float = 0.0
+    observed_segment_ids: frozenset[str] = frozenset()
 
     @property
     def trip_skip_ratio(self) -> float:
@@ -65,29 +71,34 @@ class ReplayResult:
         return self.trips_skipped / self.trips_attempted
 
 
-def rebase_trip_to_dispatch_date(
+@dataclass(frozen=True, slots=True)
+class ReplayTimeline:
+    """Map one historical source timeline onto one shared UTC run timeline."""
+
+    source_anchor: datetime
+    wall_anchor: datetime
+
+    def __post_init__(self) -> None:
+        if self.source_anchor.utcoffset() is None:
+            raise ValueError("source_anchor must be timezone-aware")
+        if self.wall_anchor.utcoffset() is None:
+            raise ValueError("wall_anchor must be timezone-aware")
+
+    def map(self, source_time: datetime) -> datetime:
+        if source_time.utcoffset() is None:
+            raise ValueError("source_time must be timezone-aware")
+        return (self.wall_anchor + (source_time - self.source_anchor)).astimezone(UTC)
+
+
+def rebase_trip_to_replay_timeline(
     trip: TripRecord,
-    dispatched_at: datetime,
+    timeline: ReplayTimeline,
 ) -> TripRecord:
-    if dispatched_at.utcoffset() is None:
-        raise ValueError("dispatched_at must be timezone-aware")
-
-    dispatch_date = dispatched_at.astimezone(UTC).date()
-    source_request_date = trip.request_datetime.date()
-
-    def rebase(source_time: datetime) -> datetime:
-        day_offset = source_time.date() - source_request_date
-        return datetime.combine(
-            dispatch_date + day_offset,
-            source_time.time(),
-            tzinfo=UTC,
-        )
-
     return TripRecord(
         trip_id=trip.trip_id,
-        request_datetime=rebase(trip.request_datetime),
-        pickup_datetime=rebase(trip.pickup_datetime),
-        dropoff_datetime=rebase(trip.dropoff_datetime),
+        request_datetime=timeline.map(trip.request_datetime),
+        pickup_datetime=timeline.map(trip.pickup_datetime),
+        dropoff_datetime=timeline.map(trip.dropoff_datetime),
         pu_location_id=trip.pu_location_id,
         do_location_id=trip.do_location_id,
         trip_miles=trip.trip_miles,
@@ -113,6 +124,13 @@ class SamplePosition:
 class MotionState:
     distance_m: float
     speed_mps: float
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatedSample:
+    event: SensorEvent
+    rated: bool
+    near_hump: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +252,75 @@ class SpeedProfile:
             last_speed * (1 - smoothstep(progress)),
         )
 
+    def states_for(self, elapsed_seconds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Calculate one chunk of distance and speed values in native array code."""
+        elapsed = np.clip(elapsed_seconds, 0.0, self.duration_seconds)
+        distances = np.empty_like(elapsed)
+        speeds = np.empty_like(elapsed)
+        first_speed = self.leg_speeds_mps[0]
+        last_speed = self.leg_speeds_mps[-1]
+        acceleration_distance = first_speed * self.ramp_seconds / 2
+        deceleration_distance = last_speed * self.ramp_seconds / 2
+
+        finished = elapsed >= self.duration_seconds
+        accelerating = (~finished) & (elapsed < self.ramp_seconds)
+        decelerating = (~finished) & (
+            elapsed >= self.duration_seconds - self.ramp_seconds
+        )
+        cruising = ~(finished | accelerating | decelerating)
+
+        progress = elapsed[accelerating] / self.ramp_seconds
+        smooth = 3 * progress**2 - 2 * progress**3
+        distances[accelerating] = (
+            first_speed * self.ramp_seconds * (progress**3 - progress**4 / 2)
+        )
+        speeds[accelerating] = first_speed * smooth
+
+        if np.any(cruising):
+            leg_lengths = np.asarray(self.leg_lengths_m, dtype=np.float64)
+            leg_speeds = np.asarray(self.leg_speeds_mps, dtype=np.float64)
+            traversable = leg_lengths.copy()
+            traversable[0] -= acceleration_distance
+            traversable[-1] -= deceleration_distance
+            phase_seconds = traversable / leg_speeds
+            cumulative_seconds = np.cumsum(phase_seconds)
+            cumulative_distances = np.cumsum(traversable)
+            remaining = elapsed[cruising] - self.ramp_seconds
+            leg_indices = np.searchsorted(cumulative_seconds, remaining, side="left")
+            leg_indices = np.clip(leg_indices, 0, len(leg_speeds) - 1)
+            previous_seconds = np.where(
+                leg_indices == 0,
+                0.0,
+                cumulative_seconds[np.maximum(0, leg_indices - 1)],
+            )
+            previous_distances = np.where(
+                leg_indices == 0,
+                0.0,
+                cumulative_distances[np.maximum(0, leg_indices - 1)],
+            )
+            speeds[cruising] = leg_speeds[leg_indices]
+            distances[cruising] = (
+                acceleration_distance
+                + previous_distances
+                + (remaining - previous_seconds) * leg_speeds[leg_indices]
+            )
+
+        progress = (
+            elapsed[decelerating] - (self.duration_seconds - self.ramp_seconds)
+        ) / self.ramp_seconds
+        smooth = 3 * progress**2 - 2 * progress**3
+        distances[decelerating] = (
+            self.route_length_m
+            - deceleration_distance
+            + last_speed
+            * self.ramp_seconds
+            * (progress - (progress**3 - progress**4 / 2))
+        )
+        speeds[decelerating] = last_speed * (1 - smooth)
+        distances[finished] = self.route_length_m
+        speeds[finished] = 0.0
+        return distances, speeds
+
 
 class MotionSimulator:
     """Generate plausible, deterministic signals rather than calibrated physics."""
@@ -245,6 +332,16 @@ class MotionSimulator:
         profile: VehicleProfile,
         config: SimulationConfig,
     ) -> Iterator[SensorEvent]:
+        for sample in self.generate_with_metadata(trip, route, profile, config):
+            yield sample.event
+
+    def generate_with_metadata(
+        self,
+        trip: TripRecord,
+        route: RoutePlan,
+        profile: VehicleProfile,
+        config: SimulationConfig,
+    ) -> Iterator[SimulatedSample]:
         duration = trip.passenger_duration_seconds
         sample_count = max(2, int(duration * config.sample_hz) + 1)
         previous_speed = 0.0
@@ -255,100 +352,287 @@ class MotionSimulator:
         phase = deterministic_phase(trip.trip_id, config.seed)
         speed_profile = SpeedProfile.for_route(route, duration)
 
-        for sequence in range(sample_count):
-            elapsed = min(duration, sequence * config.interval_seconds)
-            motion = speed_profile.state_at(elapsed)
-            distance = motion.distance_m
-            speed = motion.speed_mps
-            position = locate(route, distance)
-            fraction = (
-                position.distance_in_leg_m / position.leg.length_m
-                if position.leg.length_m
-                else 0.0
+        for chunk_start in range(0, sample_count, SAMPLE_BATCH_SIZE):
+            chunk_stop = min(sample_count, chunk_start + SAMPLE_BATCH_SIZE)
+            sequences = np.arange(chunk_start, chunk_stop, dtype=np.int64)
+            elapsed = np.minimum(duration, sequences * config.interval_seconds)
+            distances, speeds = speed_profile.states_for(elapsed)
+            leg_indices, local_distances, longitudes, latitudes, headings = (
+                route_sample_arrays(route, distances)
             )
-            point, heading = point_and_heading(position.leg.geometry, fraction)
 
-            if sequence == 0:
-                accel_x = 0.0
-                accel_y = 0.0
-                steering_angle = 0.0
-            else:
-                accel_x = (
-                    (speed - previous_speed)
-                    / config.interval_seconds
-                    * profile.longitudinal_response
+            previous_speeds = np.concatenate(([previous_speed], speeds[:-1]))
+            accel_x = (
+                (speeds - previous_speeds)
+                / config.interval_seconds
+                * profile.longitudinal_response
+            )
+            previous_headings = np.concatenate(
+                (
+                    [headings[0] if previous_heading is None else previous_heading],
+                    headings[:-1],
                 )
-                assert previous_heading is not None
-                heading_delta = signed_heading_delta(previous_heading, heading)
-                yaw_rate = math.radians(heading_delta) / config.interval_seconds
-                accel_y = clamp(speed * yaw_rate * profile.lateral_response, -4.0, 4.0)
-                steering_angle = steering_angle_degrees(speed, yaw_rate)
-
-            accel_z, _near_hump = vertical_acceleration(
-                position,
-                distance,
-                speed,
+            )
+            heading_delta = (headings - previous_headings + 180.0) % 360.0 - 180.0
+            yaw_rate = np.radians(heading_delta) / config.interval_seconds
+            accel_y = np.clip(
+                speeds * yaw_rate * profile.lateral_response,
+                -4.0,
+                4.0,
+            )
+            steering_angles = steering_angle_array(speeds, yaw_rate)
+            accel_z, near_hump = vertical_acceleration_array(
+                route,
+                leg_indices,
+                local_distances,
+                distances,
+                speeds,
                 elapsed,
                 phase,
                 profile,
             )
-            steering_vibration = steering_vibration_amplitude(
-                speed,
+            steering_vibration = steering_vibration_array(
+                speeds,
                 accel_y,
                 accel_z,
                 elapsed,
                 phase,
                 profile,
             )
-            if sequence == 0:
-                jerk_x = 0.0
-                jerk_y = 0.0
-                jerk_z = 0.0
-            else:
-                jerk_x = (accel_x - previous_accel_x) / config.interval_seconds
-                jerk_y = (accel_y - previous_accel_y) / config.interval_seconds
-                jerk_z = (accel_z - previous_accel_z) / config.interval_seconds
-            event_time = (trip.pickup_datetime + timedelta(seconds=elapsed)).astimezone(UTC)
-            event_id = str(
-                uuid.uuid5(
-                    EVENT_NAMESPACE,
-                    f"{config.run_id}:{trip.trip_id}:{profile.vehicle_profile_id}:{sequence}",
+            if chunk_start == 0:
+                accel_x[0] = 0.0
+                accel_y[0] = 0.0
+                steering_angles[0] = 0.0
+            previous_accel_x_values = np.concatenate(([previous_accel_x], accel_x[:-1]))
+            previous_accel_y_values = np.concatenate(([previous_accel_y], accel_y[:-1]))
+            previous_accel_z_values = np.concatenate(([previous_accel_z], accel_z[:-1]))
+            jerk_x = (accel_x - previous_accel_x_values) / config.interval_seconds
+            jerk_y = (accel_y - previous_accel_y_values) / config.interval_seconds
+            jerk_z = (accel_z - previous_accel_z_values) / config.interval_seconds
+            if chunk_start == 0:
+                jerk_x[0] = 0.0
+                jerk_y[0] = 0.0
+                jerk_z[0] = 0.0
+
+            for offset, sequence_value in enumerate(sequences):
+                sequence = int(sequence_value)
+                event_time = (
+                    trip.pickup_datetime + timedelta(seconds=float(elapsed[offset]))
+                ).astimezone(UTC)
+                event_id = str(
+                    uuid.uuid5(
+                        EVENT_NAMESPACE,
+                        f"{config.run_id}:{trip.trip_id}:"
+                        f"{profile.vehicle_profile_id}:{sequence}",
+                    )
                 )
+                event = SensorEvent(
+                    event_id=event_id,
+                    vehicle_id=f"vehicle-{profile.vehicle_profile_id}-{trip.trip_id[:8]}",
+                    vehicle_profile_id=profile.vehicle_profile_id,
+                    trip_id=trip.trip_id,
+                    trip_seq=sequence,
+                    event_time=event_time,
+                    latitude=float(latitudes[offset]),
+                    longitude=float(longitudes[offset]),
+                    speed_mps=max(0.0, float(speeds[offset])),
+                    heading=float(headings[offset]),
+                    steering_angle=float(steering_angles[offset]),
+                    accel_x=float(accel_x[offset]),
+                    accel_y=float(accel_y[offset]),
+                    accel_z=float(accel_z[offset]),
+                    jerk=float(jerk_x[offset]),
+                    jerk_x=float(jerk_x[offset]),
+                    jerk_y=float(jerk_y[offset]),
+                    jerk_z=float(jerk_z[offset]),
+                    steering_vibration=float(steering_vibration[offset]),
+                    _run_id=config.run_id,
+                )
+                leg = route.legs[int(leg_indices[offset])]
+                yield SimulatedSample(
+                    event,
+                    rated=leg.pavement_rating is not None,
+                    near_hump=bool(near_hump[offset]),
+                )
+
+            previous_speed = float(speeds[-1])
+            previous_accel_x = float(accel_x[-1])
+            previous_accel_y = float(accel_y[-1])
+            previous_accel_z = float(accel_z[-1])
+            previous_heading = float(headings[-1])
+
+
+def route_sample_arrays(
+    route: RoutePlan,
+    distances_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Locate a chunk on the route without scanning every leg per sample."""
+    leg_lengths = np.asarray([leg.length_m for leg in route.legs], dtype=np.float64)
+    cumulative = np.cumsum(leg_lengths)
+    clipped = np.clip(distances_m, 0.0, route.total_length_m)
+    leg_indices = np.searchsorted(cumulative, clipped, side="left")
+    leg_indices = np.clip(leg_indices, 0, len(route.legs) - 1)
+    previous = np.concatenate(([0.0], cumulative[:-1]))
+    local_distances = clipped - previous[leg_indices]
+    longitudes = np.empty_like(clipped)
+    latitudes = np.empty_like(clipped)
+    headings = np.empty_like(clipped)
+
+    for leg_index in np.unique(leg_indices):
+        mask = leg_indices == leg_index
+        leg = route.legs[int(leg_index)]
+        fractions = np.clip(local_distances[mask] / leg.length_m, 0.0, 1.0)
+        points = shapely.line_interpolate_point(
+            leg.geometry,
+            fractions,
+            normalized=True,
+        )
+        delta = min(0.001, 1 / max(1000, len(leg.geometry.coords) * 100))
+        before = shapely.line_interpolate_point(
+            leg.geometry,
+            np.clip(fractions - delta, 0.0, 1.0),
+            normalized=True,
+        )
+        after = shapely.line_interpolate_point(
+            leg.geometry,
+            np.clip(fractions + delta, 0.0, 1.0),
+            normalized=True,
+        )
+        before_lon = shapely.get_x(before)
+        before_lat = shapely.get_y(before)
+        after_lon = shapely.get_x(after)
+        after_lat = shapely.get_y(after)
+        lon1 = np.radians(before_lon)
+        lat1 = np.radians(before_lat)
+        lon2 = np.radians(after_lon)
+        lat2 = np.radians(after_lat)
+        delta_lon = lon2 - lon1
+        x = np.sin(delta_lon) * np.cos(lat2)
+        y = np.cos(lat1) * np.sin(lat2) - (
+            np.sin(lat1) * np.cos(lat2) * np.cos(delta_lon)
+        )
+        longitudes[mask] = shapely.get_x(points)
+        latitudes[mask] = shapely.get_y(points)
+        headings[mask] = np.degrees(np.arctan2(x, y)) % 360.0
+    return leg_indices, local_distances, longitudes, latitudes, headings
+
+
+def vertical_acceleration_array(
+    route: RoutePlan,
+    leg_indices: np.ndarray,
+    local_distances_m: np.ndarray,
+    route_distances_m: np.ndarray,
+    speeds_mps: np.ndarray,
+    elapsed_seconds: np.ndarray,
+    phase: float,
+    profile: VehicleProfile,
+) -> tuple[np.ndarray, np.ndarray]:
+    ratings_by_leg = np.asarray(
+        [
+            np.nan if leg.pavement_rating is None else leg.pavement_rating
+            for leg in route.legs
+        ]
+    )
+    ratings = ratings_by_leg[leg_indices]
+    roughness = np.where(np.isnan(ratings), 0.12, 0.08 + (10 - ratings) / 9 * 0.52)
+    pavement = (
+        profile.vertical_response
+        * roughness
+        * (
+            np.sin(route_distances_m * 1.7 + phase)
+            + 0.35 * np.sin(route_distances_m * 4.1 + phase / 2)
+        )
+    )
+    sway = (
+        profile.vertical_response
+        * roughness
+        * SWAY_WEIGHT
+        * (BASELINE_DAMPING / profile.damping)
+        * np.sin(route_distances_m * SWAY_WAVENUMBER_RAD_PER_M + phase / 3)
+    )
+    hump_response = np.zeros_like(route_distances_m)
+    near_hump = np.zeros(route_distances_m.shape, dtype=np.bool_)
+    for leg_index in np.unique(leg_indices):
+        leg_mask = leg_indices == leg_index
+        leg = route.legs[int(leg_index)]
+        for hump_distance in leg.hump_distances_m:
+            offset = local_distances_m - hump_distance
+            near_hump[leg_mask & (np.abs(offset) <= 2.0)] = True
+            active = leg_mask & (np.abs(offset) <= 8.0)
+            if not np.any(active):
+                continue
+            selected_offset = offset[active]
+            impact = np.exp(-((selected_offset / 1.8) ** 2))
+            ring = np.where(
+                selected_offset > 0,
+                np.sin(elapsed_seconds[active] * 18)
+                * np.exp(-selected_offset * profile.damping),
+                0.0,
             )
-            yield SensorEvent(
-                event_id=event_id,
-                vehicle_id=f"vehicle-{profile.vehicle_profile_id}-{trip.trip_id[:8]}",
-                vehicle_profile_id=profile.vehicle_profile_id,
-                trip_id=trip.trip_id,
-                trip_seq=sequence,
-                event_time=event_time,
-                latitude=point.y,
-                longitude=point.x,
-                speed_mps=max(0.0, speed),
-                heading=heading,
-                steering_angle=steering_angle,
-                accel_x=accel_x,
-                accel_y=accel_y,
-                accel_z=accel_z,
-                jerk=jerk_x,
-                jerk_x=jerk_x,
-                jerk_y=jerk_y,
-                jerk_z=jerk_z,
-                steering_vibration=steering_vibration,
-                _run_id=config.run_id,
+            hump_response[active] += (
+                profile.vertical_response
+                * np.maximum(0.5, speeds_mps[active] / 5)
+                * (1.8 * impact + 0.35 * ring)
             )
-            previous_speed = speed
-            previous_accel_x = accel_x
-            previous_accel_y = accel_y
-            previous_accel_z = accel_z
-            previous_heading = heading
+    return pavement + sway + hump_response, near_hump
+
+
+def steering_vibration_array(
+    speeds_mps: np.ndarray,
+    accel_y: np.ndarray,
+    accel_z: np.ndarray,
+    elapsed_seconds: np.ndarray,
+    phase: float,
+    profile: VehicleProfile,
+) -> np.ndarray:
+    moving_factor = np.clip(speeds_mps / 1.5, 0.0, 1.0)
+    speed_factor = np.clip(speeds_mps / 8.0, 0.0, 1.5)
+    road_component = np.abs(accel_z) * (0.20 + 0.25 * speed_factor) * moving_factor
+    steering_component = np.abs(accel_y) * 0.14
+    carrier = 0.85 + 0.15 * np.abs(np.sin(elapsed_seconds * 28.0 + phase))
+    return (
+        profile.steering_vibration_response
+        * (road_component + steering_component)
+        * carrier
+    )
+
+
+def steering_angle_array(speeds_mps: np.ndarray, yaw_rate: np.ndarray) -> np.ndarray:
+    safe_speed = np.maximum(speeds_mps, MIN_STEERING_SPEED_MPS)
+    angles = np.degrees(np.arctan(REPRESENTATIVE_WHEELBASE_M * yaw_rate / safe_speed))
+    angles = np.where(speeds_mps < MIN_STEERING_SPEED_MPS, 0.0, angles)
+    angles = np.where(np.abs(angles) < STEERING_ANGLE_DEADBAND_DEG, 0.0, angles)
+    return np.clip(angles, -MAX_STEERING_ANGLE_DEG, MAX_STEERING_ANGLE_DEG)
 
 
 class ReplayClock:
-    def __init__(self, time_scale: float):
+    def __init__(
+        self,
+        time_scale: float,
+        *,
+        source_anchor: datetime | None = None,
+        wall_anchor: datetime | None = None,
+        max_lag_seconds: float | None = None,
+    ):
+        if (source_anchor is None) != (wall_anchor is None):
+            raise ValueError("source_anchor and wall_anchor must be set together")
+        if source_anchor is not None and source_anchor.utcoffset() is None:
+            raise ValueError("source_anchor must be timezone-aware")
+        if wall_anchor is not None and wall_anchor.utcoffset() is None:
+            raise ValueError("wall_anchor must be timezone-aware")
+        if max_lag_seconds is not None and max_lag_seconds < 0:
+            raise ValueError("max_lag_seconds must be non-negative")
         self.time_scale = time_scale
-        self._event_anchor: datetime | None = None
-        self._monotonic_anchor: float | None = None
+        self.max_lag_seconds_limit = max_lag_seconds
+        self._event_anchor = source_anchor
+        self._monotonic_anchor = (
+            time.monotonic()
+            + (wall_anchor.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+            if wall_anchor is not None
+            else None
+        )
+        self.final_lag_seconds = 0.0
+        self.max_lag_seconds = 0.0
 
     def wait_until(self, event_time: datetime) -> None:
         if self.time_scale == 0:
@@ -359,9 +643,22 @@ class ReplayClock:
             return
         simulated_elapsed = (event_time - self._event_anchor).total_seconds()
         target = self._monotonic_anchor + simulated_elapsed / self.time_scale  # type: ignore[operator]
-        remaining = target - time.monotonic()
+        now = time.monotonic()
+        remaining = target - now
         if remaining > 0:
             time.sleep(remaining)
+            now = time.monotonic()
+        self.final_lag_seconds = max(0.0, now - target)
+        self.max_lag_seconds = max(self.max_lag_seconds, self.final_lag_seconds)
+        if (
+            self.max_lag_seconds_limit is not None
+            and self.final_lag_seconds > self.max_lag_seconds_limit
+        ):
+            raise RuntimeError(
+                "replay lag "
+                f"{self.final_lag_seconds:.3f}s exceeds maximum "
+                f"{self.max_lag_seconds_limit:.3f}s"
+            )
 
 
 class ReplayCoordinator:
@@ -374,6 +671,7 @@ class ReplayCoordinator:
         simulator: MotionSimulator | None = None,
         clock: ReplayClock | None = None,
         utc_now: Callable[[], datetime] | None = None,
+        timeline: ReplayTimeline | None = None,
     ):
         self.router = router
         self.taxi_zones = taxi_zones
@@ -382,8 +680,9 @@ class ReplayCoordinator:
         self.simulator = simulator or MotionSimulator()
         self.clock = clock or ReplayClock(config.time_scale)
         self.utc_now = utc_now or (lambda: datetime.now(UTC))
+        self.timeline = timeline
 
-    def replay(self, trips: Iterable[TripRecord]) -> ReplayResult:
+    def replay(self, trips: Iterable[TripRecord | PreparedTrip]) -> ReplayResult:
         queue: list[tuple[datetime, int, str, object]] = []
         trip_iterator = iter(trips)
         counter = 0
@@ -392,16 +691,24 @@ class ReplayCoordinator:
         def enqueue_next_dispatch() -> None:
             nonlocal counter, previous_request_time
             try:
-                trip = next(trip_iterator)
+                replay_input = next(trip_iterator)
             except StopIteration:
                 return
+            trip = (
+                replay_input.trip
+                if isinstance(replay_input, PreparedTrip)
+                else replay_input
+            )
             if (
                 previous_request_time is not None
                 and trip.request_datetime < previous_request_time
             ):
                 raise ValueError("trips must be ordered by request_datetime")
             previous_request_time = trip.request_datetime
-            heapq.heappush(queue, (trip.request_datetime, counter, "dispatch", trip))
+            heapq.heappush(
+                queue,
+                (trip.request_datetime, counter, "dispatch", replay_input),
+            )
             counter += 1
 
         # 아직 배차되지 않은 Trip은 다음 한 건만 유지해 입력 크기만큼 메모리가 늘지 않게 한다
@@ -420,37 +727,56 @@ class ReplayCoordinator:
             action_time, _, action, value = heapq.heappop(queue)
             self.clock.wait_until(action_time)
             if action == "dispatch":
-                source_trip = value
-                assert isinstance(source_trip, TripRecord)
-                # 실제 배차 시점의 UTC 날짜와 TLC 시각을 결합해 발행 시간을 만든다
-                replay_trip = rebase_trip_to_dispatch_date(
-                    source_trip,
-                    self.utc_now(),
+                replay_input = value
+                assert isinstance(replay_input, TripRecord | PreparedTrip)
+                source_trip = (
+                    replay_input.trip
+                    if isinstance(replay_input, PreparedTrip)
+                    else replay_input
                 )
+                if self.timeline is None:
+                    # 첫 실제 배차를 기준으로 모든 Trip이 하나의 시간축을 공유한다
+                    self.timeline = ReplayTimeline(
+                        source_trip.request_datetime, self.utc_now()
+                    )
+                replay_trip = rebase_trip_to_replay_timeline(source_trip, self.timeline)
                 enqueue_next_dispatch()
                 trips_attempted += 1
                 try:
-                    pickup_zone = self._taxi_zone(
-                        source_trip.pu_location_id,
-                        TripSkipReason.PICKUP_ZONE_NOT_FOUND,
-                    )
-                    dropoff_zone = self._taxi_zone(
-                        source_trip.do_location_id,
-                        TripSkipReason.DROPOFF_ZONE_NOT_FOUND,
-                    )
-                    route = self.router.plan_for_zones(
-                        replay_trip.trip_id,
-                        replay_trip.request_datetime,
-                        pickup_zone,
-                        dropoff_zone,
-                        target_distance_m=replay_trip.trip_miles * METERS_PER_MILE,
-                    )
+                    if isinstance(replay_input, PreparedTrip):
+                        if replay_input.skip_reason is not None:
+                            raise TripInfeasibleError(
+                                replay_input.skip_reason,
+                                "trip was rejected while preparing replay input",
+                            )
+                        assert replay_input.route is not None
+                        # 경로는 사전에 계산하되 planned_at은 실제 배차 시각으로 기록한다
+                        route = replace(
+                            replay_input.route,
+                            planned_at=replay_trip.request_datetime,
+                        )
+                    else:
+                        pickup_zone = self._taxi_zone(
+                            source_trip.pu_location_id,
+                            TripSkipReason.PICKUP_ZONE_NOT_FOUND,
+                        )
+                        dropoff_zone = self._taxi_zone(
+                            source_trip.do_location_id,
+                            TripSkipReason.DROPOFF_ZONE_NOT_FOUND,
+                        )
+                        route = self.router.plan_for_zones(
+                            replay_trip.trip_id,
+                            replay_trip.request_datetime,
+                            pickup_zone,
+                            dropoff_zone,
+                            target_distance_m=replay_trip.trip_miles * METERS_PER_MILE,
+                        )
                     profile = self._profile_for(replay_trip)
-                    event_iterator = self.simulator.generate(
+                    sample_iterator = self.simulator.generate_with_metadata(
                         replay_trip, route, profile, self.config
                     )
                     # 첫 샘플 생성 시 속도 프로파일까지 검증한다
-                    first_event = next(event_iterator)
+                    first_sample = next(sample_iterator)
                 except TripInfeasibleError as error:
                     skip_reasons[error.reason] += 1
                     logger.warning(
@@ -479,14 +805,14 @@ class ReplayCoordinator:
                         source_sensor_schedule_time(
                             source_trip,
                             replay_trip,
-                            first_event,
+                            first_sample.event,
                         ),
                         counter,
                         "sensor",
                         (
-                            first_event,
+                            first_sample,
                             route,
-                            event_iterator,
+                            sample_iterator,
                             source_trip,
                             replay_trip,
                         ),
@@ -494,7 +820,15 @@ class ReplayCoordinator:
                 )
                 counter += 1
             else:
-                event, route, event_iterator, source_trip, replay_trip = value
+                (
+                    sample,
+                    route,
+                    sample_iterator,
+                    source_trip,
+                    replay_trip,
+                ) = value
+                event = sample.event
+                assert isinstance(sample, SimulatedSample)
                 assert isinstance(event, SensorEvent)
                 assert isinstance(route, RoutePlan)
                 assert isinstance(source_trip, TripRecord)
@@ -502,7 +836,7 @@ class ReplayCoordinator:
                 self.publisher.publish(event)
                 events_published += 1
                 try:
-                    next_event = next(event_iterator)
+                    next_sample = next(sample_iterator)
                 except StopIteration:
                     pass
                 else:
@@ -512,35 +846,23 @@ class ReplayCoordinator:
                             source_sensor_schedule_time(
                                 source_trip,
                                 replay_trip,
-                                next_event,
+                                next_sample.event,
                             ),
                             counter,
                             "sensor",
                             (
-                                next_event,
+                                next_sample,
                                 route,
-                                event_iterator,
+                                sample_iterator,
                                 source_trip,
                                 replay_trip,
                             ),
                         ),
                     )
                     counter += 1
-                position = locate(
-                    route,
-                    distance_for_event(
-                        event.trip_seq,
-                        route,
-                        self.config,
-                        replay_trip,
-                    ),
-                )
-                if position.leg.pavement_rating is not None:
+                if sample.rated:
                     rated_samples += 1
-                if any(
-                    abs(position.distance_in_leg_m - hump_distance) <= 2.0
-                    for hump_distance in position.leg.hump_distances_m
-                ):
+                if sample.near_hump:
                     hump_samples += 1
 
         self.publisher.flush()
@@ -557,6 +879,11 @@ class ReplayCoordinator:
             rated_samples=rated_samples,
             hump_samples=hump_samples,
             profile_trip_counts=dict(sorted(profile_trip_counts.items())),
+            final_replay_lag_seconds=float(
+                getattr(self.clock, "final_lag_seconds", 0.0)
+            ),
+            max_replay_lag_seconds=float(getattr(self.clock, "max_lag_seconds", 0.0)),
+            observed_segment_ids=frozenset(segments),
         )
 
     def _profile_for(self, trip: TripRecord) -> VehicleProfile:
@@ -608,9 +935,13 @@ def vertical_acceleration(
 ) -> tuple[float, bool]:
     rating = position.leg.pavement_rating
     roughness = 0.12 if rating is None else 0.08 + (10 - rating) / 9 * 0.52
-    pavement = profile.vertical_response * roughness * (
-        math.sin(route_distance_m * 1.7 + phase)
-        + 0.35 * math.sin(route_distance_m * 4.1 + phase / 2)
+    pavement = (
+        profile.vertical_response
+        * roughness
+        * (
+            math.sin(route_distance_m * 1.7 + phase)
+            + 0.35 * math.sin(route_distance_m * 4.1 + phase / 2)
+        )
     )
     # 감쇠계수가 낮은 차량일수록 노면 입력이 차체 흔들림으로 더 오래 남는다. 정상상태
     # 사인파에는 지속 시간이 없으므로 지속을 진폭으로 근사한다(감쇠비가 아니다).
@@ -634,8 +965,10 @@ def vertical_acceleration(
         ring = 0.0
         if offset > 0:
             ring = math.sin(elapsed_seconds * 18) * math.exp(-offset * profile.damping)
-        hump_response += profile.vertical_response * max(0.5, speed_mps / 5) * (
-            1.8 * impact + 0.35 * ring
+        hump_response += (
+            profile.vertical_response
+            * max(0.5, speed_mps / 5)
+            * (1.8 * impact + 0.35 * ring)
         )
     return pavement + sway + hump_response, near_hump
 
@@ -661,9 +994,11 @@ def steering_vibration_amplitude(
     road_component = abs(accel_z) * (0.20 + 0.25 * speed_factor) * moving_factor
     steering_component = abs(accel_y) * 0.14
     carrier = 0.85 + 0.15 * abs(math.sin(elapsed_seconds * 28.0 + phase))
-    return profile.steering_vibration_response * (
-        road_component + steering_component
-    ) * carrier
+    return (
+        profile.steering_vibration_response
+        * (road_component + steering_component)
+        * carrier
+    )
 
 
 def steering_angle_degrees(speed_mps: float, yaw_rate_rad_s: float) -> float:

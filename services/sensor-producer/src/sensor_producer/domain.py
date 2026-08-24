@@ -8,6 +8,8 @@ from datetime import datetime
 
 from shapely.geometry import LineString
 
+from sensor_producer.errors import TripSkipReason
+
 
 @dataclass(frozen=True, slots=True)
 class TripRecord:
@@ -131,6 +133,21 @@ class RoutePlan:
     @property
     def segment_ids(self) -> tuple[str, ...]:
         return tuple(leg.segment_id for leg in self.legs)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTrip:
+    """A source Trip paired with its precomputed route or bounded skip reason."""
+
+    trip: TripRecord
+    route: RoutePlan | None
+    skip_reason: TripSkipReason | None = None
+
+    def __post_init__(self) -> None:
+        if (self.route is None) == (self.skip_reason is None):
+            raise ValueError("set exactly one of route and skip_reason")
+        if self.route is not None and self.route.trip_id != self.trip.trip_id:
+            raise ValueError("prepared route trip_id must match source trip_id")
 
 
 @dataclass(frozen=True, slots=True)
