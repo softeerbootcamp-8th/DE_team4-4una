@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -34,7 +35,9 @@ class _FakeObjectStore:
         self._row_counts_by_uri = row_counts_by_uri
 
     def list_objects(self, uri: str):
-        prefix = uri.rstrip("/") + "/"
+        # Unquote the input URI to handle URL-encoded paths from join_uri
+        unquoted_uri = unquote(uri)
+        prefix = unquoted_uri.rstrip("/") + "/"
         return [
             _FakeObject(uri=file_uri)
             for file_uri in self._row_counts_by_uri
@@ -42,7 +45,9 @@ class _FakeObjectStore:
         ]
 
     def read_bytes(self, uri: str) -> bytes:
-        table = pa.table({"x": list(range(self._row_counts_by_uri[uri]))})
+        # Unquote the input URI to handle URL-encoded paths from join_uri
+        unquoted_uri = unquote(uri)
+        table = pa.table({"x": list(range(self._row_counts_by_uri[unquoted_uri]))})
         buffer = io.BytesIO()
         pq.write_table(table, buffer)
         return buffer.getvalue()

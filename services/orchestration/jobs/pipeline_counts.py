@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import pyarrow.parquet as pq
-from de4_core import ObjectStore
+from de4_core import ObjectStore, join_uri
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +68,15 @@ def count_standard_score_pipeline_outputs(
     # batch-jobs가 실제로 쓰는 파티션 경로 규칙(#409 조사 기록 참고) — cleansing/
     # hourly_storage.py의 quarantine_hour_path(), hourly_segment_feature_storage.py의
     # hour_output_path()와 반드시 같은 형식이어야 한다.
-    quarantine_partition = (
-        f"{quarantine_output_path.rstrip('/')}/target_date={target_hour.date().isoformat()}"
-        f"/target_hour={target_hour.hour:02d}"
+    quarantine_partition = join_uri(
+        quarantine_output_path,
+        f"target_date={target_hour.date().isoformat()}",
+        f"target_hour={target_hour.hour:02d}",
     )
-    feature_partition = (
-        f"{feature_output_path.rstrip('/')}/data_period_date={target_hour.date().isoformat()}"
-        f"/hour={target_hour.hour:02d}"
+    feature_partition = join_uri(
+        feature_output_path,
+        f"data_period_date={target_hour.date().isoformat()}",
+        f"hour={target_hour.hour:02d}",
     )
 
     with connection.cursor() as cursor:
