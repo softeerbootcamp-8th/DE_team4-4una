@@ -5,24 +5,10 @@ import RoadComfortMap from "./components/RoadComfortMap.jsx";
 
 const ALL_BOROUGHS = "All boroughs";
 
-// Leaflet은 bounds를 full float precision으로 준다. 1픽셀만 움직여도 값이
-// 달라지므로 ~100m로 반올림해 비교한다 -- 실제 pan은 따라가되 미세한 지터로는
-// 다시 조회하지 않는다.
-const VIEWPORT_PRECISION = 3;
-const EDGES = ["south", "west", "north", "east"];
-
-function sameViewport(a, b) {
-  if (!a || !b) return false;
-  return EDGES.every(
-    (edge) => a[edge].toFixed(VIEWPORT_PRECISION) === b[edge].toFixed(VIEWPORT_PRECISION),
-  );
-}
-
 export default function App() {
   const [bootstrap, setBootstrap] = useState(null);
   const [bootstrapError, setBootstrapError] = useState(null);
   const [borough, setBorough] = useState(null);
-  const [viewport, setViewport] = useState(null);
   const [segments, setSegments] = useState(null);
   const [segmentsVersion, setSegmentsVersion] = useState(0);
   const [meta, setMeta] = useState(null);
@@ -39,10 +25,10 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  // borough를 고르기 전에는 outline만 보여준다. 전체 도로망을 그리는 것이
-  // 애초에 지도를 못 쓰게 만들던 원인이다.
+  // borough를 고르기 전에는 outline만 보여준다. zone master가 없는 배포에서는
+  // borough 개념 자체가 없으므로 스냅샷을 바로 받는다.
   const needsBorough = bootstrap != null && bootstrap.boroughs.length > 0;
-  const shouldFetch = viewport != null && bootstrap != null && (!needsBorough || borough != null);
+  const shouldFetch = bootstrap != null && (!needsBorough || borough != null);
 
   useEffect(() => {
     if (!shouldFetch) {
@@ -52,12 +38,12 @@ export default function App() {
     }
     const controller = new AbortController();
     setLoading(true);
-    fetchSegments({ borough, viewport, signal: controller.signal })
+    setError(null);
+    fetchSegments({ borough, signal: controller.signal })
       .then((payload) => {
         setSegments(payload.features);
         setSegmentsVersion((version) => version + 1);
         setMeta(payload);
-        setError(null);
       })
       .catch((exc) => {
         if (exc.name !== "AbortError") setError(exc.message);
@@ -65,15 +51,10 @@ export default function App() {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    // 새 viewport나 borough로 넘어가면 진행 중이던 요청을 취소한다. 그러지
-    // 않으면 먼저 보낸 요청의 늦은 응답이 지도를 과거 위치로 덮어쓴다.
+    // borough를 연달아 바꾸면 진행 중이던 요청을 취소한다. 그러지 않으면 먼저
+    // 보낸 요청의 늦은 응답이 나중에 고른 borough를 덮어쓴다.
     return () => controller.abort();
-  }, [shouldFetch, borough, viewport]);
-
-  const handleViewportChange = useCallback((next) => {
-    // 같은 영역이면 이전 객체를 그대로 돌려줘서 조회 effect가 다시 돌지 않게 한다.
-    setViewport((previous) => (sameViewport(previous, next) ? previous : next));
-  }, []);
+  }, [shouldFetch, borough]);
 
   const handleSelectBorough = useCallback((name) => {
     setBorough(name === ALL_BOROUGHS ? null : name);
@@ -119,8 +100,7 @@ export default function App() {
 
       {bootstrap != null && !needsBorough && (
         <div className="banner banner--info">
-          Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing every segment in the snapshot
-          instead.
+          Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing part of the snapshot instead.
         </div>
       )}
       {needsBorough && borough == null && (
@@ -128,8 +108,8 @@ export default function App() {
       )}
       {meta?.truncated && (
         <div className="banner banner--info">
-          {meta.in_viewport_count.toLocaleString()} segments are in view and the first{" "}
-          {meta.rendered_count.toLocaleString()} are drawn. Zoom in to see all of them.
+          Only the first {meta.segment_count.toLocaleString()} segments of the snapshot are drawn.
+          Set DASHBOARD_ZONE_MASTER_S3_URI to browse by borough instead.
         </div>
       )}
       {meta?.vehicle_profile_fallback && (
@@ -144,16 +124,14 @@ export default function App() {
         boroughs={boroughs}
         selectedBorough={borough}
         onSelectBorough={handleSelectBorough}
-        onViewportChange={handleViewportChange}
         segments={segments}
         segmentsVersion={segmentsVersion}
-        status={loading ? "Loading comfort scores..." : null}
+        status={loading ? `Loading ${scopeLabel}...` : null}
       />
 
       <p className="app__caption">
-        Rendered: {(meta?.rendered_count ?? 0).toLocaleString()} of {scopeCount.toLocaleString()}{" "}
+        Rendered: {(meta?.segment_count ?? 0).toLocaleString()} of {scopeCount.toLocaleString()}{" "}
         segments in {scopeLabel}
-        {bootstrap != null && ` · Max per viewport: ${bootstrap.max_rendered_segments.toLocaleString()}`}
       </p>
     </div>
   );

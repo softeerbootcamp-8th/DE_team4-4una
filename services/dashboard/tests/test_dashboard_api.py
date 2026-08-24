@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+
 import httpx
 import pytest
 from botocore.exceptions import ClientError
@@ -9,16 +12,13 @@ from dashboard.api import app, get_service, resolve_static_dir
 from dashboard.dashboard_service import (
     Bootstrap,
     BoroughSummary,
+    SegmentPayload,
     UnknownBoroughError,
-    ViewportSegments,
 )
 from fastapi.testclient import TestClient
 
-VIEWPORT_QUERY = {"south": 40.0, "west": -74.1, "north": 40.1, "east": -74.0}
-
 BOOTSTRAP = Bootstrap(
     total_segment_count=166_222,
-    max_rendered_segments=1000,
     boroughs=(
         BoroughSummary(
             name="Manhattan",
@@ -30,20 +30,26 @@ BOOTSTRAP = Bootstrap(
     ),
 )
 
-VIEWPORT_RESULT = ViewportSegments(
-    in_viewport_count=1382,
-    rendered_count=1000,
-    truncated=True,
-    requested_vehicle_profile_id=0,
-    effective_vehicle_profile_id=0,
-    vehicle_profile_fallback=False,
-    features={"type": "FeatureCollection", "features": []},
+BODY = {
+    "segment_count": 30_000,
+    "truncated": False,
+    "requested_vehicle_profile_id": 0,
+    "effective_vehicle_profile_id": 0,
+    "vehicle_profile_fallback": False,
+    "features": {"type": "FeatureCollection", "features": []},
+}
+
+PAYLOAD = SegmentPayload(
+    segment_count=30_000,
+    truncated=False,
+    body=gzip.compress(json.dumps(BODY).encode(), 6),
+    expires_at=0.0,
 )
 
 
 class _StubService:
     def __init__(self, **overrides) -> None:
-        self.calls: list[tuple] = []
+        self.calls: list[str | None] = []
         self._overrides = overrides
 
     def bootstrap(self):
@@ -51,11 +57,11 @@ class _StubService:
             raise self._overrides["bootstrap"]
         return BOOTSTRAP
 
-    def get_segments_in_viewport(self, borough, south, west, north, east):
-        self.calls.append((borough, south, west, north, east))
+    def get_segments(self, borough):
+        self.calls.append(borough)
         if "segments" in self._overrides:
             raise self._overrides["segments"]
-        return VIEWPORT_RESULT
+        return PAYLOAD
 
 
 @pytest.fixture
@@ -90,54 +96,46 @@ def test_bootstrap_exposes_boroughs_and_snapshot_size(client):
     payload = client.get("/api/bootstrap").json()
 
     assert payload["total_segment_count"] == 166_222
-    assert payload["max_rendered_segments"] == 1000
     assert payload["boroughs"][0]["name"] == "Manhattan"
-    assert payload["boroughs"][0]["center"] == [40.78, -73.96]
+    assert payload["boroughs"][0]["bounds"] == [-74.02, 40.70, -73.91, 40.88]
     assert payload["boroughs"][0]["segment_count"] == 30_000
     assert payload["boroughs"][0]["geometry"]["type"] == "Polygon"
 
 
-def test_segments_passes_the_viewport_through_and_reports_truncation(client, stub):
-    payload = client.get("/api/segments", params={**VIEWPORT_QUERY, "borough": "Manhattan"}).json()
+def test_segments_returns_the_whole_borough(client, stub):
+    payload = client.get("/api/segments", params={"borough": "Manhattan"}).json()
 
-    assert stub.calls == [("Manhattan", 40.0, -74.1, 40.1, -74.0)]
-    assert payload["in_viewport_count"] == 1382
-    assert payload["rendered_count"] == 1000
-    assert payload["truncated"] is True
-    assert payload["vehicle_profile_fallback"] is False
+    assert stub.calls == ["Manhattan"]
+    assert payload["segment_count"] == 30_000
+    assert payload["truncated"] is False
     assert payload["features"]["type"] == "FeatureCollection"
 
 
 def test_borough_is_optional(client, stub):
-    client.get("/api/segments", params=VIEWPORT_QUERY)
+    client.get("/api/segments")
 
-    assert stub.calls == [(None, 40.0, -74.1, 40.1, -74.0)]
-
-
-@pytest.mark.parametrize(
-    ("params", "reason"),
-    [
-        ({"south": 40.1, "west": -74.1, "north": 40.0, "east": -74.0}, "south >= north"),
-        ({"south": 40.0, "west": -74.0, "north": 40.1, "east": -74.1}, "west >= east"),
-    ],
-)
-def test_an_inverted_viewport_is_rejected(client, params, reason):
-    assert client.get("/api/segments", params=params).status_code == 400, reason
+    assert stub.calls == [None]
 
 
-def test_a_latitude_outside_the_world_is_rejected(client):
-    params = {**VIEWPORT_QUERY, "south": -120.0}
+def test_the_cached_gzip_body_is_sent_as_is(client):
+    """서비스가 눌러둔 바이트를 그대로 흘려보낸다 -- 요청마다 다시 압축하지 않는다."""
+    response = client.get("/api/segments", headers={"Accept-Encoding": "gzip"})
 
-    assert client.get("/api/segments", params=params).status_code == 422
+    assert response.headers["content-encoding"] == "gzip"
+    # httpx가 자동으로 풀어준 결과가 원본과 같아야 한다.
+    assert response.json()["segment_count"] == 30_000
 
 
-def test_a_missing_viewport_is_rejected(client):
-    assert client.get("/api/segments").status_code == 422
+def test_a_client_without_gzip_gets_plain_json(client):
+    response = client.get("/api/segments", headers={"Accept-Encoding": "identity"})
+
+    assert "content-encoding" not in response.headers
+    assert response.json()["segment_count"] == 30_000
 
 
 def test_an_unknown_borough_is_a_404():
     with _client_raising(segments=UnknownBoroughError("Atlantis")) as client:
-        response = client.get("/api/segments", params={**VIEWPORT_QUERY, "borough": "Atlantis"})
+        response = client.get("/api/segments", params={"borough": "Atlantis"})
 
     assert response.status_code == 404
 
@@ -150,18 +148,7 @@ def test_an_s3_failure_is_a_502():
 
 def test_a_serving_api_failure_is_a_502():
     with _client_raising(segments=httpx.ConnectError("refused")) as client:
-        response = client.get("/api/segments", params={**VIEWPORT_QUERY, "borough": "Manhattan"})
-
-    assert response.status_code == 502
-
-
-def test_static_files_are_optional(monkeypatch, tmp_path):
-    """React를 아직 빌드하지 않았으면 API만 제공한다."""
-    monkeypatch.setenv("DASHBOARD_STATIC_DIR", str(tmp_path))
-    assert resolve_static_dir() is None
-
-    (tmp_path / "index.html").write_text("<html></html>")
-    assert resolve_static_dir() == tmp_path
+        assert client.get("/api/segments", params={"borough": "Manhattan"}).status_code == 502
 
 
 def test_a_configuration_error_is_reported_in_the_response():
@@ -171,3 +158,12 @@ def test_a_configuration_error_is_reported_in_the_response():
 
     assert response.status_code == 500
     assert "DASHBOARD_ROAD_SEGMENT_S3_URI must be set" in response.text
+
+
+def test_static_files_are_optional(monkeypatch, tmp_path):
+    """React를 아직 빌드하지 않았으면 API만 제공한다."""
+    monkeypatch.setenv("DASHBOARD_STATIC_DIR", str(tmp_path))
+    assert resolve_static_dir() is None
+
+    (tmp_path / "index.html").write_text("<html></html>")
+    assert resolve_static_dir() == tmp_path

@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
-import { GeoJSON, MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
+import { useEffect } from "react";
+import { GeoJSON, MapContainer, TileLayer, useMap } from "react-leaflet";
 
 export const NYC_MAP_CENTER = [40.7128, -74.006];
 export const NYC_MAP_ZOOM = 11;
-
-// pan을 멈춘 뒤 요청까지 기다리는 시간. 드래그 중에는 아무것도 부르지 않는다.
-const VIEWPORT_DEBOUNCE_MS = 250;
 
 const BOROUGH_COLOR = "#3d6fb4";
 
@@ -45,39 +42,6 @@ function bindSegmentTooltip(feature, layer) {
   });
 }
 
-/** moveend에서만, 그리고 debounce 뒤에만 viewport를 보고한다. */
-function ViewportWatcher({ onViewportChange }) {
-  const timer = useRef(null);
-
-  const report = useCallback(
-    (map) => {
-      const bounds = map.getBounds();
-      onViewportChange({
-        south: bounds.getSouth(),
-        west: bounds.getWest(),
-        north: bounds.getNorth(),
-        east: bounds.getEast(),
-      });
-    },
-    [onViewportChange],
-  );
-
-  const map = useMapEvents({
-    moveend: () => {
-      clearTimeout(timer.current);
-      timer.current = setTimeout(() => report(map), VIEWPORT_DEBOUNCE_MS);
-    },
-  });
-
-  useEffect(() => {
-    // 최초 렌더에는 moveend가 없으므로 지금 보고 있는 영역을 직접 보고한다.
-    report(map);
-    return () => clearTimeout(timer.current);
-  }, [map, report]);
-
-  return null;
-}
-
 /** 선택이 바뀌면 지도를 옮긴다. 지도 자체는 다시 만들지 않는다. */
 function BoroughFocus({ borough }) {
   const map = useMap();
@@ -112,7 +76,6 @@ export default function RoadComfortMap({
   boroughs,
   selectedBorough,
   onSelectBorough,
-  onViewportChange,
   segments,
   segmentsVersion,
   status,
@@ -177,7 +140,6 @@ export default function RoadComfortMap({
         )}
 
         <BoroughFocus borough={selected} />
-        <ViewportWatcher onViewportChange={onViewportChange} />
       </MapContainer>
 
       {status && <div className="map__status">{status}</div>}

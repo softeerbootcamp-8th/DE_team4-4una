@@ -6,14 +6,17 @@
 
 from __future__ import annotations
 
+import gzip
+import logging
 import os
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +27,8 @@ from dashboard.dashboard_service import DashboardService, UnknownBoroughError
 # 배포 시 React 빌드 산출물이 놓이는 경로. Docker 이미지에서는 패키지가
 # site-packages에 설치되므로 소스 트리 기준 경로로는 찾을 수 없다.
 STATIC_DIR_ENV = "DASHBOARD_STATIC_DIR"
+
+logger = logging.getLogger(__name__)
 
 # outline만 353KB라 압축이 확실히 이득이다. 이보다 작은 응답은 건드리지 않는다.
 _GZIP_MINIMUM_SIZE = 1024
@@ -37,7 +42,23 @@ def get_service() -> DashboardService:
 
 ServiceDep = Annotated[DashboardService, Depends(get_service)]
 
-app = FastAPI(title="NYC Road Comfort Dashboard", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """기동하자마자 borough별 응답을 미리 만들어둔다.
+
+    설정이 비어 있으면 그냥 넘어간다 -- 그 경우 어차피 요청이 들어올 때
+    핸들러가 무엇이 없는지 알려준다.
+    """
+    try:
+        get_service().start_prewarm()
+    except ValueError as exc:
+        logger.warning("prewarm skipped: %s", exc)
+    yield
+
+
+app = FastAPI(
+    title="NYC Road Comfort Dashboard", docs_url=None, redoc_url=None, lifespan=lifespan
+)
 app.add_middleware(GZipMiddleware, minimum_size=_GZIP_MINIMUM_SIZE)
 
 
@@ -83,7 +104,6 @@ def bootstrap(service: ServiceDep) -> dict[str, Any]:
     payload = service.bootstrap()
     return {
         "total_segment_count": payload.total_segment_count,
-        "max_rendered_segments": payload.max_rendered_segments,
         "boroughs": [
             {
                 "name": borough.name,
@@ -98,30 +118,21 @@ def bootstrap(service: ServiceDep) -> dict[str, Any]:
 
 
 @app.get("/api/segments")
-def segments(
-    service: ServiceDep,
-    south: Annotated[float, Query(ge=-90, le=90)],
-    west: Annotated[float, Query(ge=-180, le=180)],
-    north: Annotated[float, Query(ge=-90, le=90)],
-    east: Annotated[float, Query(ge=-180, le=180)],
-    borough: str | None = None,
-) -> dict[str, Any]:
-    """뷰포트와 겹치는 segment를 score까지 붙여 GeoJSON으로 돌려준다."""
-    if south >= north:
-        raise HTTPException(status_code=400, detail="south must be less than north")
-    if west >= east:
-        raise HTTPException(status_code=400, detail="west must be less than east")
+def segments(service: ServiceDep, request: Request, borough: str | None = None) -> Response:
+    """borough 안의 segment 전부를 score까지 붙여 GeoJSON으로 돌려준다.
 
-    result = service.get_segments_in_viewport(borough, south, west, north, east)
-    return {
-        "in_viewport_count": result.in_viewport_count,
-        "rendered_count": result.rendered_count,
-        "truncated": result.truncated,
-        "requested_vehicle_profile_id": result.requested_vehicle_profile_id,
-        "effective_vehicle_profile_id": result.effective_vehicle_profile_id,
-        "vehicle_profile_fallback": result.vehicle_profile_fallback,
-        "features": result.features,
-    }
+    서비스가 이미 gzip으로 눌러 캐시해둔 바이트를 그대로 흘려보낸다. 요청마다
+    다시 압축하면 borough 하나에 수백 ms가 든다 -- GZipMiddleware는 응답에
+    Content-Encoding이 이미 붙어 있으면 건드리지 않는다.
+    """
+    payload = service.get_segments(borough)
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        return Response(
+            content=payload.body,
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip"},
+        )
+    return Response(content=gzip.decompress(payload.body), media_type="application/json")
 
 
 def resolve_static_dir() -> Path | None:

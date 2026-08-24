@@ -12,13 +12,8 @@ export function fetchBootstrap(signal) {
   return getJson("/api/bootstrap", signal);
 }
 
-export function fetchSegments({ borough, viewport, signal }) {
-  const params = new URLSearchParams({
-    south: viewport.south,
-    west: viewport.west,
-    north: viewport.north,
-    east: viewport.east,
-  });
+export function fetchSegments({ borough, signal }) {
+  const params = new URLSearchParams();
   if (borough) {
     params.set("borough", borough);
   }

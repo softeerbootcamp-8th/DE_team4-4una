@@ -1,27 +1,28 @@
-"""Viewport queries over the road snapshot, independent of any UI framework.
+"""Borough 단위 segment 조회, UI 프레임워크에 의존하지 않는다.
 
-app.py(Streamlit)가 들고 있던 데이터 로직을 그대로 옮긴 것이다. Streamlit의
-@st.cache_data / @st.cache_resource가 하던 일은 이 객체가 프로세스 메모리에
-스냅샷을 들고 있는 것으로 대체한다 -- 그래서 uvicorn worker는 1개여야 한다.
-worker를 늘리면 프로세스마다 segment와 STRtree를 통째로 중복해서 들고, 각자
-따로 콜드 스타트를 한다.
+한 borough를 고르면 그 안의 segment를 전부 만들어 gzip으로 눌러 캐시한다. 지도를
+움직이는 동안에는 서버를 부르지 않으므로, 요청은 borough를 바꿀 때만 나간다.
+
+스냅샷(segment 목록, borough 인덱스)과 이 캐시를 프로세스 메모리에
+들고 있어서 uvicorn worker는 1개여야 한다. worker를 늘리면 worker마다 통째로
+중복해 올리고 각자 따로 콜드 스타트를 한다.
 """
 
 from __future__ import annotations
 
+import gzip
+import json
+import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from shapely.geometry import box
-from shapely.strtree import STRtree
-
 from dashboard.config import (
-    MAX_RENDERED_SEGMENTS,
     ROAD_SEGMENT_CACHE_TTL_SECONDS,
     SCORE_CACHE_TTL_SECONDS,
+    SNAPSHOT_FALLBACK_MAX_SEGMENTS,
     DashboardConfig,
 )
 from dashboard.geojson import build_feature_collection, join_road_segments_with_scores
@@ -34,15 +35,12 @@ from dashboard.zone_master import (
     zone_boroughs,
 )
 
-# (min_lon, min_lat, max_lon, max_lat) per segment, and (south, west, north,
-# east) for a viewport -- the two orders differ because the first follows
-# GeoJSON coordinate order and the second follows Leaflet's bounds payload.
-SegmentBounds = tuple[float, float, float, float]
-Viewport = tuple[float, float, float, float]
+logger = logging.getLogger(__name__)
 
-# score 캐시가 무한히 자라지 않게 하는 상한. 스냅샷 전체(16만 대)보다 넉넉하지만,
-# vehicle profile이 여러 개 섞여도 프로세스를 먹어치우지는 않을 정도로 잡았다.
-SCORE_CACHE_MAX_ENTRIES = 200_000
+# 만료된 borough를 다시 만들어두기 위해 백그라운드 스레드가 도는 주기. TTL보다
+# 훨씬 짧게 잡아 만료 직후 채워지게 하되, 캐시가 살아 있으면 dict 조회만 하고
+# 넘어가므로 이 주기 자체는 거의 공짜다.
+PREWARM_TICK_SECONDS = 60
 
 
 class UnknownBoroughError(ValueError):
@@ -61,50 +59,31 @@ class BoroughSummary:
 @dataclass(frozen=True, slots=True)
 class Bootstrap:
     total_segment_count: int
-    max_rendered_segments: int
     boroughs: tuple[BoroughSummary, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class ViewportSegments:
-    in_viewport_count: int
-    rendered_count: int
+class SegmentPayload:
+    """gzip으로 눌러둔 GeoJSON 응답 본문과 그 메타데이터.
+
+    dict가 아니라 눌린 bytes로 들고 있는다 -- borough 하나가 GeoJSON으로 18MB인데
+    파이썬 dict로 두면 그보다 훨씬 커진다. gzip 후에는 4MB대라 borough 다섯 개를
+    전부 캐시해도 20MB 남짓이다.
+    """
+
+    segment_count: int
     truncated: bool
-    requested_vehicle_profile_id: int
-    effective_vehicle_profile_id: int
-    vehicle_profile_fallback: bool
-    features: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _CachedScore:
+    body: bytes
     expires_at: float
-    # None이면 "serving API가 이 segment를 못 찾았다"는 뜻이다. 못 찾은 것도
-    # 캐시해야 회색으로 남을 segment를 pan할 때마다 다시 물어보지 않는다.
-    score: ComfortScore | None
 
 
 @dataclass(frozen=True, slots=True)
 class _Snapshot:
     segments: tuple[RoadSegment, ...]
-    spatial_index: STRtree
     boroughs: tuple[Borough, ...]
-    # borough 이름 -> segment 위치. 뷰포트 조회 결과가 이 borough 소속인지
-    # O(1)로 확인하기 위한 것이다(#421).
+    # borough 이름 -> segment 위치.
     borough_indices: Mapping[str, frozenset[int]]
     expires_at: float
-
-
-def geometry_bounds(geometry: Mapping[str, Any]) -> SegmentBounds:
-    coordinates = geometry["coordinates"]
-    points = (
-        coordinates
-        if geometry["type"] == "LineString"
-        else [point for line in coordinates for point in line]
-    )
-    longitudes = [point[0] for point in points]
-    latitudes = [point[1] for point in points]
-    return min(longitudes), min(latitudes), max(longitudes), max(latitudes)
 
 
 def group_indices_by_borough(
@@ -122,40 +101,6 @@ def group_indices_by_borough(
     return {name: frozenset(indices) for name, indices in grouped.items()}
 
 
-def visible_segments(
-    road_segments: Sequence[RoadSegment],
-    spatial_index: STRtree,
-    candidate_set: frozenset[int] | None,
-    viewport: Viewport | None,
-    max_rendered: int,
-) -> tuple[list[RoadSegment], int]:
-    """그릴 segment이자 score를 조회할 segment(#421 후속으로 R-tree 사용).
-
-    공간 인덱스로 뷰포트와 겹치는 segment를 먼저 찾는다 -- 도시 전체 기준으로
-    O(log N + k)이고 borough 크기와 무관하다. 그 결과가 candidate_set(현재
-    borough)에 속하는지는 frozenset 조회라 O(1)이다. candidate_set이 None이면
-    전체 스냅샷 모드라는 뜻이라 걸러내지 않는다.
-
-    상한을 적용하기 전에 스냅샷 순서로 정렬한다. STRtree의 내부 순회 순서는
-    보장되지 않아서, 살짝만 pan해도 잘려나가는 1000개가 통째로 바뀌며 지도가
-    깜빡였다. 스냅샷 인덱스는 뷰포트와 무관하게 고정이라 정렬해두면 겹치는
-    영역의 segment는 계속 같은 것이 선택된다.
-
-    viewport를 아직 모르면 ([], 0)을 반환한다. 두 번째 값은 상한 적용 전
-    교차 개수로, "N개 더 있음, 확대하라" 안내에 쓴다.
-    """
-    if viewport is None:
-        return [], 0
-    south, west, north, east = viewport
-    query_result = spatial_index.query(box(west, south, east, north), predicate="intersects")
-    if candidate_set is None:
-        matched = sorted(int(index) for index in query_result)
-    else:
-        matched = sorted(int(index) for index in query_result if int(index) in candidate_set)
-    visible = [road_segments[index] for index in matched[:max_rendered]]
-    return visible, len(matched)
-
-
 class DashboardService:
     """S3 스냅샷과 Serving API 앞에 놓인, 요청 하나를 처리하는 계층."""
 
@@ -171,17 +116,18 @@ class DashboardService:
         # 스냅샷 로딩 중에는 다른 요청도 막힌다. 첫 요청이 느려지는 대신 동시에
         # 들어온 요청들이 S3를 중복해서 읽지 않는다.
         self._snapshot_lock = threading.Lock()
-        self._score_cache: dict[tuple[int, str], _CachedScore] = {}
-        self._score_lock = threading.Lock()
-        # requested profile -> (effective profile, fallback 여부). 전부 캐시
-        # 히트라 이번 요청에서 serving API를 부르지 않아도 응답에 실어야 한다.
-        self._profile_metadata: dict[int, tuple[int, bool]] = {}
+        # (vehicle_profile_id, borough) -> 눌러둔 응답.
+        self._payloads: dict[tuple[int, str | None], SegmentPayload] = {}
+        # borough마다 따로 잠근다. 하나를 만드는 동안(Serving API 왕복이 포함되어
+        # 수 초가 걸린다) 이미 캐시된 다른 borough 요청까지 막히면 안 된다.
+        self._build_locks: dict[tuple[int, str | None], threading.Lock] = {}
+        self._build_locks_guard = threading.Lock()
+        self._prewarm_started = False
 
     def bootstrap(self) -> Bootstrap:
         snapshot = self._ensure_snapshot()
         return Bootstrap(
             total_segment_count=len(snapshot.segments),
-            max_rendered_segments=MAX_RENDERED_SEGMENTS,
             boroughs=tuple(
                 BoroughSummary(
                     name=borough.name,
@@ -194,54 +140,97 @@ class DashboardService:
             ),
         )
 
-    def get_segments_in_viewport(
-        self,
-        borough: str | None,
-        south: float,
-        west: float,
-        north: float,
-        east: float,
-    ) -> ViewportSegments:
+    def get_segments(self, borough: str | None) -> SegmentPayload:
+        """borough 안의 segment 전부를 gzip된 GeoJSON 응답으로 돌려준다.
+
+        살아 있는 캐시가 있으면 그대로 쓴다. 없으면 이 borough에 대해서만 잠그고
+        만든다 -- 같은 borough를 동시에 요청한 두 번째 요청은 첫 번째가 만든 것을
+        받는다.
+        """
         snapshot = self._ensure_snapshot()
-        candidate_set = self._candidate_set(snapshot, borough)
-        segments, in_viewport_count = visible_segments(
-            snapshot.segments,
-            snapshot.spatial_index,
-            candidate_set,
-            (south, west, north, east),
-            MAX_RENDERED_SEGMENTS,
-        )
+        key = (self._config.vehicle_profile_id, borough)
+        cached = self._payloads.get(key)
+        if cached is not None and cached.expires_at > self._now():
+            return cached
+
+        with self._build_lock(key):
+            cached = self._payloads.get(key)
+            if cached is not None and cached.expires_at > self._now():
+                return cached
+            payload = self._build_payload(snapshot, borough)
+            self._payloads[key] = payload
+            return payload
+
+    def start_prewarm(self) -> None:
+        """borough별 응답을 미리 만들어두는 백그라운드 스레드를 띄운다.
+
+        사용자가 outline을 보며 borough를 고르는 사이에 서버가 미리 만들어두면,
+        첫 클릭이 캐시 히트가 된다. 만료된 것도 다음 tick에 다시 채운다.
+        """
+        if self._prewarm_started:
+            return
+        self._prewarm_started = True
+        threading.Thread(
+            target=self._prewarm_loop, name="dashboard-prewarm", daemon=True
+        ).start()
+
+    def _prewarm_loop(self) -> None:
+        while True:
+            try:
+                snapshot = self._ensure_snapshot()
+                # zone master가 없으면 borough 개념이 없다. 스냅샷 전체를 미리
+                # 만들어둘 이유는 없으므로(상한이 걸린 fallback이다) 건너뛴다.
+                for borough in snapshot.boroughs:
+                    self.get_segments(borough.name)
+            except Exception:
+                # 스레드가 죽으면 다시 뜨지 않는다. Serving API가 잠깐 내려간
+                # 정도로 프리워밍을 영구히 잃지 않도록 다음 tick에 재시도한다.
+                logger.exception("prewarm tick failed")
+            time.sleep(PREWARM_TICK_SECONDS)
+
+    def _build_lock(self, key: tuple[int, str | None]) -> threading.Lock:
+        with self._build_locks_guard:
+            return self._build_locks.setdefault(key, threading.Lock())
+
+    def _build_payload(self, snapshot: _Snapshot, borough: str | None) -> SegmentPayload:
+        segments, truncated = self._segments_for(snapshot, borough)
         scores, effective_profile_id, fallback = self._scores_for(segments)
-        return ViewportSegments(
-            in_viewport_count=in_viewport_count,
-            rendered_count=len(segments),
-            truncated=in_viewport_count > len(segments),
-            requested_vehicle_profile_id=self._config.vehicle_profile_id,
-            effective_vehicle_profile_id=effective_profile_id,
-            vehicle_profile_fallback=fallback,
-            features=build_feature_collection(
+        body = {
+            "segment_count": len(segments),
+            "truncated": truncated,
+            "requested_vehicle_profile_id": self._config.vehicle_profile_id,
+            "effective_vehicle_profile_id": effective_profile_id,
+            "vehicle_profile_fallback": fallback,
+            "features": build_feature_collection(
                 join_road_segments_with_scores(segments, scores)
             ),
+        }
+        return SegmentPayload(
+            segment_count=len(segments),
+            truncated=truncated,
+            body=gzip.compress(json.dumps(body, separators=(",", ":")).encode(), 6),
+            expires_at=self._now() + SCORE_CACHE_TTL_SECONDS,
         )
 
-    def _candidate_set(
+    def _segments_for(
         self,
         snapshot: _Snapshot,
         borough: str | None,
-    ) -> frozenset[int] | None:
-        """현재 선택 기준으로 그릴 수 있는 segment index 집합(#421).
-
-        None이면 "전체가 후보"라는 뜻이라 뷰포트 쿼리 결과를 걸러낼 필요가 없다
-        (zone master가 없어 borough 개념 자체가 없는 경우).
-        """
+    ) -> tuple[list[RoadSegment], bool]:
+        """그릴 segment 전부. 두 번째 값은 상한에 걸려 잘렸는지 여부다."""
         if borough is not None:
             if borough not in snapshot.borough_indices:
                 raise UnknownBoroughError(borough)
-            return snapshot.borough_indices[borough]
+            indices = sorted(snapshot.borough_indices[borough])
+            return [snapshot.segments[index] for index in indices], False
         if snapshot.boroughs:
-            # Outlines only: drawing the whole network is what made the map unusable.
-            return frozenset()
-        return None
+            # 아직 아무 borough도 고르지 않았다. outline만 보여주는 상태라
+            # 도로는 하나도 그리지 않는다.
+            return [], False
+        # zone master가 없어 borough 개념 자체가 없는 배포. 기준이 스냅샷
+        # 전체뿐이라 상한을 걸지 않으면 응답이 20MB를 넘는다.
+        segments = list(snapshot.segments[:SNAPSHOT_FALLBACK_MAX_SEGMENTS])
+        return segments, len(snapshot.segments) > len(segments)
 
     def _ensure_snapshot(self) -> _Snapshot:
         snapshot = self._snapshot
@@ -254,14 +243,13 @@ class DashboardService:
                 return snapshot
             snapshot = self._load_snapshot()
             self._snapshot = snapshot
+            # 새 스냅샷의 segment는 예전 응답과 다를 수 있다.
+            self._payloads.clear()
             return snapshot
 
     def _load_snapshot(self) -> _Snapshot:
         config = self._config
         segments = load_road_segments(config.road_segment_s3_uri, config.aws_region)
-        spatial_index = STRtree(
-            [box(*geometry_bounds(segment.geometry)) for segment in segments]
-        )
 
         boroughs: tuple[Borough, ...] = ()
         borough_indices: dict[str, frozenset[int]] = {}
@@ -273,7 +261,6 @@ class DashboardService:
 
         return _Snapshot(
             segments=tuple(segments),
-            spatial_index=spatial_index,
             boroughs=boroughs,
             borough_indices=borough_indices,
             expires_at=self._now() + ROAD_SEGMENT_CACHE_TTL_SECONDS,
@@ -283,66 +270,24 @@ class DashboardService:
         self,
         segments: Sequence[RoadSegment],
     ) -> tuple[dict[str, ComfortScore], int, bool]:
-        """segment_id 단위로 캐시한다 -- pan 하면 새로 보이는 것만 조회하면 된다.
+        """borough 전체 점수를 한 번에 조회한다.
 
-        예전에는 보이는 segment_id 튜플 전체가 캐시 키였다. 조금만 움직여도 키가
-        달라져 1000건을 통째로 다시 조회했다(#414).
+        serving API가 요청 하나에 1000건까지 받으므로 3만 건이면 30번으로 쪼개져
+        나가고, fetch_comfort_scores가 그중 8개씩 병렬로 던진다.
         """
         profile_id = self._config.vehicle_profile_id
-        now = self._now()
-        scores: dict[str, ComfortScore] = {}
-        missing: list[str] = []
-
-        with self._score_lock:
-            for segment in segments:
-                entry = self._score_cache.get((profile_id, segment.segment_id))
-                if entry is None or entry.expires_at <= now:
-                    missing.append(segment.segment_id)
-                elif entry.score is not None:
-                    scores[segment.segment_id] = entry.score
-            effective_profile_id, fallback = self._profile_metadata.get(
-                profile_id, (profile_id, False)
-            )
-
-        if not missing:
-            return scores, effective_profile_id, fallback
+        if not segments:
+            return {}, profile_id, False
 
         result = fetch_comfort_scores(
             endpoint=self._config.batch_endpoint,
             vehicle_profile_id=profile_id,
-            segment_ids=missing,
+            segment_ids=[segment.segment_id for segment in segments],
             batch_size=self._config.batch_chunk_size,
             timeout_seconds=self._config.request_timeout_seconds,
         )
-        expires_at = self._now() + SCORE_CACHE_TTL_SECONDS
-        with self._score_lock:
-            self._prune_locked(self._now())
-            for segment_id, score in result.scores.items():
-                self._score_cache[(profile_id, segment_id)] = _CachedScore(expires_at, score)
-            for segment_id in result.not_found_segment_ids:
-                self._score_cache[(profile_id, segment_id)] = _CachedScore(expires_at, None)
-            self._profile_metadata[profile_id] = (
-                result.effective_vehicle_profile_id,
-                result.vehicle_profile_fallback,
-            )
-
-        scores.update(result.scores)
         return (
-            scores,
+            result.scores,
             result.effective_vehicle_profile_id,
             result.vehicle_profile_fallback,
         )
-
-    def _prune_locked(self, now: float) -> None:
-        """상한을 넘었을 때만 만료된 항목을 걷어낸다 -- 평소에는 순회 비용을 안 낸다."""
-        if len(self._score_cache) < SCORE_CACHE_MAX_ENTRIES:
-            return
-        self._score_cache = {
-            key: entry
-            for key, entry in self._score_cache.items()
-            if entry.expires_at > now
-        }
-        # 전부 살아 있어서 줄지 않았다면 통째로 버린다. 다시 조회하면 되고,
-        # 여기까지 왔다는 것은 정상적인 뷰포트 사용 범위를 넘었다는 뜻이다.
-        if len(self._score_cache) >= SCORE_CACHE_MAX_ENTRIES:
-            self._score_cache = {}
