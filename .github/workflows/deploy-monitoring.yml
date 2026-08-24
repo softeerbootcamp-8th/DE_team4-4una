@@ -290,8 +290,8 @@ jobs:
             infra/monitoring/ "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/monitoring/"
 
       # .env는 저장소에 없고 인스턴스에서 사람이 만든다. 없으면 compose가
-      # "PROJECT_EC2_PRIVATE_IP is required"로 죽는데 원인이 바로 보이지 않으므로
-      # 여기서 먼저 잡는다.
+      # Project/Spark EC2 private IP 필수값 오류로 죽는데 원인이 바로 보이지
+      # 않으므로 여기서 먼저 잡는다.
       - name: Check env file on instance
         env:
           EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}

@@ -214,24 +214,27 @@ follow-up issue. See [ADR-0009](../docs/adr/0009-bronze-compaction-dag.md).
 
 ### Operational monitoring
 
-Project EC2 (running the deployed services) and Monitoring EC2 are separate AWS
+Project EC2, a dedicated Spark Streaming EC2, and Monitoring EC2 are separate AWS
 instances in the same VPC. `infra/compose/exporters.yaml` runs `node_exporter`
-(`:9100`) and cAdvisor (`:8081`) on Project EC2; `infra/compose/monitoring.yaml`
-runs Prometheus and Grafana (`:3000`) on Monitoring EC2. Prometheus resolves the
-`project-ec2` hostname to Project EC2's private IP through Docker `extra_hosts`,
-sourced from `infra/monitoring/.env` (`PROJECT_EC2_PRIVATE_IP`) — no AWS IP is
-hardcoded in tracked files, and Prometheus itself is bound to `127.0.0.1` on
-Monitoring EC2 rather than exposed publicly. See
+(`:9100`) and cAdvisor (`:8081`) on Project EC2; Stream Processor exposes its
+application metrics on `:9103` from Spark Streaming EC2; and
+`infra/compose/monitoring.yaml` runs Prometheus and Grafana (`:3000`) on
+Monitoring EC2. Prometheus resolves the `project-ec2` and `spark-ec2` hostnames
+to their respective private IPs through Docker `extra_hosts`, sourced from
+`infra/monitoring/.env` (`PROJECT_EC2_PRIVATE_IP` and
+`SPARK_EC2_PRIVATE_IP`) — no AWS IP is hardcoded in tracked files, and
+Prometheus itself is bound to `127.0.0.1` on Monitoring EC2 rather than exposed
+publicly. See
 [ADR-0010](../docs/adr/0010-split-project-and-monitoring-ec2-for-prometheus-grafana.md)
 and [infra/monitoring/README.md](../infra/monitoring/README.md) for the full
 setup and validation steps.
 
-AWS Security Group provisioning for the two EC2s stays outside this repository's
+AWS Security Group provisioning for the three EC2s stays outside this repository's
 code (`terraform/envs/` is currently empty) — it is a manual prerequisite
 documented in `infra/monitoring/README.md`, not something this diagram or
 ADR-0010 settles.
 
-Grafana auto-provisions four dashboards from the same `Infrastructure`
+Grafana auto-provisions service dashboards from the same `Infrastructure`
 provider (file-based, reads every JSON under
 `infra/monitoring/grafana/dashboards/`): `Project Infrastructure`
 (`project-infrastructure.json`, Project EC2 host metrics from `node_exporter`
@@ -241,8 +244,10 @@ and per-container metrics from cAdvisor), `Serving API`
 default `9101`, separate from the API port so `/metrics` never joins the
 public API surface), `Kafka` (`kafka.json`, broker/topic/consumer-group
 metrics from a `danielqsj/kafka-exporter` sidecar reading the broker's
-`localhost:9092`), and `Airflow` (`airflow.json`, scheduler/dag-processor
-heartbeats, task and DAG-run state and duration). Every dashboard JSON is the
+`localhost:9092`), `Airflow` (`airflow.json`, scheduler/dag-processor
+heartbeats, task and DAG-run state and duration), and `Spark Streaming`
+(`spark-streaming.json`, query health and micro-batch throughput from the
+dedicated Spark Streaming EC2). Every dashboard JSON is the
 source of truth (`allowUiUpdates: false` in `dashboards.yml`); manual Grafana
 UI edits are not persisted.
 
@@ -254,12 +259,10 @@ the broker's external listener on port 9094. The listener is PLAINTEXT in the
 PoC, so its Security Group rule must be restricted to the producer host's public
 IP.
 
-Kafka clients that run as separate Project EC2 containers — `stream-processor`
-and `kafka-exporter` — use `network_mode: host` and connect to the internal
-listener at `localhost:9092` rather than a compose network hostname like
-`kafka:9092`. On the default bridge network, a client container's own
-`localhost` refers to itself, not the sibling `kafka` container, so a
-same-network hostname connection fails past the initial bootstrap request.
+Kafka Exporter runs on Project EC2 with `network_mode: host` and connects to the
+broker's internal listener at `localhost:9092`. Stream Processor runs on the
+dedicated Spark Streaming EC2 and reaches the broker through its private VPC
+address; it cannot use `localhost` because Kafka is no longer on the same host.
 
 Airflow does not expose `/metrics` itself. `infra/compose/airflow.yaml` adds
 an `airflow-statsd-exporter` sidecar (`prom/statsd-exporter`) on the same

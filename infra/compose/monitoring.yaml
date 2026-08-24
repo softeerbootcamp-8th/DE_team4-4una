@@ -9,6 +9,7 @@ services:
       - --storage.tsdb.retention.time=7d
     extra_hosts:
       - "project-ec2:${PROJECT_EC2_PRIVATE_IP:?PROJECT_EC2_PRIVATE_IP is required}"
+      - "spark-ec2:${SPARK_EC2_PRIVATE_IP:?SPARK_EC2_PRIVATE_IP is required}"
     ports:
       - "127.0.0.1:9090:9090"
     volumes:

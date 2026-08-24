@@ -1,7 +1,7 @@
 # Monitoring
 
-Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 Prometheus/Grafana
-모니터링 구성이다.
+Project EC2, Spark Streaming EC2, Monitoring EC2에 나눠 배포하는
+Prometheus/Grafana 모니터링 구성이다.
 
 ## Architecture
 
@@ -16,16 +16,18 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
 - Airflow (scheduler/dag-processor/api-server)
     ↓ StatsD UDP 9125 (de4-local 네트워크 내부)
 - StatsD Exporter  :9102  --- private VPC --->
-- Stream Processor
-  metrics           :9103  --- private VPC --->
+
+[Spark Streaming EC2]
+- Stream Processor metrics :9103 --- private VPC --->
 
 [EMR Serverless] --- CloudWatch API (AWS) ---> Grafana (CloudWatch datasource, IAM Role)
 ```
 
 - Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100),
   cAdvisor(8081), Serving API 애플리케이션 metrics(9101), Kafka Exporter
-  metrics(9308), StatsD Exporter를 통한 Airflow metrics(9102), Stream
-  Processor(Spark Structured Streaming) metrics(9103)를 scrape한다.
+  metrics(9308), StatsD Exporter를 통한 Airflow metrics(9102)를 scrape한다.
+- Stream Processor(Spark Structured Streaming) metrics(9103)는 전용 Spark
+  Streaming EC2의 private IP에서 별도로 scrape한다.
 - EMR Serverless는 Project EC2와 별개로 AWS가 관리하는 서비스라 scrape 대상이
   아니다. Grafana가 CloudWatch datasource로 CloudWatch API를 직접 조회한다.
   자세한 내용은 아래 [EMR Serverless dashboard 지표](#emr-serverless-dashboard-지표)
@@ -46,12 +48,14 @@ Project EC2와 Monitoring EC2, 서로 다른 두 AWS EC2에 나눠 배포하는 
   dashboard도 provisioning으로 자동 생성된다. 자세한 내용은 아래
   [Grafana Dashboard](#grafana-dashboard) 참고.
 - `prometheus.yml`에는 실제 AWS private IP를 하드코딩하지 않는다. 대신
-  `PROJECT_EC2_PRIVATE_IP` 값을 compose의 `extra_hosts`로 넘겨 Prometheus
-  컨테이너 안에서 `project-ec2` hostname을 그 IP로 매핑한다.
+  `PROJECT_EC2_PRIVATE_IP`와 `SPARK_EC2_PRIVATE_IP`를 compose의
+  `extra_hosts`로 넘겨 Prometheus 컨테이너 안에서 각각 `project-ec2`와
+  `spark-ec2` hostname으로 매핑한다.
 
 ## AWS prerequisite
 
-Project EC2와 Monitoring EC2는 같은 VPC에서 private IP로 통신 가능해야 한다.
+Project EC2, Spark Streaming EC2, Monitoring EC2는 같은 VPC에서 private IP로
+통신 가능해야 한다.
 Security Group 생성/변경은 이번 작업 범위가 아니므로, 아래 규칙만 별도로 설정해 둔다.
 **metrics 포트는 0.0.0.0/0으로 열지 않고 상대 Security Group만 허용한다.**
 
@@ -64,6 +68,11 @@ Project EC2 Security Group (inbound):
 | 9101 | TCP | Monitoring EC2 Security Group |
 | 9308 | TCP | Monitoring EC2 Security Group |
 | 9102 | TCP | Monitoring EC2 Security Group |
+
+Spark Streaming EC2 Security Group (inbound):
+
+| Port | Protocol | Source |
+| --- | --- | --- |
 | 9103 | TCP | Monitoring EC2 Security Group |
 
 Kafka broker(9092)는 Monitoring EC2에 새로 공개할 필요가 없다 — Kafka
@@ -155,13 +164,6 @@ Serving API metrics 확인(Serving API 컨테이너가 이 EC2에서 같이 떠 
 curl http://localhost:9101/metrics
 ```
 
-Stream Processor metrics 확인(Stream Processor 컨테이너가 이 EC2에서 같이 떠
-있을 때):
-
-```bash
-curl http://localhost:9103/metrics
-```
-
 ### cAdvisor에 privileged/device 설정을 쓰는 이유
 
 cAdvisor는 컨테이너별 CPU/memory/network 사용량을 읽기 위해 host의 cgroup,
@@ -224,6 +226,14 @@ STATSD_DATADOG_ENABLED가 공통 env(모든 Airflow 컴포넌트 공유)에 있�
 전부에 설치되게 했다 — 빠뜨리면 그 컴포넌트가 기동 시 `ModuleNotFoundError`로
 죽을 위험이 있다.
 
+## Spark Streaming EC2 확인 방법
+
+Stream Processor metrics 확인:
+
+```bash
+curl http://localhost:9103/metrics
+```
+
 ## Monitoring EC2 실행 방법
 
 먼저 `.env`를 준비한다.
@@ -236,6 +246,7 @@ cp infra/monitoring/.env.example infra/monitoring/.env
 
 ```env
 PROJECT_EC2_PRIVATE_IP=<Project EC2 private IPv4>
+SPARK_EC2_PRIVATE_IP=<Spark Streaming EC2 private IPv4>
 GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=<strong password>
 ```
@@ -385,14 +396,14 @@ Prometheus Targets(`http://localhost:9090/targets`)에서 다음 job이 모두
 - `airflow`
 - `stream-processor`
 
-Monitoring EC2에서 Project EC2의 애플리케이션 metrics endpoint에 직접
-접근되는지 확인하려면(문제가 생겼을 때만 필요):
+Monitoring EC2에서 각 애플리케이션 metrics endpoint에 직접 접근되는지
+확인하려면(문제가 생겼을 때만 필요):
 
 ```bash
 curl http://<PROJECT_EC2_PRIVATE_IP>:9101/metrics
 curl http://<PROJECT_EC2_PRIVATE_IP>:9308/metrics
 curl http://<PROJECT_EC2_PRIVATE_IP>:9102/metrics
-curl http://<PROJECT_EC2_PRIVATE_IP>:9103/metrics
+curl http://<SPARK_EC2_PRIVATE_IP>:9103/metrics
 ```
 
 StatsD Exporter가 Airflow metric을 실제로 받고 있는지는 9102 응답 안에서
@@ -451,7 +462,7 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
   - `infra/monitoring/grafana/dashboards/kafka.json` — Kafka dashboard 본문
   - `infra/monitoring/grafana/dashboards/airflow.json` — Airflow dashboard 본문
   - `infra/monitoring/grafana/dashboards/spark-streaming.json` — Stream Processor
-    (Project EC2에서 Prometheus로 scrape) dashboard 본문
+    (Spark Streaming EC2에서 Prometheus로 scrape) dashboard 본문
   - `infra/monitoring/grafana/dashboards/emr-serverless.json` — EMR Serverless
     (CloudWatch datasource) dashboard 본문
   - `infra/monitoring/grafana/dashboards/service-status-overview.json` — 주요
@@ -949,10 +960,10 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   값이 없으면 아래를 순서대로 확인한다.
   1. Stream Processor 컨테이너 상태 — `docker inspect stream-processor`,
      떠 있지 않으면 `docker logs stream-processor --tail 100`.
-  2. Project EC2에서 `curl http://localhost:9103/metrics`가 응답하는지.
+  2. Spark Streaming EC2에서 `curl http://localhost:9103/metrics`가 응답하는지.
   3. Monitoring EC2에서
-     `curl http://<PROJECT_EC2_PRIVATE_IP>:9103/metrics`가 응답하는지.
-  4. Project EC2 Security Group에 9103(source: Monitoring EC2 Security
+     `curl http://<SPARK_EC2_PRIVATE_IP>:9103/metrics`가 응답하는지.
+  4. Spark Streaming EC2 Security Group에 9103(source: Monitoring EC2 Security
      Group) inbound 규칙이 있는지.
   5. `up`은 `1`인데 특정 패널만 `No data`라면, 해당 metric이 아직 한 번도
      갱신되지 않았을 수 있다 — `stream_processor_*` metric은 Kafka에 실제로
