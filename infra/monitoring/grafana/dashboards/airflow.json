@@ -31,16 +31,16 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Target Status",
-      "description": "statsd_exporter가 살아있는지만 본다. scheduler/dag-processor가 실제로 metric을 보내는지는 아래 Heartbeat 패널로 확인한다.",
+      "title": "Component Status",
+      "description": "우선순위로 판정한다(#437): METRICS TARGET DOWN(4, statsd_exporter 자체가 죽음) > SCHEDULER HEARTBEAT LOST(3, exporter는 살아있는데 최근 5분간 heartbeat 없음) > DAG PROCESSOR STALE(2, 마지막 처리 후 300초 초과 — 아래 DAG Processor Last Run Age와 같은 threshold) > DAG IMPORT ERROR(1) > HEALTHY(0). **multi-instance 한계**: scheduler/dag-processor/api-server가 여러 노드에 있어도 전부 statsd UDP로 airflow-statsd-exporter 하나에만 보낸다 — 그래서 이 metric들의 instance label은 실제 scheduler node가 아니라 exporter endpoint(project-ec2:9102) 하나뿐이다. 어느 물리 노드의 scheduler가 죽었는지는 이 metric만으로 구분할 수 없다 — component별로 별도 exporter를 두거나 exporter host label을 심는 추가 계측이 필요하다(이번 작업 범위 아님, README limitation 참고).",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "up{job=\"airflow\"}",
-          "legendFormat": "{{job}}",
+          "expr": "(4 * (up{job=\"airflow\"} == bool 0) > 0) or (3 * (sum by (instance, job) (increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) == bool 0) > 0) or (2 * (max by (instance, job) (airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"}) > bool 300) > 0) or (1 * (sum by (instance, job) (airflow_dag_processing_import_errors{job=\"airflow\"}) > bool 0) > 0) or (0 * up{job=\"airflow\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -60,20 +60,63 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "DAG IMPORT ERROR", "color": "orange", "index": 1 },
+                "2": { "text": "DAG PROCESSOR STALE", "color": "orange", "index": 2 },
+                "3": { "text": "SCHEDULER HEARTBEAT LOST", "color": "red", "index": 3 },
+                "4": { "text": "METRICS TARGET DOWN", "color": "red", "index": 4 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
             ]
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "state-timeline",
+      "title": "Component Status Timeline",
+      "description": "위 Component Status와 완전히 같은 query — 상태 변화 시점을 시간축으로 본다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "(4 * (up{job=\"airflow\"} == bool 0) > 0) or (3 * (sum by (instance, job) (increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) == bool 0) > 0) or (2 * (max by (instance, job) (airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"}) > bool 300) > 0) or (1 * (sum by (instance, job) (airflow_dag_processing_import_errors{job=\"airflow\"}) > bool 0) > 0) or (0 * up{job=\"airflow\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "DAG IMPORT ERROR", "color": "orange", "index": 1 },
+                "2": { "text": "DAG PROCESSOR STALE", "color": "orange", "index": 2 },
+                "3": { "text": "SCHEDULER HEARTBEAT LOST", "color": "red", "index": 3 },
+                "4": { "text": "METRICS TARGET DOWN", "color": "red", "index": 4 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
     {
@@ -82,7 +125,7 @@
       "title": "Scheduler Heartbeat",
       "description": "airflow_scheduler_heartbeat는 실제 exporter에 존재하지 않는 metric 이름이었다. scheduler의 실제 heartbeat 신호는 timer airflow_scheduler_executor_heartbeat_duration_count(statsd_exporter 기본 Summary 변환의 _count suffix)로 대체한다. 최근 5분간 카운트가 0/No data면 scheduler가 heartbeat를 안 보내고 있다는 뜻 — 컨테이너가 죽었거나 exporter로 가는 UDP가 막혔을 수 있다. 이 실패 상태를 감추지 않기 위해 vector(0) 보정을 넣지 않았다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 0, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -119,9 +162,9 @@
       "id": 3,
       "type": "stat",
       "title": "DAG Processor Last Run Age",
-      "description": "airflow_dag_processor_heartbeat는 실제 exporter에 존재하지 않는 metric 이름이었다. dag-processor 상태는 gauge airflow_dag_processing_last_run_seconds_ago(마지막 DAG 파일 처리 루프 이후 경과 시간)로 판단한다. 이 metric은 DAG 파일별로 별도 series가 찍힐 수 있어(실제 exporter에서도 파일별 값이 여러 개 확인됐다) raw metric을 그대로 쓰면 stat 패널에 여러 series 중 하나만 표시되거나 표시가 불안정해진다. max(...)로 묶어 '가장 오래 처리 안 된 파일'을 기준으로 단일 값을 보여준다 — 값이 계속 커지기만 하면 dag-processor가 멈춘 것이다. No data도 실패 신호이므로 vector(0) 보정을 넣지 않았다. 임계값은 아직 실제 운영 주기로 검증하지 못했다 — 배포 후 조정 필요.",
+      "description": "airflow_dag_processor_heartbeat는 실제 exporter에 존재하지 않는 metric 이름이었다. dag-processor 상태는 gauge airflow_dag_processing_last_run_seconds_ago(마지막 DAG 파일 처리 루프 이후 경과 시간)로 판단한다. 이 metric은 DAG 파일별로 별도 series가 찍힐 수 있어(실제 exporter에서도 파일별 값이 여러 개 확인됐다) raw metric을 그대로 쓰면 stat 패널에 여러 series 중 하나만 표시되거나 표시가 불안정해진다. max(...)로 묶어 '가장 오래 처리 안 된 파일'을 기준으로 단일 값을 보여준다 — 값이 계속 커지기만 하면 dag-processor가 멈춘 것이다. No data도 실패 신호이므로 vector(0) 보정을 넣지 않았다. 임계값은 아직 실제 운영 주기로 검증하지 못했다 — 배포 후 조정 필요. 이 threshold(60/300)는 Component Status의 DAG PROCESSOR STALE 판정과 같은 값이다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 6, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 6, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -156,12 +199,51 @@
       }
     },
     {
+      "id": 18,
+      "type": "gauge",
+      "title": "DAG Processor Last Run Age (Gauge)",
+      "description": "위 stat 패널과 같은 query/threshold다(#437) — threshold가 이미 정의돼 있어 Gauge로 한눈에 보기 좋은 후보. 임계값(60/300)은 아직 실제 운영 주기로 검증하지 못했다는 점은 동일하다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 15, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "max(airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"})",
+          "legendFormat": "last run age",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "max": 600,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 60 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 16,
       "type": "stat",
       "title": "DAG Processor Process Starts (5m)",
       "description": "airflow_dag_processing_processes{action=\"start\"} — 최근 5분간 새로 시작된 DAG 파일 처리 subprocess 수. dag-processor는 정상적으로도 파일 파싱 subprocess를 반복 생성하므로 이 값 자체가 높다고 단정적으로 장애(crash loop)라고 볼 수는 없다 — 최근 DAG 파일 처리 activity 정도로 참고하고, 다른 패널(Last Run Age, Import Errors)과 함께 봐야 한다. 정상적으로 0일 수 있는 값이라 No data는 or vector(0)로 0으로 보정한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 12, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -187,7 +269,7 @@
       "title": "DAG Import Errors",
       "description": "0이 정상이다. DAG 파일이 파싱 에러가 있으면 dag-processor가 이 값을 올린다. dag-processor가 죽으면 이 metric 자체가 없어져 No data가 되는데, 이는 실제 장애이므로 vector(0)로 감추지 않는다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 18, "y": 5, "w": 6, "h": 4 },
+      "gridPos": { "x": 18, "y": 11, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -225,7 +307,7 @@
       "type": "row",
       "title": "DAG / Task State",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -234,7 +316,7 @@
       "title": "Running DAG Runs",
       "description": "DAG가 한 번도 안 돌아 running dagrun이 0개인 것은 정상 상태다 — metric 자체가 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 10, "w": 6, "h": 4 },
+      "gridPos": { "x": 0, "y": 20, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -260,7 +342,7 @@
       "title": "Scheduled Tasks",
       "description": "0개는 정상일 수 있다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 6, "y": 10, "w": 6, "h": 4 },
+      "gridPos": { "x": 6, "y": 20, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -286,7 +368,7 @@
       "title": "Queued Tasks",
       "description": "0개는 정상일 수 있다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 10, "w": 6, "h": 4 },
+      "gridPos": { "x": 12, "y": 20, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -312,7 +394,7 @@
       "title": "Running Tasks",
       "description": "0개는 정상일 수 있다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 18, "y": 10, "w": 6, "h": 4 },
+      "gridPos": { "x": 18, "y": 20, "w": 6, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -337,7 +419,7 @@
       "type": "row",
       "title": "Task Result",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -346,7 +428,7 @@
       "title": "Task Success Rate",
       "description": "task가 아직 한 번도 안 끝났으면 0/sec가 정상이다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 15, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -375,7 +457,7 @@
       "title": "Task Failure Rate",
       "description": "task가 아직 한 번도 안 끝났으면 0/sec가 정상이다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 15, "w": 12, "h": 4 },
+      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -403,12 +485,12 @@
       "type": "timeseries",
       "title": "Failures by DAG",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (dag_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
+          "expr": "sum by (instance, dag_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
           "legendFormat": "{{dag_id}}"
         }
       ],
@@ -423,12 +505,12 @@
       "type": "timeseries",
       "title": "Failures by Task",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (dag_id, task_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
+          "expr": "sum by (instance, dag_id, task_id) (rate(airflow_ti_failures{job=\"airflow\"}[5m]))",
           "legendFormat": "{{dag_id}}/{{task_id}}"
         }
       ],
@@ -443,7 +525,7 @@
       "type": "row",
       "title": "Duration",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -452,7 +534,7 @@
       "title": "Task Duration",
       "description": "airflow_task_duration_seconds는 statsd/airflow-mapping.yml로 histogram으로 바꾼 metric이다(기본값은 Summary라 p95를 못 구함). Airflow는 StatsD timer(|ms)로 보내지만 statsd_exporter가 노출 시 seconds로 자동 변환한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 36, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 46, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -485,7 +567,7 @@
       "title": "DAG Run Success Duration",
       "description": "성공한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 44, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 54, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -518,7 +600,7 @@
       "title": "DAG Run Failed Duration",
       "description": "실패한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 52, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 62, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",

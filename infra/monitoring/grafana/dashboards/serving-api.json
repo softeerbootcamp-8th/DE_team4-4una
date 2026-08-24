@@ -31,15 +31,16 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Target Status",
+      "title": "Component Status",
+      "description": "HEALTHY(0)/TARGET DOWN(1, up==0) 2단계뿐이다(#437) — HIGH 5XX/HIGH LATENCY는 정상 범위에 대한 확립된 SLA/threshold가 이 프로젝트에 아직 없어서(5xx/p95 latency 패널 모두 threshold 미설정) 임의로 만들지 않았다. 실제 운영 기준이 생기면 이 판정에 추가한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "up{job=\"serving-api\"}",
-          "legendFormat": "{{job}}",
+          "expr": "(1 * (up{job=\"serving-api\"} == bool 0) > 0) or (0 * up{job=\"serving-api\"})",
+          "legendFormat": "{{instance}}",
           "instant": true
         }
       ],
@@ -59,20 +60,56 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "TARGET DOWN", "color": "red", "index": 1 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
             ]
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "state-timeline",
+      "title": "Component Status Timeline",
+      "description": "위 Component Status와 완전히 같은 query — 상태 변화 시점을 시간축으로 본다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "(1 * (up{job=\"serving-api\"} == bool 0) > 0) or (0 * up{job=\"serving-api\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "TARGET DOWN", "color": "red", "index": 1 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
     {
@@ -81,7 +118,7 @@
       "title": "Requests/sec",
       "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 4 },
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -112,7 +149,7 @@
       "title": "2xx",
       "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 9, "w": 8, "h": 4 },
+      "gridPos": { "x": 0, "y": 15, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -144,7 +181,7 @@
       "title": "4xx",
       "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 8, "y": 9, "w": 8, "h": 4 },
+      "gridPos": { "x": 8, "y": 15, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -176,7 +213,7 @@
       "title": "5xx",
       "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 16, "y": 9, "w": 8, "h": 4 },
+      "gridPos": { "x": 16, "y": 15, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -208,7 +245,7 @@
       "title": "Request Rate over Time",
       "description": "Status class(2xx/4xx/5xx)별 requests/sec.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -245,7 +282,7 @@
       "type": "row",
       "title": "Latency",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -253,7 +290,7 @@
       "type": "stat",
       "title": "p50 latency",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 22, "w": 8, "h": 4 },
+      "gridPos": { "x": 0, "y": 28, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -282,8 +319,9 @@
       "id": 8,
       "type": "stat",
       "title": "p95 latency",
+      "description": "Gauge로 바꾸지 않았다(#437) — 정상 범위에 대한 확립된 threshold(SLA)가 없어 임의로 green/orange/red를 만들 수 없다. 실제 SLA가 정해지면 재검토한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 8, "y": 22, "w": 8, "h": 4 },
+      "gridPos": { "x": 8, "y": 28, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -313,7 +351,7 @@
       "type": "stat",
       "title": "p99 latency",
       "datasource": "Prometheus",
-      "gridPos": { "x": 16, "y": 22, "w": 8, "h": 4 },
+      "gridPos": { "x": 16, "y": 28, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -343,7 +381,7 @@
       "type": "row",
       "title": "By Endpoint",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -351,12 +389,12 @@
       "type": "timeseries",
       "title": "Requests by Endpoint",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum by (route) (rate(serving_api_http_requests_total{job=\"serving-api\"}[5m]))",
+          "expr": "sum by (instance, route) (rate(serving_api_http_requests_total{job=\"serving-api\"}[5m]))",
           "legendFormat": "{{route}}"
         }
       ],
@@ -376,12 +414,12 @@
       "type": "timeseries",
       "title": "Latency by Endpoint (p95)",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, instance, route) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))",
           "legendFormat": "{{route}}"
         }
       ],

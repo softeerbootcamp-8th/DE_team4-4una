@@ -163,11 +163,11 @@
       "id": 2,
       "type": "stat",
       "title": "Kafka",
-      "description": "kafka_brokers{job=\"kafka\"} > bool 0 — Kafka Exporter가 실제로 보고하는 broker 수가 0보다 큰지로 판단한다. exporter가 살아있어도(up==1) broker가 전부 죽으면 kafka_brokers가 0이 되어 여기서 DOWN으로 잡힌다(단순 up{job=\"kafka\"}로는 이 경우를 못 잡았다). exporter 자체가 죽으면 kafka_brokers metric도 없어져 No data가 된다 — 자세한 지표/consumer 관련 캐비어트는 Kafka dashboard 참고.",
+      "description": "Kafka dashboard의 Component Status와 완전히 같은 query/mapping이다(#437, 판정 기준 일치). TARGET DOWN > BROKER DOWN > UNDER REPLICATED > HEALTHY 우선순위 — 근거는 Kafka dashboard 참고.",
       "datasource": "Prometheus",
       "gridPos": { "x": 4, "y": 6, "w": 4, "h": 5 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "kafka_brokers{job=\"kafka\"} > bool 0", "legendFormat": "kafka", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "(3 * (up{job=\"kafka\"} == bool 0) > 0) or (2 * (kafka_brokers{job=\"kafka\"} == bool 0) > 0) or (1 * (sum by (instance, job) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"}) > bool 0) > 0) or (0 * up{job=\"kafka\"})", "legendFormat": "kafka", "instant": true }
       ],
       "options": {
         "reduceOptions": {
@@ -189,16 +189,19 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "UNDER REPLICATED", "color": "orange", "index": 1 },
+                "2": { "text": "BROKER DOWN", "color": "red", "index": 2 },
+                "3": { "text": "TARGET DOWN", "color": "red", "index": 3 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
             ]
           }
         },
@@ -212,11 +215,11 @@
       "id": 3,
       "type": "stat",
       "title": "Airflow",
-      "description": "sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) > bool 0 — scheduler가 최근 5분간 실제로 heartbeat를 보냈는지로 판단한다(단순 statsd_exporter의 up{job=\"airflow\"}는 exporter는 살아있는데 scheduler만 죽은 경우를 못 잡았다). scheduler가 죽거나 exporter 자체가 죽으면 이 metric이 없어져 No data가 된다 — dag-processor 개별 상태(파일 처리 지연 등)는 여기서 못 잡으니 Airflow dashboard의 DAG Processor Last Run Age를 따로 본다.",
+      "description": "Airflow dashboard의 Component Status와 완전히 같은 query/mapping이다(#437, 판정 기준 일치). METRICS TARGET DOWN > SCHEDULER HEARTBEAT LOST > DAG PROCESSOR STALE > DAG IMPORT ERROR > HEALTHY 우선순위 — 근거 및 multi-instance 한계는 Airflow dashboard 참고.",
       "datasource": "Prometheus",
       "gridPos": { "x": 8, "y": 6, "w": 4, "h": 5 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) > bool 0", "legendFormat": "airflow", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "(4 * (up{job=\"airflow\"} == bool 0) > 0) or (3 * (sum by (instance, job) (increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) == bool 0) > 0) or (2 * (max by (instance, job) (airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"}) > bool 300) > 0) or (1 * (sum by (instance, job) (airflow_dag_processing_import_errors{job=\"airflow\"}) > bool 0) > 0) or (0 * up{job=\"airflow\"})", "legendFormat": "airflow", "instant": true }
       ],
       "options": {
         "reduceOptions": {
@@ -238,16 +241,20 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "DAG IMPORT ERROR", "color": "orange", "index": 1 },
+                "2": { "text": "DAG PROCESSOR STALE", "color": "orange", "index": 2 },
+                "3": { "text": "SCHEDULER HEARTBEAT LOST", "color": "red", "index": 3 },
+                "4": { "text": "METRICS TARGET DOWN", "color": "red", "index": 4 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
             ]
           }
         },
@@ -261,11 +268,11 @@
       "id": 4,
       "type": "stat",
       "title": "Spark Streaming",
-      "description": "stream_processor_query_running{job=\"stream-processor\"} — 컨테이너 생존(up)이 아니라 실제 streaming query가 도는지로 판단한다. 컨테이너는 떠 있지만(up==1) 쿼리가 예외로 죽어 재시작 대기 중인 짧은 순간에는 up==1이어도 query_running==0일 수 있는데, 이 metric은 그 상태까지 STOPPED로 잡아낸다. 프로세스 자체가 죽으면 metric이 없어져 No data가 된다. 처리량/지연 등 세부 지표는 Spark Streaming dashboard 참고.",
+      "description": "Spark Streaming dashboard의 Component Status와 완전히 같은 query/mapping이다(#437, 판정 기준 일치). TARGET DOWN > QUERY STOPPED > PROGRESS STALE > EVENT DATA STALE > RUNNING 우선순위 — 근거는 Spark Streaming dashboard 참고.",
       "datasource": "Prometheus",
       "gridPos": { "x": 12, "y": 6, "w": 4, "h": 5 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_query_running{job=\"stream-processor\"}", "legendFormat": "stream-processor", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "(4 * (up{job=\"stream-processor\"} == bool 0) > 0) or (3 * (stream_processor_query_running{job=\"stream-processor\"} == bool 0) > 0) or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)) > bool 330) > 0) or (1 * (stream_processor_event_time_lag_seconds{job=\"stream-processor\"} > bool 330) > 0) or (0 * up{job=\"stream-processor\"})", "legendFormat": "stream-processor", "instant": true }
       ],
       "options": {
         "reduceOptions": {
@@ -287,16 +294,20 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "STOPPED", "color": "red", "index": 0 },
-                "1": { "text": "RUNNING", "color": "green", "index": 1 }
+                "0": { "text": "RUNNING", "color": "green", "index": 0 },
+                "1": { "text": "EVENT DATA STALE", "color": "orange", "index": 1 },
+                "2": { "text": "PROGRESS STALE", "color": "orange", "index": 2 },
+                "3": { "text": "QUERY STOPPED", "color": "red", "index": 3 },
+                "4": { "text": "TARGET DOWN", "color": "red", "index": 4 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
             ]
           }
         },
@@ -310,11 +321,11 @@
       "id": 5,
       "type": "stat",
       "title": "Serving API",
-      "description": "Serving API metrics endpoint 스크랩 대상 상태. 요청/에러율은 Serving API dashboard 참고.",
+      "description": "Serving API dashboard의 Component Status와 완전히 같은 query/mapping이다(#437, 판정 기준 일치). HEALTHY/TARGET DOWN 2단계뿐이다 — HIGH 5XX/HIGH LATENCY는 확립된 threshold가 없어 임의로 만들지 않았다(Serving API dashboard 참고).",
       "datasource": "Prometheus",
       "gridPos": { "x": 16, "y": 6, "w": 4, "h": 5 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "up{job=\"serving-api\"}", "legendFormat": "serving-api", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "(1 * (up{job=\"serving-api\"} == bool 0) > 0) or (0 * up{job=\"serving-api\"})", "legendFormat": "serving-api", "instant": true }
       ],
       "options": {
         "reduceOptions": {
@@ -336,16 +347,16 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "DOWN", "color": "red", "index": 0 },
-                "1": { "text": "UP", "color": "green", "index": 1 }
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "TARGET DOWN", "color": "red", "index": 1 }
               }
             }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
             ]
           }
         },

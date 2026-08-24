@@ -796,14 +796,20 @@ Streaming, Serving API, EMR Serverless 여섯 컴포넌트 상태를 한 화면�
 확인하기 위한 dashboard다. 상세 metric은 각 컴포넌트 dashboard로 넘어가서
 본다 — 이 dashboard 자체는 패널을 최소화했다.
 
-| 컴포넌트 | 판단 기준 | 비고 |
+**#437부터는 각 컴포넌트가 단순 UP/DOWN이 아니라 다단계 상태를 보여준다** — 각
+컴포넌트 카드는 해당 상세 dashboard의 `Component Status` 패널과 완전히 같은
+PromQL/mapping을 쓴다(판정 기준을 일치시키기 위함). 상태 목록과 우선순위 근거는
+아래 [장애 원인 세분화(Component Status, #437)](#장애-원인-세분화component-status-437)
+참고.
+
+| 컴포넌트 | 상태(우선순위 높은 순) | 비고 |
 | --- | --- | --- |
-| Project EC2 / Host | `up{job=~"project-node\|project-containers"}` | node_exporter + cAdvisor 스크랩 여부만 본다 |
-| Kafka | `kafka_brokers{job="kafka"} > bool 0` | exporter up이 아니라 실제 broker 수 기준. exporter만 살아있고 broker가 전부 죽은 경우까지 DOWN으로 잡는다 |
-| Airflow | `sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job="airflow"}[5m])) > bool 0` | statsd_exporter up이 아니라 scheduler heartbeat 기준. exporter만 살아있고 scheduler가 죽은 경우까지 DOWN으로 잡는다 |
-| Spark Streaming | `stream_processor_query_running{job="stream-processor"}` | 프로세스 up이 아니라 실제 streaming query 실행 여부 기준 |
-| Serving API | `up{job="serving-api"}` | metrics endpoint 스크랩 여부만 본다 |
-| EMR Serverless | CloudWatch `AWS/EMRServerless` `RunningJobs`(최근 6시간, `matchExact: false`) | 아래 설명 참고 |
+| Project EC2 / Host | UP / DOWN (2단계, #437 대상 아님) | node_exporter + cAdvisor 스크랩 여부만 본다 |
+| Kafka | TARGET DOWN > BROKER DOWN > UNDER REPLICATED > HEALTHY | HIGH LAG는 정상 범위 기준이 없어 뺐다 |
+| Airflow | METRICS TARGET DOWN > SCHEDULER HEARTBEAT LOST > DAG PROCESSOR STALE > DAG IMPORT ERROR > HEALTHY | instance label이 실제 scheduler node가 아니라 exporter endpoint다(multi-instance 한계, 아래 참고) |
+| Spark Streaming | TARGET DOWN > QUERY STOPPED > PROGRESS STALE > EVENT DATA STALE > RUNNING | KAFKA BACKLOG(offset lag)는 정상 범위 기준이 없어 뺐다 |
+| Serving API | TARGET DOWN > HEALTHY (2단계) | HIGH 5XX/HIGH LATENCY는 확립된 SLA가 없어 뺐다 |
+| EMR Serverless | NO METRIC DATA / IDLE / RUNNING | CloudWatch `AWS/EMRServerless` `RunningJobs`(최근 6시간, `matchExact: true`) — 아래 EMR 설명 참고. `emr-serverless.json`에도 같은 패널이 있다(#437, 판정 일치) |
 
 Kafka/Airflow/Spark Streaming은 **처음에는 각각 `up{job="kafka"}`/
 `up{job="airflow"}`/`up{job="stream-processor"}`로 만들었다가 바꿨다** —
@@ -847,8 +853,106 @@ aws emr-serverless get-application --application-id <application_id>
 
 이 dashboard는 실제 AWS 계정으로 EMR Serverless가 idle→active를 오가는
 전이 상황까지 검증하지 못했다 — 6시간이라는 조회 창 길이가 실제 auto-stop
-주기에 비해 적절한지, `OK`/`NO METRIC DATA` 판정이 실제 장애 상황에서
-기대대로 동작하는지는 배포 후 관찰이 필요하다.
+주기에 비해 적절한지, `IDLE`/`RUNNING`/`NO METRIC DATA` 판정이 실제 장애
+상황에서 기대대로 동작하는지는 배포 후 관찰이 필요하다.
+
+### 장애 원인 세분화(Component Status, #437)
+
+기존에는 대부분 `up{job="..."}` 같은 단순 2단계(UP/DOWN)로만 상태를 보여줬다.
+#437에서 이미 존재하는 metric만 조합해 컴포넌트별로 더 구체적인 상태
+이름(예: Kafka의 `BROKER DOWN`, `UNDER REPLICATED`)을 보여주도록 바꿨다 —
+새 metric이나 exporter를 추가하지 않았다.
+
+**우선순위 판정 방식.** 각 `Component Status` 패널은 아래 형태의 PromQL로
+여러 조건 중 가장 심각한 것 하나를 골라 숫자 코드로 표현하고, `mappings`로
+그 코드를 상태 이름/색으로 바꾼다.
+
+```promql
+(3 * (조건A == bool 0) > 0)
+  or (2 * (조건B == bool 0) > 0)
+  or (1 * (조건C > bool 0) > 0)
+  or (0 * up{job="..."})
+```
+
+PromQL의 `or`는 왼쪽에 이미 그 label 조합(예: `instance`)의 결과가 있으면
+오른쪽 값을 무시하고, 없을 때만 오른쪽 값을 채운다 — 그래서 이 chain은
+"가장 심각한 조건부터 순서대로 확인하다가, 처음으로 참인 것의 값을 쓰고,
+전부 거짓이면 마지막 fallback(0 * up, 즉 HEALTHY)을 쓴다"는 우선순위
+로직이 된다. `== bool 0`/`> bool N` 뒤에 `> 0`을 붙인 이유는 "조건이 거짓인
+instance는 아예 결과에서 빠지게(참인 instance만 남게)" 필터링하기 위해서다
+— 로컬에 실제 Prometheus를 띄우고 instance 3개(정상/장애/target down)로
+직접 검증했다.
+
+이 방식은 `by (instance)`를 붙이면 그대로 instance별로 독립적으로 동작한다
+— 아래 multi-instance 절 참고. `state-timeline` 패널은 같은 query를
+range query로 그대로 재사용한다(instant 제거).
+
+**컴포넌트별 상태(우선순위 높은 순).**
+
+| 컴포넌트 | 상태 |
+| --- | --- |
+| Kafka | `TARGET DOWN`(`up==0`) > `BROKER DOWN`(`kafka_brokers==0`) > `UNDER REPLICATED`(under-replicated partition 존재) > `HEALTHY` |
+| Airflow | `METRICS TARGET DOWN`(`up==0`) > `SCHEDULER HEARTBEAT LOST`(최근 5분 heartbeat 0회) > `DAG PROCESSOR STALE`(last run age > 300초, 기존 threshold 재사용) > `DAG IMPORT ERROR` > `HEALTHY` |
+| Spark Streaming | `TARGET DOWN` > `QUERY STOPPED`(`query_running==0`) > `PROGRESS STALE`(last progress age > 330초, 기존 threshold 재사용) > `EVENT DATA STALE`(event-time lag > 330초, 같은 threshold) > `RUNNING` |
+| Serving API | `TARGET DOWN` > `HEALTHY` (2단계뿐) |
+| EMR Serverless | `NO METRIC DATA` / `IDLE` / `RUNNING` (CloudWatch 기반이라 별도 방식, 기존과 동일) |
+
+**의도적으로 뺀 상태 — 임의 threshold를 만들지 않기 위해서다.**
+
+- Kafka `HIGH LAG`: `kafka_consumergroup_lag`에 정상 범위로 합의된 기준이
+  없다. Consumer Lag 패널도 threshold 없이 raw 값만 보여준다.
+- Spark `KAFKA BACKLOG`: `stream_processor_kafka_offset_lag`도 같은 이유로
+  threshold가 없다(#426에서 추가할 때부터 명시).
+- Serving API `HIGH 5XX`/`HIGH LATENCY`: 5xx rate와 p95 latency 모두 이
+  프로젝트에 확립된 SLA가 없다. 실제 운영 기준이 정해지면 이 패널들에
+  추가한다.
+
+**Gauge로 바꾼 패널** — threshold가 이미 정의돼 있는 것만 추가했다(기존
+`stat` 패널은 유지하고 Gauge를 나란히 추가했다):
+
+- Airflow: `DAG Processor Last Run Age`
+- Spark Streaming: `Last Progress Age`, `Event-Time Lag`
+
+Kafka Consumer Lag, Serving API p95 latency는 위와 같은 이유로 Gauge로
+바꾸지 않았다.
+
+**Multi-instance 대응.** `sum(...)`/`count(...)`처럼 label 없이 전체를
+합치던 쿼리에 `by (instance)`(topic/consumergroup 등 기존 label과 함께)를
+추가했다 — 지금은 각 job이 target을 하나씩만 가져서 결과 값은 그대로지만,
+나중에 `prometheus.yml`에 같은 job에 target을 하나 더 추가하면(아래
+[Prometheus target 구조](#prometheus-target-구조) 참고) 그 즉시 instance별로
+분리돼 나온다. 적용한 곳: Kafka(Topics/Partitions/Under Replicated/Message
+Rate/Consumer Lag류 전부), Airflow(Failures by DAG/Task), Serving API
+(Requests/Latency by Endpoint).
+
+**Airflow의 multi-instance 한계 (해결하지 않음, 알려진 제약).** scheduler/
+dag-processor/api-server가 여러 node에 떠도 전부 StatsD UDP로
+`airflow-statsd-exporter` 하나에만 값을 보낸다. Prometheus가 붙이는
+`instance` label은 이 exporter 자신의 주소(`project-ec2:9102`)이지, 값을
+보낸 물리 node가 아니다 — 그래서 `by (instance)`를 아무리 붙여도 "어느
+scheduler node가 죽었는지"는 지금 구조로는 구분할 수 없다. 실제로 구분하려면
+node마다 별도 exporter를 두거나, exporter 자신에게 어떤 node의 트래픽인지
+알려주는 추가 계측(예: StatsD tag로 node id를 함께 보내기)이 필요하다 —
+이번 작업 범위 밖이라 구현하지 않았다.
+
+### Prometheus target 구조
+
+`prometheus.yml`의 각 job은 `static_configs.targets`가 문자열 배열이다
+— 예를 들어 `stream-processor` job에 두 번째 Spark Streaming node를
+추가하려면 그 job 아래에 주소 하나만 더 넣으면 된다(`job_name`을 새로
+만들 필요도, dashboard PromQL을 고칠 필요도 없다 — 위 multi-instance
+절에서 `by (instance)`를 붙여둔 쿼리는 자동으로 instance별로 나뉜다).
+이 구조 자체가 이미 여러 target을 지원하므로 #437에서 `prometheus.yml`
+내용은 바꾸지 않았다 — 실재하지 않는 node 주소를 미리 넣어두지 않는다는
+원칙(#437 지시사항)도 지켰다.
+
+```yaml
+- job_name: stream-processor
+  static_configs:
+    - targets:
+        - spark-ec2:9103
+        - spark-ec2-2:9103  # 예시 — 실제로 두 번째 node가 생기면 이렇게 추가
+```
 
 ### Source of truth와 `allowUiUpdates`
 
