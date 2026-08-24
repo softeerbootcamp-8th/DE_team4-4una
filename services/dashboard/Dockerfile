@@ -5,9 +5,8 @@ WORKDIR /frontend
 
 # 매니페스트만 먼저 복사해, 소스만 바뀐 빌드에서는 의존성 설치 레이어를 재사용한다.
 COPY services/dashboard/frontend/package*.json ./
-# package-lock.json을 커밋한 뒤에는 `npm ci`로 바꾼다. 아직 잠금 파일이 없어서
-# `npm ci`는 실패한다.
-RUN npm install --no-audit --no-fund
+
+RUN npm ci
 
 COPY services/dashboard/frontend/ ./
 RUN npm run build
