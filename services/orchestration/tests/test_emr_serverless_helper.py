@@ -141,11 +141,16 @@ def test_dynamic_allocation_is_capped_to_match_executor_instances():
 
 
 def test_all_job_runs_persist_logs_to_s3_monitoring_configuration():
+    # 기본값은 실재하는 관측 버킷을 가리켜야 한다 — 이전 기본값
+    # s3://de4-emr-serverless-logs/는 실제로 만들어진 적이 없다(#409, EC2에서
+    # NoSuchBucket 확인). 또 compose가 .env에 없는 변수를 빈 문자열로 채우므로
+    # var.value.get의 default만으로는 부족해 `or`로 한 번 더 막는다.
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     log_uri = operator.configuration_overrides["monitoringConfiguration"][
         "s3MonitoringConfiguration"
     ]["logUri"]
+    default = "s3://de4-observability-473551908409-ap-northeast-2-an/emr-serverless/logs/"
     assert log_uri == (
-        "{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', 's3://de4-emr-serverless-logs/') }}"
+        f"{{{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', '{default}') or '{default}' }}}}"
     )

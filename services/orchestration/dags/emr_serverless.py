@@ -20,9 +20,20 @@ _ENTRY_POINT_TEMPLATE = "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
 # EMR Serverless Job Run의 driver/executor 로그를 영구 저장할 S3 위치(#409). 지금까지
 # monitoringConfiguration이 없어 로그가 EMR 콘솔에 잠깐 노출됐다 사라졌다 — 실패
 # 알림(dags/notifications.py)이 참조할 EmrServerlessS3LogsLink XCom도 이 설정이
-# 있어야 채워진다.
+# 있어야 채워진다. 실패 기록과 같은 관측 버킷을 쓴다(이전 기본값
+# s3://de4-emr-serverless-logs/는 실재하지 않는 버킷이었다).
+_DEFAULT_EMR_SERVERLESS_LOG_S3_URI = (
+    "s3://de4-observability-473551908409-ap-northeast-2-an/emr-serverless/logs/"
+)
+
+# infra/compose/airflow.yaml이 이 env var를 항상 선언해서, 호스트 .env에 값이 없으면
+# docker compose가 빈 문자열로 채운다 — 그러면 var.value.get의 default가 아니라 그
+# 빈 문자열이 그대로 렌더링된다. notifications._failed_tasks_s3_root와 같은 이유로
+# `or`를 한 번 더 둔다(#409).
 _EMR_SERVERLESS_LOG_S3_URI_TEMPLATE = (
-    "{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', 's3://de4-emr-serverless-logs/') }}"
+    f"{{{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', "
+    f"'{_DEFAULT_EMR_SERVERLESS_LOG_S3_URI}') "
+    f"or '{_DEFAULT_EMR_SERVERLESS_LOG_S3_URI}' }}}}"
 )
 
 # batch-jobs 커스텀 이미지는 python3.12 전용 경로에만 설치되는데, base 이미지의

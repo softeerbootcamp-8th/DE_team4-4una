@@ -158,9 +158,10 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
     형식으로 `.env`에 채운다.
   - `AIRFLOW_VAR_SLACK_ALERT_CHANNEL`은 알림을 보낼 채널(예: `#de4-alerts`).
   - `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI`는 EMR Serverless Job Run의
-    원본 Spark driver/executor 로그를 영구 저장할 S3 버킷(예:
-    `s3://de4-emr-serverless-logs/`, 콘솔에서 사전 생성). 비우면
-    `dags/emr_serverless.py`의 같은 기본값을 쓴다. EMR execution role
+    원본 Spark driver/executor 로그를 영구 저장할 S3 위치다. 비우면
+    `dags/emr_serverless.py`의 기본값
+    `s3://de4-observability-473551908409-ap-northeast-2-an/emr-serverless/logs/`
+    (실패 기록과 같은 관측 버킷)을 쓴다. EMR execution role
     (IAM)에 이 버킷에 대한 `s3:PutObject` 권한이 미리 부여돼 있어야 한다
     (다른 EMR 관련 버킷과 마찬가지로 콘솔에서 사람이 준비).
   - `AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI`는 `on_failure_callback`이
