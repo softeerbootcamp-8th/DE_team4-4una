@@ -197,17 +197,47 @@ def run_standard_comfort_score_job(
             inserted_count=write_summary.inserted_count,
             updated_count=write_summary.updated_count,
         )
-        logger.info(
-            "standard comfort score job finished scored=%d inserted=%d updated=%d "
-            "gold_version=%s",
-            summary.scored_count,
-            summary.inserted_count,
-            summary.updated_count,
-            gold_result.version_id,
+        _log_summary(
+            config,
+            as_of=as_of,
+            summary=summary,
+            gold_version_uri=gold_result.version_uri,
         )
         return summary
     finally:
         scored.unpersist()
+
+
+def _log_summary(
+    config: StandardComfortScoreJobConfig,
+    *,
+    as_of: datetime,
+    summary: StandardComfortScoreJobSummary,
+    gold_version_uri: str,
+) -> None:
+    """이번 실행이 어느 구간을, 어떤 입출력 경로를 대상으로 처리했는지 남긴다(#406).
+
+    집계 대상은 [as_of - window_hours, as_of) 구간이다(_fill_missing_periods와
+    같은 경계 정의). Postgres는 host:port/db만 남긴다 — config.jdbc_url에는
+    자격증명이 없지만, 비밀번호가 로그로 새는 경로를 애초에 만들지 않는다.
+    """
+    window_start = as_of - timedelta(hours=config.window_hours)
+    logger.info(
+        "standard comfort score job finished window=[%s, %s) "
+        "data_lake=%s road_environment=%s gold_version=%s postgres=%s:%d/%s "
+        "scored=%d inserted=%d updated=%d",
+        window_start.isoformat(),
+        as_of.isoformat(),
+        config.data_lake_uri,
+        config.road_environment_uri,
+        gold_version_uri,
+        config.postgres_host,
+        config.postgres_port,
+        config.postgres_db,
+        summary.scored_count,
+        summary.inserted_count,
+        summary.updated_count,
+    )
 
 
 def _select_staging_columns(df: DataFrame) -> DataFrame:

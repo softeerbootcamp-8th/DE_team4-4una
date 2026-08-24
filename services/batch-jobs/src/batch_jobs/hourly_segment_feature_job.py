@@ -181,7 +181,14 @@ def run_hourly_segment_feature_job(
             write_result = write_hourly_segment_features(
                 spark, result, config.output_path, target_hour, run_id
             )
-            _log_summary(run_id, target_hour, sensor_df, target_df, write_result)
+            _log_summary(
+                run_id,
+                target_hour,
+                sensor_df,
+                target_df,
+                write_result,
+                config.road_segment_path,
+            )
             return HourlySegmentFeatureJobSummary(
                 result_count=write_result.row_count,
                 output_path=write_result.output_path,
@@ -243,6 +250,7 @@ def _log_summary(
     sensor_df: DataFrame,
     target_df: DataFrame,
     write_result: HourlySegmentFeatureWriteResult,
+    road_segment_path: str,
 ) -> None:
     started = time.monotonic()
     sensor_count = sensor_df.count()
@@ -252,10 +260,14 @@ def _log_summary(
         F.sum(F.when(F.col("segment_id").isNull(), 1).otherwise(0)).alias("unmatched_count"),
     ).first()
     logger.info(
+        # road_segment_path(map matching 입력)가 빠져 있어 어떤 도로망 스냅샷으로
+        # 매칭했는지 로그만 보고는 알 수 없었다(#406).
         "hourly segment feature job finished run_id=%s target_hour=%s "
-        "read=%d target=%d unmatched=%d result=%d output_path=%s elapsed=%.1fs",
+        "road_segment=%s read=%d target=%d unmatched=%d result=%d output_path=%s "
+        "elapsed=%.1fs",
         run_id,
         target_hour.isoformat(),
+        road_segment_path,
         sensor_count,
         counts["target_count"],
         counts["unmatched_count"],

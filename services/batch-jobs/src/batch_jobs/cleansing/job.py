@@ -136,10 +136,14 @@ def run_cleansing_job(
             hourly_bronze.unpersist()
 
     _log_summary(
-        processed_count,
-        quarantine_write.row_count,
-        feature_summary.result_count,
-        target_hour,
+        target_hour=target_hour,
+        window_start=window_start,
+        window_end=window_end,
+        cleansing_config=cleansing_config,
+        feature_output_path=feature_summary.output_path,
+        processed_count=processed_count,
+        quarantined_count=quarantine_write.row_count,
+        feature_count=feature_summary.result_count,
     )
     logger.info(
         "hourly sensor processing finished run_id=%s elapsed=%.1fs",
@@ -187,14 +191,31 @@ def _union_frames(frames: list[DataFrame]) -> DataFrame:
 
 
 def _log_summary(
+    *,
+    target_hour: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    cleansing_config: CleansingJobConfig,
+    feature_output_path: str,
     processed_count: int,
     quarantined_count: int,
     feature_count: int,
-    target_hour: datetime,
 ) -> None:
+    """무엇을 어느 구간에서 읽어 어디에 썼는지 요약 한 줄에 다 담는다(#406).
+
+    시작 로그에도 경로가 있지만 그건 설정된 root라, 실제로 쓰인 시간별 경로
+    (feature_output_path)와 feature 입력 윈도우는 여기서만 확인된다. 요약 한 줄만
+    보고도 추적이 되도록 경로를 다시 남긴다.
+    """
     logger.info(
-        "target_hour=%s input=%d passed=%d quarantined=%d features=%d",
+        "target_hour=%s feature_input_window=[%s, %s) bronze=%s quarantine=%s "
+        "features=%s input=%d passed=%d quarantined=%d features_written=%d",
         target_hour.isoformat(),
+        window_start.isoformat(),
+        window_end.isoformat(),
+        cleansing_config.bronze_input_path,
+        cleansing_config.quarantine_output_path,
+        feature_output_path,
         processed_count + quarantined_count,
         processed_count,
         quarantined_count,
