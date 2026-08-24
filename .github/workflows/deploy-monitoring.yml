@@ -374,6 +374,32 @@ jobs:
           wait_for grafana http://localhost:3000/api/health
           EOF
 
+      # 그래프에 "여기서 배포됨" 선을 찍어 지표 변화와 배포 시점을 바로 연관짓는다.
+      # 새 인프라나 API 토큰 없이, 이 호스트에 이미 있는 admin 계정으로 Grafana
+      # Annotation API를 호출한다(GRAFANA_ADMIN_PASSWORD는 인스턴스의 .env에만 있고
+      # 이 워크플로/GitHub Secrets에는 없다 — 그래서 SSH 세션 안에서 직접 source한다).
+      # 실패해도 배포 자체는 이미 끝난 뒤라 경고만 남기고 잡을 실패시키지 않는다.
+      - name: Annotate deploy in Grafana
+        env:
+          EC2_HOST: ${{ vars.MONITORING_EC2_HOST }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if ! ssh "${EC2_USER}@${EC2_HOST}" \
+            "cd '$TARGET_DIR' && DEPLOY_SHA='$DEPLOY_SHA' bash -s" <<'EOF'
+          set -euo pipefail
+          . infra/monitoring/.env
+          curl --fail --silent --show-error \
+            -u "${GRAFANA_ADMIN_USER:-admin}:${GRAFANA_ADMIN_PASSWORD}" \
+            -H 'Content-Type: application/json' \
+            -X POST http://localhost:3000/api/annotations \
+            -d "{\"text\":\"Monitoring stack deployed (commit ${DEPLOY_SHA})\",\"tags\":[\"deploy\",\"monitoring\"]}"
+          EOF
+          then
+            echo "::warning::Grafana annotation 실패 — 배포 자체는 이미 정상 완료됨"
+          fi
+
       - name: Job summary
         if: always()
         env:
