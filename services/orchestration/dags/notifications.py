@@ -132,7 +132,7 @@ def _pull_summary(context: dict, dag_id: str):
         return None
     try:
         return task_instance.xcom_pull(task_ids=summary_task_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # 처리 건수는 부가 정보다 — XCom 조회가 실패해도(예: 콜백 실행 컨텍스트가
         # 제한적인 경우) 핵심 알림(Slack 메시지 자체)까지 막아서는 안 된다(#409
         # 로컬 검증 중 `airflow dags test`에서 SUPERVISOR_COMMS ImportError로 실제 발견).
