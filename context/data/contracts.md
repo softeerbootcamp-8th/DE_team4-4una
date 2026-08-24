@@ -188,6 +188,10 @@ Rules the implementation fixes:
   `vehicle_profile` check above.
 - A segment with no score in either table fails the request with `404` (see
   `context/comfort-score.md`, "Route comfort score").
-- Bounds are per request, not per route: at most 10 candidate routes and 300
-  distinct segments, the latter reusing the existing batch-read limit.
+- Bounds are per request, not per route: a capped number of candidate routes
+  and a capped number of distinct segments. The segment cap is set
+  independently from the comfort-scores batch-read endpoint's own limit
+  (issue #414) — the two happened to share one constant before that issue,
+  but no longer do. See `services/serving-api/src/serving_api/config.py` for
+  the current values.
 - Scores are rounded to two decimal places before serialization.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import httpx
 import streamlit as st
@@ -88,26 +88,36 @@ def _load_boroughs_cached(
     return borough_outlines(_load_zone_master_cached(zone_master_s3_uri, aws_region))
 
 
+def _group_indices_by_borough(
+    segments: Sequence[RoadSegment],
+    boroughs: Mapping[int, str],
+) -> dict[str, tuple[int, ...]]:
+    """모든 segment를 한 번만 순회해 borough 이름 -> segment 위치로 묶는다(#414).
+
+    이전에는 borough별로 따로 캐시해서, 처음 보는 borough를 고를 때마다
+    전체 segment를 다시 훑었다(Manhattan 처음 선택 시 O(N), Brooklyn 처음
+    선택 시 또 O(N), ...). 여기서 한 번만 O(N)으로 묶어두면 이후 어떤
+    borough를 골라도 dict lookup 하나로 끝난다.
+    """
+    grouped: dict[str, list[int]] = {}
+    for index, segment in enumerate(segments):
+        if segment.location_id is None:
+            continue
+        borough = boroughs.get(segment.location_id)
+        if borough is not None:
+            grouped.setdefault(borough, []).append(index)
+    return {name: tuple(indices) for name, indices in grouped.items()}
+
+
 @st.cache_data(ttl=ROAD_SEGMENT_CACHE_TTL_SECONDS, show_spinner=False)
 def _borough_segment_indices_cached(
     road_segment_s3_uri: str,
     zone_master_s3_uri: str,
     aws_region: str | None,
-    borough: str,
-) -> list[int]:
-    """Positions of the segments in one borough.
-
-    Indices rather than segments so the bounding boxes stay aligned, and cached
-    per borough because panning reruns the whole script.
-    """
+) -> dict[str, tuple[int, ...]]:
     segments = _load_road_segments_cached(road_segment_s3_uri, aws_region)
     boroughs = zone_boroughs(_load_zone_master_cached(zone_master_s3_uri, aws_region))
-    return [
-        index
-        for index, segment in enumerate(segments)
-        if segment.location_id is not None
-        and boroughs.get(segment.location_id) == borough
-    ]
+    return _group_indices_by_borough(segments, boroughs)
 
 
 def _geometry_bounds(geometry: dict) -> SegmentBounds:
@@ -175,6 +185,29 @@ def _load_scores_cached(
     )
 
 
+def _visible_segments(
+    candidate_indices: Sequence[int],
+    road_segments: Sequence[RoadSegment],
+    segment_bounds: Sequence[SegmentBounds],
+    viewport: Viewport | None,
+    max_rendered: int,
+) -> tuple[list[RoadSegment], int]:
+    """그릴 segment이자 score를 조회할 segment — viewport로 걸러내고 상한을 적용한다(#414).
+
+    viewport를 아직 모르면 ([], 0)을 반환한다. 두 번째 값은 상한 적용 전
+    교차 개수로, "N개 더 있음, 확대하라" 안내에 쓴다.
+    """
+    if viewport is None:
+        return [], 0
+    in_viewport = [
+        index
+        for index in candidate_indices
+        if _intersects(segment_bounds[index], viewport)
+    ]
+    visible = [road_segments[i] for i in in_viewport[:max_rendered]]
+    return visible, len(in_viewport)
+
+
 def main() -> None:
     st.set_page_config(page_title="NYC Road Comfort Score", layout="wide")
     st.title("NYC Road Comfort Score Map")
@@ -220,25 +253,7 @@ def main() -> None:
     borough = None if selected == ALL_BOROUGHS else selected
     candidate_indices = _candidate_indices(config, road_segments, boroughs, borough)
 
-    # Scores are fetched for the selected borough only. Asking for the whole
-    # snapshot means hundreds of API round trips before anything can be drawn,
-    # and every segment outside the selection is discarded anyway.
-    score_result = None
-    if candidate_indices:
-        try:
-            with st.spinner("Loading comfort scores from the Serving API..."):
-                score_result = _load_scores_cached(
-                    config.batch_endpoint,
-                    config.vehicle_profile_id,
-                    tuple(road_segments[i].segment_id for i in candidate_indices),
-                    config.batch_chunk_size,
-                    config.request_timeout_seconds,
-                )
-        except httpx.HTTPError as exc:
-            st.error(f"Unable to load comfort scores from the Serving API: {exc}")
-            st.stop()
-
-    _render_metrics(score_result, len(candidate_indices), borough, len(road_segments))
+    _render_metrics(len(candidate_indices), borough, len(road_segments))
 
     if boroughs and borough is None:
         st.caption("Click a borough to load its road segments.")
@@ -247,7 +262,6 @@ def main() -> None:
         config,
         road_segments,
         segment_bounds,
-        score_result,
         boroughs,
         borough,
         candidate_indices,
@@ -261,12 +275,12 @@ def _candidate_indices(
     borough: str | None,
 ) -> Sequence[int]:
     if borough is not None:
-        return _borough_segment_indices_cached(
+        all_indices = _borough_segment_indices_cached(
             config.road_segment_s3_uri,
             config.zone_master_s3_uri,
             config.aws_region,
-            borough,
         )
+        return all_indices.get(borough, ())
     if boroughs:
         # Outlines only: drawing the whole network is what made the map unusable.
         return ()
@@ -274,37 +288,16 @@ def _candidate_indices(
 
 
 def _render_metrics(
-    score_result: ComfortScoreBatchResult | None,
     total_count: int,
     borough: str | None,
     snapshot_count: int,
 ) -> None:
-    """Metrics cover the selection, since only its scores were fetched.
-
-    They stay fixed while the map moves: coverage that changed with every pan
-    would read as the data changing rather than the view.
-    """
-    if score_result is None:
+    """segment 개수만 표시한다 — Scored/No score/Coverage는 borough 전체 score
+    조회가 있어야 계산됐는데, #414에서 그 조회 자체를 없앴다."""
+    if borough is None:
         st.metric("Road segments in snapshot", f"{snapshot_count:,}")
         return
-
-    scored_count = len(score_result.scores)
-    missing_count = total_count - scored_count
-    coverage = scored_count / total_count * 100 if total_count else 0.0
-    scope = borough if borough is not None else "snapshot"
-
-    metric_columns = st.columns(4)
-    metric_columns[0].metric(f"Road segments in {scope}", f"{total_count:,}")
-    metric_columns[1].metric("Scored", f"{scored_count:,}")
-    metric_columns[2].metric("No score", f"{missing_count:,}")
-    metric_columns[3].metric("Coverage", f"{coverage:.1f}%")
-
-    if score_result.vehicle_profile_fallback:
-        st.warning(
-            "Serving API used vehicle profile "
-            f"{score_result.effective_vehicle_profile_id} instead of requested "
-            f"profile {score_result.requested_vehicle_profile_id}."
-        )
+    st.metric(f"Road segments in {borough}", f"{total_count:,}")
 
 
 def _borough_selector(boroughs: Sequence[Borough]) -> str:
@@ -366,11 +359,11 @@ def _clicked_borough(
     return None
 
 
+@st.fragment
 def _render_map(
     config: DashboardConfig,
     road_segments: Sequence[RoadSegment],
     segment_bounds: Sequence[SegmentBounds],
-    score_result: ComfortScoreBatchResult | None,
     boroughs: Sequence[Borough],
     borough: str | None,
     candidate_indices: Sequence[int],
@@ -388,20 +381,36 @@ def _render_map(
     center = st.session_state.get("center", NYC_MAP_CENTER)
     zoom = st.session_state.get("zoom", NYC_MAP_ZOOM)
 
-    if viewport is None:
-        in_viewport: list[int] = []
-    else:
-        in_viewport = [
-            index
-            for index in candidate_indices
-            if _intersects(segment_bounds[index], viewport)
-        ]
-
-    visible_segments = [road_segments[i] for i in in_viewport[:MAX_RENDERED_SEGMENTS]]
-    if len(in_viewport) > MAX_RENDERED_SEGMENTS:
+    visible_segments, in_viewport_count = _visible_segments(
+        candidate_indices, road_segments, segment_bounds, viewport, MAX_RENDERED_SEGMENTS
+    )
+    if in_viewport_count > MAX_RENDERED_SEGMENTS:
         st.info(
-            f"{len(in_viewport):,} segments are in view and the first "
+            f"{in_viewport_count:,} segments are in view and the first "
             f"{MAX_RENDERED_SEGMENTS:,} are drawn. Zoom in to see all of them."
+        )
+
+    # borough 전체가 아니라 실제로 그리는 것만 조회한다(#414).
+    score_result: ComfortScoreBatchResult | None = None
+    if visible_segments:
+        try:
+            with st.spinner("Loading comfort scores from the Serving API..."):
+                score_result = _load_scores_cached(
+                    config.batch_endpoint,
+                    config.vehicle_profile_id,
+                    tuple(segment.segment_id for segment in visible_segments),
+                    config.batch_chunk_size,
+                    config.request_timeout_seconds,
+                )
+        except httpx.HTTPError as exc:
+            st.error(f"Unable to load comfort scores from the Serving API: {exc}")
+            st.stop()
+
+    if score_result is not None and score_result.vehicle_profile_fallback:
+        st.warning(
+            "Serving API used vehicle profile "
+            f"{score_result.effective_vehicle_profile_id} instead of requested "
+            f"profile {score_result.requested_vehicle_profile_id}."
         )
 
     joined_segments = join_road_segments_with_scores(
@@ -423,6 +432,7 @@ def _render_map(
         zoom=zoom,
         returned_objects=["bounds", "zoom", "last_object_clicked_tooltip"],
         key="map",
+        on_change=_sync_map_state,
     )
 
     scope = borough if borough is not None else "the snapshot"
@@ -438,35 +448,63 @@ def _render_map(
     if clicked is not None and clicked != borough:
         _select_borough(clicked, boroughs)
 
-    _sync_viewport(map_state, viewport, zoom)
+    # 최초 부트스트랩 전용(#414 후속) — viewport를 아직 모르면 이번 실행에서 받은
+    # bounds로 딱 한 번만 전체 rerun한다. 이후 pan/zoom은 on_change 콜백이 처리하므로
+    # (Streamlit이 fragment만 다시 실행) 여기 다시 안 걸린다.
+    if viewport is None:
+        update = _resolve_viewport_update(map_state, viewport, zoom)
+        if update is not None:
+            new_viewport, new_center, new_zoom = update
+            st.session_state["viewport"] = new_viewport
+            st.session_state["center"] = new_center
+            st.session_state["zoom"] = new_zoom
+            st.rerun()
 
 
-def _sync_viewport(
-    map_state: dict | None,
-    viewport: Viewport | None,
-    zoom: int,
-) -> None:
-    """Store the viewport the user is actually looking at, then redraw for it.
+def _resolve_viewport_update(
+    map_state: Mapping[str, object] | None,
+    current_viewport: Viewport | None,
+    current_zoom: int,
+) -> tuple[Viewport, tuple[float, float], int] | None:
+    """map_state에서 새 viewport/center/zoom을 뽑는다. 바뀐 게 없으면 None.
 
-    st_folium reports the viewport only after the map has rendered, so the map
-    on screen always lags one pass behind. Rerunning once the reported viewport
-    differs from the one just drawn closes that gap; comparing rounded values
-    keeps small jitter from rerunning forever.
+    bounds가 없거나(레이아웃 전) 기존과 같으면(반올림 기준) None을 돌려줘서
+    미세한 pan 지터로 계속 갱신되는 걸 막는다.
     """
     if not map_state:
-        return
+        return None
     reported = _parse_viewport(map_state.get("bounds"))
     if reported is None:
-        return
-    reported_zoom = map_state.get("zoom") or zoom
-    if _rounded(reported) == _rounded(viewport) and reported_zoom == zoom:
-        return
+        return None
+    reported_zoom = map_state.get("zoom") or current_zoom
+    if _rounded(reported) == _rounded(current_viewport) and reported_zoom == current_zoom:
+        return None
 
     south, west, north, east = reported
-    st.session_state["viewport"] = reported
-    st.session_state["center"] = ((south + north) / 2, (west + east) / 2)
-    st.session_state["zoom"] = reported_zoom
-    st.rerun()
+    center = ((south + north) / 2, (west + east) / 2)
+    return reported, center, reported_zoom
+
+
+def _sync_map_state() -> None:
+    """st_folium의 on_change 콜백 — Session State만 갱신한다(#414 후속).
+
+    fragment 안 위젯 상호작용은 Streamlit이 알아서 fragment만 다시 실행하므로
+    여기서 rerun을 직접 호출하지 않는다. `scope="fragment"`는 이 콜백이 full-app
+    실행의 일부로 처음 도는 상황(예: Borough 변경 직후)에서 부르면
+    `StreamlitAPIException`이 난다 — 그래서 아예 호출하지 않는다.
+    """
+    map_state = st.session_state.get("map")
+    update = _resolve_viewport_update(
+        map_state,
+        st.session_state.get("viewport"),
+        st.session_state.get("zoom", NYC_MAP_ZOOM),
+    )
+    if update is None:
+        return
+    viewport, center, zoom = update
+    st.session_state["viewport"] = viewport
+    st.session_state["center"] = center
+    st.session_state["zoom"] = zoom
 
 
 if __name__ == "__main__":

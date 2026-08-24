@@ -9,15 +9,13 @@ from dataclasses import dataclass
 DEFAULT_SERVING_API_URL = "http://localhost:8000"
 DEFAULT_VEHICLE_PROFILE_ID = 0
 
-# This mirrors the serving API's current MAX_BATCH_ITEMS contract. Services must
-# not import one another, so operators can override it when that API limit changes.
-DEFAULT_BATCH_CHUNK_SIZE = 300
+# serving API의 MAX_COMFORT_SCORE_BATCH_ITEMS를 그대로 따른다(서비스 간 import는
+# 안 하므로 값만 맞춰둔다).
+DEFAULT_BATCH_CHUNK_SIZE = 1000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
-# The API caps a request at a few hundred segments, so a map-sized query becomes
-# hundreds of round trips. They are issued concurrently, bounded here: the
-# serving API's own connection pool is small, and out-running it would just move
-# the queueing to its side.
+# 첫 chunk 이후는 동시에 조회한다. 큰 viewport가 serving API의 작은 커넥션
+# 풀을 넘치게 하지 않도록 상한을 둔다.
 DEFAULT_MAX_PARALLEL_REQUESTS = 8
 
 ROAD_SEGMENT_CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -34,11 +32,9 @@ BOROUGH_MAP_ZOOM = 12
 # than road segments, which is also what makes the first render cheap.
 ALL_BOROUGHS = "All boroughs"
 
-# Folium inlines every rendered segment into the page as GeoJSON, and each one
-# carries a six-field tooltip, so cost grows with the number drawn rather than
-# the number in the snapshot. Only the current viewport is drawn, and this caps
-# even that: zoomed out far enough, the viewport still covers a whole borough.
-MAX_RENDERED_SEGMENTS = 3000
+# viewport당 그리는(그리고 #414 이후로는 score 조회도 하는) segment 상한 —
+# 많이 축소하면 viewport가 여전히 borough 전체를 덮을 수 있다.
+MAX_RENDERED_SEGMENTS = 1500
 
 
 @dataclass(frozen=True, slots=True)

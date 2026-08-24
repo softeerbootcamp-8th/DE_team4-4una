@@ -13,6 +13,8 @@ from serving_api.config import (
     DEFAULT_ROUTE_AVERAGE_WEIGHT,
     DEFAULT_ROUTE_WORST_QUARTILE_WEIGHT,
     DEFAULT_ROUTE_WORST_RATIO,
+    MAX_COMFORT_SCORE_BATCH_ITEMS,
+    MAX_ROUTE_SEGMENTS,
     RouteComfortConfig,
     ServingApiConfig,
 )
@@ -24,6 +26,12 @@ REQUIRED_ENV = {
     "POSTGRES_USER": "de4",
     "POSTGRES_PASSWORD": "secret",
 }
+
+
+def test_comfort_score_and_route_batch_limits_are_split() -> None:
+    assert MAX_COMFORT_SCORE_BATCH_ITEMS == 1000
+    assert MAX_ROUTE_SEGMENTS == 300
+    assert MAX_COMFORT_SCORE_BATCH_ITEMS > MAX_ROUTE_SEGMENTS
 
 
 def test_from_env_applies_defaults_for_optional_settings() -> None:

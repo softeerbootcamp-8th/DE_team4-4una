@@ -7,7 +7,11 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from serving_api.config import MAX_BATCH_ITEMS, MAX_ROUTES_PER_REQUEST
+from serving_api.config import (
+    MAX_COMFORT_SCORE_BATCH_ITEMS,
+    MAX_ROUTE_SEGMENTS,
+    MAX_ROUTES_PER_REQUEST,
+)
 
 # vehicle_profile_id=0은 차량 구분 없는 전체 대표값을 뜻한다 (OQ-038).
 VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID = 0
@@ -54,7 +58,9 @@ class ComfortScoreBatchRequest(BaseModel):
     """경로 조회는 차량 하나를 기준으로 하므로 프로필은 요청당 하나만 받는다."""
 
     vehicle_profile_id: int = Field(ge=0)
-    segment_ids: list[SegmentId] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
+    segment_ids: list[SegmentId] = Field(
+        min_length=1, max_length=MAX_COMFORT_SCORE_BATCH_ITEMS
+    )
 
 
 class ComfortScoreBatchResponse(BaseModel):
@@ -80,7 +86,7 @@ class RouteCandidate(BaseModel):
     """
 
     route_id: RouteId
-    segment_ids: list[SegmentId] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
+    segment_ids: list[SegmentId] = Field(min_length=1, max_length=MAX_ROUTE_SEGMENTS)
 
 
 class RouteEvaluationRequest(BaseModel):
@@ -102,9 +108,9 @@ class RouteEvaluationRequest(BaseModel):
         unique_segment_ids = {
             segment_id for route in self.routes for segment_id in route.segment_ids
         }
-        if len(unique_segment_ids) > MAX_BATCH_ITEMS:
+        if len(unique_segment_ids) > MAX_ROUTE_SEGMENTS:
             raise ValueError(
-                f"a request may reference at most {MAX_BATCH_ITEMS} distinct segments, "
+                f"a request may reference at most {MAX_ROUTE_SEGMENTS} distinct segments, "
                 f"got {len(unique_segment_ids)}"
             )
         return self
