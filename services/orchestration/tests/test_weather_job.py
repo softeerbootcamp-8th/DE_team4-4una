@@ -60,8 +60,10 @@ def write_zone_master(path: Path, *, location_id=181, latitude=40.7, longitude=-
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code: int = 200, headers: dict | None = None):
         self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         pass
@@ -81,7 +83,9 @@ class FakeSession:
 
 
 class SequencedSession:
-    # 호출 순서대로 payload를 돌려주되, Exception이 오면 그대로 raise한다(batch 실패 시뮬레이션용).
+    # 호출 순서대로 응답을 돌려준다. Exception이면 그대로 raise한다(batch 실패
+    # 시뮬레이션용). 이미 만들어진 FakeResponse(예: 429 상태코드/헤더가 필요한
+    # 경우)는 그대로 반환하고, 그 외 raw payload는 FakeResponse로 감싼다.
     def __init__(self, responses: list) -> None:
         self._responses = list(responses)
         self.calls = 0
@@ -91,6 +95,8 @@ class SequencedSession:
         self.calls += 1
         if isinstance(item, Exception):
             raise item
+        if isinstance(item, FakeResponse):
+            return item
         return FakeResponse(item)
 
 
@@ -154,6 +160,15 @@ class TestBuildDefaultSession:
         assert adapter.max_retries.total == HTTP_RETRY_TOTAL
         assert adapter.max_retries.status_forcelist == HTTP_RETRY_STATUS_FORCELIST
         assert adapter.max_retries.allowed_methods == frozenset({"GET"})
+
+    def test_5xx_is_still_retried_at_the_http_layer(self):
+        # 429 처리 방식을 바꾸면서 5xx retry는 그대로 유지되는지 확인한다(#444).
+        assert {500, 502, 503, 504} <= set(HTTP_RETRY_STATUS_FORCELIST)
+
+    def test_429_is_excluded_from_http_layer_retry(self):
+        # 429는 fetch_open_meteo()가 직접 처리한다 — HTTP adapter가 조용히 재시도하면
+        # 안 된다(#444).
+        assert 429 not in HTTP_RETRY_STATUS_FORCELIST
 
 
 class TestClassifyWeatherState:
@@ -361,6 +376,46 @@ class TestFetchOpenMeteo:
         assert set(readings) == {183}
         assert 181 in failures
         assert 182 in failures
+
+    def test_a_429_on_the_first_batch_stops_after_a_single_call(self):
+        # HTTP 내부 retry가 아니라 fetch_open_meteo가 직접 429를 감지해서, 이후
+        # batch 요청 자체를 만들지 않아야 한다(#444).
+        zones = [
+            ZoneCoordinate(181, 40.7, -73.9),
+            ZoneCoordinate(182, 40.8, -74.0),
+            ZoneCoordinate(183, 40.9, -74.1),
+        ]
+        session = SequencedSession(
+            [FakeResponse(None, status_code=429, headers={"Retry-After": "30"})]
+        )
+
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+
+        assert session.calls == 1
+        assert readings == {}
+        assert set(failures) == {181, 182, 183}
+        assert all("429" in reason for reason in failures.values())
+
+    def test_a_429_after_a_successful_batch_keeps_the_earlier_batch_results(self):
+        zones = [
+            ZoneCoordinate(181, 40.7, -73.9),
+            ZoneCoordinate(182, 40.8, -74.0),
+            ZoneCoordinate(183, 40.9, -74.1),
+        ]
+        session = SequencedSession(
+            [
+                [location_payload([TARGET_KEY], rain=[1.0])],
+                FakeResponse(None, status_code=429),
+            ]
+        )
+
+        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+
+        # 세 번째 batch(183)는 요청조차 만들어지지 않는다.
+        assert session.calls == 2
+        assert set(readings) == {181}
+        assert readings[181]["rain"] == 1.0
+        assert set(failures) == {182, 183}
 
 
 def snapshot_row(**overrides) -> dict:
