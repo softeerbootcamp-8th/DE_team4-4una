@@ -76,6 +76,34 @@ class TestStandardComfortScoreJobConfigGoldOutputUri:
         assert config.gold_output_uri == "s3://de4-lake/gold/standard"
 
 
+class TestStandardComfortScoreJobConfigRoadEnvironmentUri:
+    BASE_ENV: ClassVar[dict[str, str]] = {
+        "POSTGRES_HOST": "db.local",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": "de4",
+        "POSTGRES_USER": "app",
+        "POSTGRES_PASSWORD": "secret",
+    }
+
+    def test_falls_back_to_the_data_lake_uri_when_unset(self):
+        config = StandardComfortScoreJobConfig.from_env(
+            {**self.BASE_ENV, "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": "data/local-lake"}
+        )
+
+        assert config.road_environment_uri == "data/local-lake"
+
+    def test_explicit_reference_data_lake_uri_overrides_the_default(self):
+        config = StandardComfortScoreJobConfig.from_env(
+            {
+                **self.BASE_ENV,
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": "s3://de4-data-lake",
+                "REFERENCE_DATA_LAKE_URI": "s3://de4-reference",
+            }
+        )
+
+        assert config.road_environment_uri == "s3://de4-reference"
+
+
 class FakeCursor:
     def __init__(self, vehicle_profile_ids: tuple[int, ...]) -> None:
         self._vehicle_profile_ids = vehicle_profile_ids
@@ -134,6 +162,7 @@ class TestGoldBeforePostgres:
         self._write_hourly_comfort_score(spark, data_lake_uri)
         return StandardComfortScoreJobConfig(
             data_lake_uri=data_lake_uri,
+            road_environment_uri=data_lake_uri,
             window_hours=168,
             comfort_score_config_path=DEFAULT_COMFORT_SCORE_CONFIG_PATH,
             gold_output_uri=str(tmp_path / "gold"),

@@ -271,6 +271,7 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     assert "{{ data_interval_end.isoformat() }}" in args
     driver_env = _driver_env(task)
     assert "STANDARD_COMFORT_SCORE_DATA_LAKE_URI" in driver_env
+    assert "REFERENCE_DATA_LAKE_URI" in driver_env
     assert "POSTGRES_PASSWORD" in driver_env
 
 
