@@ -70,12 +70,38 @@ wait_for_health() {
   return 1
 }
 
+# 현재 이미지와 rollback용 직전 이미지만 남기고 이 리포지터리의 나머지 태그를 지운다.
+#
+# 전에는 `docker image prune --force`만 했는데, 그것은 dangling(태그 없는) 이미지만
+# 지우므로 <repo>:<sha> 태그가 붙은 이전 배포 이미지가 계속 쌓였다. 반대로
+# `docker image prune -af`는 쓰면 안 된다 — 이 EC2에는 Kafka, Airflow, exporter 등
+# 다른 서비스 이미지가 함께 있다.
+prune_old_images() {
+  local keep_current="$1"
+  local keep_previous="$2"
+  local repo="${keep_current%:*}"
+  local ref
+
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" = "$keep_current" ] && continue
+    [ -n "$keep_previous" ] && [ "$ref" = "$keep_previous" ] && continue
+
+    if docker rmi "$ref" >/dev/null 2>&1; then
+      log "이미지 삭제: $ref"
+    else
+      # 다른 컨테이너가 쓰고 있으면 실패한다. 정리는 부가 작업이라 배포를 깨지 않는다.
+      log "이미지 삭제 실패(사용 중일 수 있음): $ref"
+    fi
+  done < <(docker images --filter "reference=${repo}:*" --format '{{.Repository}}:{{.Tag}}')
+}
+
 log "기동: $IMAGE (revision ${REVISION})"
 start_container "$IMAGE" "$REVISION"
 
 if wait_for_health; then
   log "배포 성공: $IMAGE"
-  docker image prune --force >/dev/null 2>&1 || true
+  prune_old_images "$IMAGE" "$PREVIOUS_IMAGE"
   exit 0
 fi
 
