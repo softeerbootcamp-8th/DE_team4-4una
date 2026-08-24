@@ -48,7 +48,7 @@ def on_failure_callback(context: dict) -> None:
     hook = _build_slack_hook()
     mention = _resolve_mention(owner, hook)
     exception = context.get("exception")
-    counts = _pull_summary(context["dag_run"], dag_id)
+    counts = _pull_summary(context, dag_id)
 
     # S3에 남기는 원본은 가공 없이 이 dict 그대로 JSON 직렬화한다(#409) — 가독성은
     # 아래 Slack 메시지 쪽에서 챙긴다. 값을 지어내지 않는다: 아직 아무 상위 task도
@@ -95,9 +95,9 @@ def on_success_callback(context: dict) -> None:
 
     lines = [
         f"{SEVERITY_LABELS[severity]} *{dag_id}* 성공 (담당자: {owner.name})",
-        f"<{dag_run.get_absolute_url()}|DAG Run 열기>",
+        f"<{_dag_run_url(dag_run)}|DAG Run 열기>",
     ]
-    summary = _pull_summary(dag_run, dag_id)
+    summary = _pull_summary(context, dag_id)
     if summary is not None:
         lines.append(f"처리 건수: {summary}")
 
@@ -105,14 +105,38 @@ def on_success_callback(context: dict) -> None:
     _post_message(hook, "\n".join(lines))
 
 
-def _pull_summary(dag_run, dag_id: str):
+def _dag_run_url(dag_run) -> str:
+    # Airflow 3 콜백 컨텍스트의 dag_run은 Pydantic 모델이라 (구버전 ORM DagRun에 있던)
+    # get_absolute_url()이 없다 — task_instance.log_url과 같은 방식(airflow.sdk의
+    # RuntimeTaskInstance.log_url)으로 base_url을 직접 읽어 URL을 만든다(#409 로컬
+    # 검증 중 AttributeError로 실제 발견).
+    from urllib.parse import quote
+
+    from airflow.configuration import conf
+
+    base_url = conf.get("api", "base_url", fallback="http://localhost:8080/")
+    return f"{base_url.rstrip('/')}/dags/{dag_run.dag_id}/runs/{quote(dag_run.run_id)}"
+
+
+def _pull_summary(context: dict, dag_id: str):
+    # Airflow 3 콜백 컨텍스트의 dag_run(Pydantic 모델)에는 get_task_instance()가 없다
+    # (#409 로컬 검증 중 AttributeError로 실제 발견) — 대신 context["task_instance"](
+    # RuntimeTaskInstance)의 xcom_pull은 task_ids로 다른 task의 XCom도 정상적으로
+    # 조회한다. 이 키가 아예 없는 극단적인 경우(성공/실패한 task가 하나도 없음)에도
+    # 대비한다.
+    task_instance = context.get("task_instance")
+    if task_instance is None:
+        return None
     summary_task_id = _SUMMARY_TASK_IDS.get(dag_id)
     if summary_task_id is None:
         return None
-    task_instance = dag_run.get_task_instance(summary_task_id)
-    if task_instance is None:
+    try:
+        return task_instance.xcom_pull(task_ids=summary_task_id)
+    except Exception:
+        # 처리 건수는 부가 정보다 — XCom 조회가 실패해도(예: 콜백 실행 컨텍스트가
+        # 제한적인 경우) 핵심 알림(Slack 메시지 자체)까지 막아서는 안 된다(#409
+        # 로컬 검증 중 `airflow dags test`에서 SUPERVISOR_COMMS ImportError로 실제 발견).
         return None
-    return task_instance.xcom_pull(task_ids=summary_task_id)
 
 
 def _emr_s3_logs_link(context: dict) -> str | None:
