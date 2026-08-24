@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 DAG_PATH = Path(__file__).resolve().parents[1] / "dags" / "data_quality_audit.py"
 
@@ -52,22 +53,37 @@ def test_dag_parses_with_expected_schedule():
     assert module.dag.catchup is False
 
 
-def test_dag_contains_one_task_per_gold_table():
+def test_dag_contains_one_task_per_gold_table_plus_the_count_report():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
         "audit_standard_segment_comfort_score",
         "audit_current_segment_comfort_score",
+        "report_audit_counts",
     }
 
 
-def test_tasks_have_no_upstream_or_downstream_dependencies():
+def test_audit_tasks_are_independent_of_each_other():
     module = _load_dag_module()
 
-    for task in module.dag.tasks:
-        assert task.upstream_task_ids == set()
-        assert task.downstream_task_ids == set()
+    standard_task = module.dag.get_task("audit_standard_segment_comfort_score")
+    current_task = module.dag.get_task("audit_current_segment_comfort_score")
+
+    assert standard_task.upstream_task_ids == set()
+    assert current_task.upstream_task_ids == set()
+
+
+def test_report_audit_counts_runs_after_both_audits():
+    module = _load_dag_module()
+
+    report_task = module.dag.get_task("report_audit_counts")
+    assert isinstance(report_task, PythonOperator)
+    assert report_task.python_callable is module._report_audit_counts
+    assert report_task.upstream_task_ids == {
+        "audit_standard_segment_comfort_score",
+        "audit_current_segment_comfort_score",
+    }
 
 
 def test_tasks_have_no_outlets():
@@ -80,7 +96,11 @@ def test_tasks_have_no_outlets():
 def test_tasks_submit_to_emr_serverless_with_the_shared_variables():
     module = _load_dag_module()
 
-    for task in module.dag.tasks:
+    for task_id in (
+        "audit_standard_segment_comfort_score",
+        "audit_current_segment_comfort_score",
+    ):
+        task = module.dag.get_task(task_id)
         assert isinstance(task, EmrServerlessStartJobOperator)
         assert task.application_id == "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
         assert (
@@ -136,3 +156,12 @@ def test_dag_preserves_retry_policy():
     for task in module.dag.tasks:
         assert task.retries == 1
         assert task.retry_delay == datetime.timedelta(minutes=5)
+
+
+def test_dag_wires_shared_slack_notification_callbacks():
+    import notifications
+
+    module = _load_dag_module()
+
+    assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
+    assert module.dag.on_success_callback is notifications.on_success_callback
