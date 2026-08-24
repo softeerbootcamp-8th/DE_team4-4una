@@ -79,13 +79,14 @@
       "id": 2,
       "type": "stat",
       "title": "Requests/sec",
+      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — metric이 아직 없어 No data로 보이지 않도록 or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 5, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\"}[5m]))",
+          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\"}[5m])) or vector(0)",
           "legendFormat": "requests/sec",
           "instant": true
         }
@@ -109,13 +110,14 @@
       "id": 3,
       "type": "stat",
       "title": "2xx",
+      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 9, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"2..\"}[5m]))",
+          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"2..\"}[5m])) or vector(0)",
           "legendFormat": "2xx",
           "instant": true
         }
@@ -140,13 +142,14 @@
       "id": 4,
       "type": "stat",
       "title": "4xx",
+      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 8, "y": 9, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"4..\"}[5m]))",
+          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"4..\"}[5m])) or vector(0)",
           "legendFormat": "4xx",
           "instant": true
         }
@@ -171,13 +174,14 @@
       "id": 5,
       "type": "stat",
       "title": "5xx",
+      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 16, "y": 9, "w": 8, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m]))",
+          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)",
           "legendFormat": "5xx",
           "instant": true
         }

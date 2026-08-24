@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import ClassVar
+from urllib.parse import unquote
 
 import psycopg2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import requests
+from botocore.exceptions import ClientError
+from de4_core import ObjectStore
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jobs.weather import (
+    _SNAPSHOT_SCHEMA,
+    DEFAULT_ZONE_MASTER_URI,
     FOG_WEATHER_CODES,
     HIGH_WIND_GUST_THRESHOLD_MPS,
     HTTP_RETRY_STATUS_FORCELIST,
@@ -193,6 +200,28 @@ class TestClassifyWeatherState:
         assert classify_weather_state({}) == "dry"
 
 
+class FakeS3Client:
+    """put_object/get_object만 갖춘 최소 in-memory S3 — bronze_compaction 테스트와 같은 패턴."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, **kwargs: object) -> None:
+        self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        if key not in self.objects:
+            raise ClientError(
+                {
+                    "Error": {"Code": "NoSuchKey", "Message": "not found"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "GetObject",
+            )
+        return {"Body": io.BytesIO(self.objects[key])}
+
+
 class TestLoadZoneCoordinates:
     def test_drops_zones_with_missing_coordinates(self, tmp_path):
         table = pa.table(
@@ -209,6 +238,56 @@ class TestLoadZoneCoordinates:
 
         assert [zone.location_id for zone in zones] == [181]
         assert zones[0] == ZoneCoordinate(181, 40.7, -73.9)
+
+    def test_reads_from_an_s3_uri(self):
+        table = pa.table(
+            {
+                "location_id": [181],
+                "representative_latitude": [40.7],
+                "representative_longitude": [-73.9],
+            }
+        )
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        client = FakeS3Client()
+        client.put_object(Bucket="de4-reference", Key="normalized/zone_master/zone_master.parquet", Body=buffer.getvalue())
+        store = ObjectStore(client)  # type: ignore[arg-type]
+
+        zones = load_zone_coordinates(
+            "s3://de4-reference/normalized/zone_master/zone_master.parquet", store=store
+        )
+
+        assert zones == [ZoneCoordinate(181, 40.7, -73.9)]
+
+    def test_raises_when_the_s3_object_is_missing(self):
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+
+        with pytest.raises(ClientError, match="NoSuchKey"):
+            load_zone_coordinates(
+                "s3://de4-reference/normalized/zone_master/zone_master.parquet", store=store
+            )
+
+
+class TestLatestZoneWeatherJobConfigFromEnv:
+    BASE_ENV: ClassVar[dict[str, str]] = {
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": "de4",
+        "POSTGRES_USER": "de4",
+        "POSTGRES_PASSWORD": "de4",
+    }
+
+    def test_falls_back_to_the_local_default_uri(self):
+        config = LatestZoneWeatherJobConfig.from_env(self.BASE_ENV)
+
+        assert config.zone_master_uri == DEFAULT_ZONE_MASTER_URI
+
+    def test_reads_an_s3_uri_from_the_environment(self):
+        config = LatestZoneWeatherJobConfig.from_env(
+            {**self.BASE_ENV, "ZONE_MASTER_URI": "s3://de4-reference/normalized/zone_master/zone_master.parquet"}
+        )
+
+        assert config.zone_master_uri == "s3://de4-reference/normalized/zone_master/zone_master.parquet"
 
 
 class TestFetchOpenMeteo:
@@ -308,22 +387,33 @@ def snapshot_row(**overrides) -> dict:
     return values
 
 
+def _read_snapshot_table(store: ObjectStore, uri: str) -> pa.Table:
+    return pq.read_table(io.BytesIO(store.read_bytes(uri)))
+
+
 class TestWriteZoneWeatherSnapshot:
     def test_writes_one_parquet_file_keyed_by_weather_date_and_time(self, tmp_path):
         root = tmp_path / "zone_weather_snapshot"
+        store = ObjectStore()
 
-        uri = write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()])
+        uri = write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()], store=store)
 
         written = list(root.rglob("*.parquet"))
         assert len(written) == 1
-        assert uri == str(written[0])
-        table = pq.read_table(written[0])
+        # weather_date=.../weather_time=... 파티션 이름을 그대로 유지한다(file:// URI라
+        # '='이 %3D로 percent-encode되므로 unquote해서 비교한다).
+        assert "weather_date=2026-08-19" in unquote(uri)
+        assert "weather_time=2026-08-19T10-15-00Z.parquet" in unquote(uri)
+        table = _read_snapshot_table(store, uri)
+        assert table.schema == _SNAPSHOT_SCHEMA
+        assert table.num_rows == 1
         assert table.column("location_id").to_pylist() == [181]
         assert table.column("rain_mm").to_pylist() == [0.0]
         assert table.column("fetch_status").to_pylist() == ["success"]
 
     def test_a_failed_zone_writes_null_measurements_with_fetch_status(self, tmp_path):
         root = tmp_path / "zone_weather_snapshot"
+        store = ObjectStore()
         failed_row = snapshot_row(
             rain_mm=None,
             weather_state=None,
@@ -332,9 +422,9 @@ class TestWriteZoneWeatherSnapshot:
             error_reason="missing target_time in Open-Meteo response",
         )
 
-        write_zone_weather_snapshot(str(root), TARGET_TIME, [failed_row])
+        uri = write_zone_weather_snapshot(str(root), TARGET_TIME, [failed_row], store=store)
 
-        table = pq.read_table(next(iter(root.rglob("*.parquet"))))
+        table = _read_snapshot_table(store, uri)
         assert table.column("rain_mm").to_pylist() == [None]
         assert table.column("fetch_status").to_pylist() == ["failed"]
         assert table.column("error_reason").to_pylist() == [
@@ -343,23 +433,91 @@ class TestWriteZoneWeatherSnapshot:
 
     def test_rerunning_the_same_weather_time_overwrites_instead_of_duplicating(self, tmp_path):
         root = tmp_path / "zone_weather_snapshot"
+        store = ObjectStore()
 
-        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row(rain_mm=0.0)])
-        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row(rain_mm=5.0)])
+        first_uri = write_zone_weather_snapshot(
+            str(root), TARGET_TIME, [snapshot_row(rain_mm=0.0)], store=store
+        )
+        second_uri = write_zone_weather_snapshot(
+            str(root), TARGET_TIME, [snapshot_row(rain_mm=5.0)], store=store
+        )
 
+        assert first_uri == second_uri
         written = list(root.rglob("*.parquet"))
         assert len(written) == 1
-        table = pq.read_table(written[0])
+        table = _read_snapshot_table(store, second_uri)
         assert table.column("rain_mm").to_pylist() == [5.0]
 
     def test_a_different_weather_time_writes_a_separate_file(self, tmp_path):
         root = tmp_path / "zone_weather_snapshot"
         later_target_time = TARGET_TIME + timedelta(minutes=15)
+        store = ObjectStore()
 
-        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()])
-        write_zone_weather_snapshot(str(root), later_target_time, [snapshot_row()])
+        write_zone_weather_snapshot(str(root), TARGET_TIME, [snapshot_row()], store=store)
+        write_zone_weather_snapshot(str(root), later_target_time, [snapshot_row()], store=store)
 
         assert len(list(root.rglob("*.parquet"))) == 2
+
+    def test_writes_to_an_s3_uri(self):
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+        root = "s3://de4-data-lake/bronze/weather-snapshots"
+
+        uri = write_zone_weather_snapshot(root, TARGET_TIME, [snapshot_row()], store=store)
+
+        assert uri == (
+            "s3://de4-data-lake/bronze/weather-snapshots/"
+            "weather_date=2026-08-19/weather_time=2026-08-19T10-15-00Z.parquet"
+        )
+        table = _read_snapshot_table(store, uri)
+        assert table.schema == _SNAPSHOT_SCHEMA
+        assert table.column("location_id").to_pylist() == [181]
+
+    def test_rerunning_the_same_weather_time_overwrites_the_same_s3_key(self):
+        store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
+        root = "s3://de4-data-lake/bronze/weather-snapshots"
+
+        first_uri = write_zone_weather_snapshot(
+            root, TARGET_TIME, [snapshot_row(rain_mm=0.0)], store=store
+        )
+        second_uri = write_zone_weather_snapshot(
+            root, TARGET_TIME, [snapshot_row(rain_mm=5.0)], store=store
+        )
+
+        assert first_uri == second_uri
+        table = _read_snapshot_table(store, second_uri)
+        assert table.column("rain_mm").to_pylist() == [5.0]
+
+    def test_propagates_the_error_when_the_object_store_write_fails(self, tmp_path):
+        class FailingObjectStore(ObjectStore):
+            def write_bytes(self, uri: str, value: bytes) -> None:
+                raise RuntimeError("write failed")
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            write_zone_weather_snapshot(
+                str(tmp_path / "zone_weather_snapshot"),
+                TARGET_TIME,
+                [snapshot_row()],
+                store=FailingObjectStore(),
+            )
+
+    def test_bronze_compaction_finds_the_snapshot_under_the_same_root(self, tmp_path):
+        # weather.py가 쓰는 root와 bronze_compaction이 읽는 root가 같은 값을 가리키면
+        # 그대로 발견돼야 한다 — 두 job이 같은 S3 root를 바라보는 계약을 지킨다(#400).
+        from jobs.bronze_compaction import compact_bronze_prefix
+
+        root = str(tmp_path / "zone_weather_snapshot")
+        store = ObjectStore()
+        write_zone_weather_snapshot(root, TARGET_TIME, [snapshot_row()], store=store)
+
+        objects = store.list_objects(root)
+
+        assert len(objects) == 1
+        assert objects[0].uri.endswith(".parquet")
+        # compact_bronze_prefix 자체는 이번 이슈에서 수정하지 않았다 — 같은 root를
+        # 그대로 넘겨도 대상 없이(그룹당 1개뿐이라 skip) 정상 동작하는지만 확인한다.
+        summary = compact_bronze_prefix(store, root, now=datetime(2099, 1, 1, tzinfo=UTC))
+        assert summary.skipped_group_count == 1
+        assert summary.compacted_groups == ()
 
 
 def _connect():
@@ -392,10 +550,10 @@ class TestWeatherJobIntegration:
         yield
 
     @staticmethod
-    def make_config(zone_master_path, snapshot_uri) -> LatestZoneWeatherJobConfig:
+    def make_config(zone_master_uri, snapshot_uri) -> LatestZoneWeatherJobConfig:
         env = os.environ
         return LatestZoneWeatherJobConfig(
-            zone_master_path=zone_master_path,
+            zone_master_uri=str(zone_master_uri),
             zone_weather_snapshot_uri=snapshot_uri,
             postgres_host=env["POSTGRES_HOST"],
             postgres_port=int(env["POSTGRES_PORT"]),

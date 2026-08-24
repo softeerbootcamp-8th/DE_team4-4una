@@ -19,7 +19,11 @@ from dashboard.config import (
     SCORE_CACHE_TTL_SECONDS,
     DashboardConfig,
 )
-from dashboard.map_view import build_map, join_road_segments_with_scores
+from dashboard.map_view import (
+    build_borough_map,
+    build_map,
+    join_road_segments_with_scores,
+)
 from dashboard.road_geometry import RoadSegment, load_road_segments
 from dashboard.serving_api_client import (
     ComfortScoreBatchResult,

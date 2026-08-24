@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -11,11 +12,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import psycopg2
-import pyarrow.compute as pc
-import pyarrow.dataset as ds
+import pyarrow as pa
+import pyarrow.parquet as pq
+from de4_core import ObjectStore, join_uri
 from psycopg2.extras import execute_values
 
 from . import current_score_quarantine
+from .road_environment import resolve_active_road_snapshot_date
 from .weather_rules import (
     WEATHER_RULE_VERSION,
     WeatherRuleConfig,
@@ -28,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 TABLE = "current_segment_comfort_score"
 
-DEFAULT_ROAD_SEGMENT_PATH = Path("data/processed/road_segment")
+DEFAULT_ROAD_SEGMENT_URI = "data/processed/road_segment"
 
 # batch_jobs.db_lock_keys.CURRENT_SCORE_JOB_LOCK_KEY와 같은 값이어야 한다 —
 # 서비스 경계 때문에 import하지 못해 그쪽 레지스트리에 예약만 해 두고 여기서 복사한다.
@@ -95,7 +98,7 @@ GROUP BY w.location_id
 
 @dataclass(frozen=True, slots=True)
 class CurrentScoreJobConfig:
-    road_segment_path: Path
+    road_segment_uri: str
     road_snapshot_date: date
     postgres_host: str
     postgres_port: int
@@ -107,10 +110,8 @@ class CurrentScoreJobConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> CurrentScoreJobConfig:
         source = env if env is not None else os.environ
         return cls(
-            road_segment_path=Path(
-                source.get("CURRENT_SCORE_ROAD_SEGMENT_PATH") or DEFAULT_ROAD_SEGMENT_PATH
-            ),
-            road_snapshot_date=date.fromisoformat(_require(source, "CURRENT_SCORE_ROAD_SNAPSHOT_DATE")),
+            road_segment_uri=source.get("CURRENT_SCORE_ROAD_SEGMENT_URI") or DEFAULT_ROAD_SEGMENT_URI,
+            road_snapshot_date=_resolve_road_snapshot_date(source),
             postgres_host=_require(source, "POSTGRES_HOST"),
             postgres_port=int(_require(source, "POSTGRES_PORT")),
             postgres_db=_require(source, "POSTGRES_DB"),
@@ -126,6 +127,28 @@ def _require(source: Mapping[str, str], key: str) -> str:
     return value
 
 
+# road_environment_uri(#389)의 active pointer/manifest에서 최신 build의
+# road_snapshot_date를 직접 읽는다(#402) — 새 road snapshot이 발행되면 사람이
+# CURRENT_SCORE_ROAD_SNAPSHOT_DATE를 수동으로 갱신하지 않아도 다음 실행부터
+# 자동으로 반영된다. URI가 없으면(로컬 개발 등) 기존 하드코딩 값으로 폴백한다.
+def _resolve_road_snapshot_date(source: Mapping[str, str]) -> date:
+    road_environment_uri = source.get("CURRENT_SCORE_ROAD_ENVIRONMENT_URI")
+    if road_environment_uri:
+        return resolve_active_road_snapshot_date(road_environment_uri)
+
+    fallback = source.get("CURRENT_SCORE_ROAD_SNAPSHOT_DATE")
+    if not fallback:
+        raise ValueError(
+            "CURRENT_SCORE_ROAD_ENVIRONMENT_URI or CURRENT_SCORE_ROAD_SNAPSHOT_DATE must be set"
+        )
+    logger.warning(
+        "CURRENT_SCORE_ROAD_ENVIRONMENT_URI not set — falling back to the hardcoded "
+        "CURRENT_SCORE_ROAD_SNAPSHOT_DATE=%s (#402)",
+        fallback,
+    )
+    return date.fromisoformat(fallback)
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentScoreJobSummary:
     zone_count: int
@@ -136,18 +159,36 @@ class CurrentScoreJobSummary:
 
 
 # road_segment(Parquet)에서 segment -> zone 매핑을 읽는다. 이 매핑은 Postgres에 없다.
-def load_segment_zones(road_segment_path: Path, road_snapshot_date: date) -> dict[str, int]:
-    # partitioning=None으로 디렉터리 파티션을 무시한다. road_segment는 snapshot_date를
-    # 파일 안(date32)에도, 경로(snapshot_date=2024-02-01)에도 갖고 있어서, 기본
-    # hive 파티션 추론을 쓰면 같은 컬럼이 date32와 문자열로 두 번 잡혀 읽기가 실패한다.
-    dataset = ds.dataset(road_segment_path, format="parquet", partitioning=None)
-    table = dataset.to_table(columns=["segment_id", "snapshot_date", "location_id"])
-    snapshot_dates = set(pc.unique(table.column("snapshot_date")).to_pylist())
-    # 엉뚱한 snapshot을 넘겨받았으면 점수를 만들기 전에 실패시킨다
-    # (batch_jobs.hourly_segment_feature_job과 같은 방침).
+# road_segment_uri는 항상 root(예: normalized/road_segment)를 가리키고, 실제로는
+# 그 아래 {road_segment_uri}/snapshot_date=<date>/ partition만 조회한다 — 이 root
+# 아래에는 여러 snapshot_date가 쌓여 있을 수 있어(#400) 매번 전체를 스캔하면
+# S3에서는 비용도 크고 실수로 다른 날짜 데이터까지 섞일 위험도 있다. local
+# path/file:// URI/s3:// URI 모두 de4_core.ObjectStore가 처리한다.
+def load_segment_zones(
+    road_segment_uri: str | Path, road_snapshot_date: date, *, store: ObjectStore | None = None
+) -> dict[str, int]:
+    active_store = store if store is not None else ObjectStore()
+    partition_uri = join_uri(str(road_segment_uri), f"snapshot_date={road_snapshot_date.isoformat()}")
+    objects = [
+        obj for obj in active_store.list_objects(partition_uri) if obj.uri.endswith(".parquet")
+    ]
+    if not objects:
+        raise ValueError(f"{partition_uri}: no parquet files found")
+
+    tables = [
+        pq.read_table(
+            io.BytesIO(active_store.read_bytes(obj.uri)),
+            columns=["segment_id", "snapshot_date", "location_id"],
+        )
+        for obj in objects
+    ]
+    table = pa.concat_tables(tables)
+    snapshot_dates = set(table.column("snapshot_date").to_pylist())
+    # 파티션 경로 이름과 파일 내부 값이 어긋나 있으면(잘못 배치된 데이터) 점수를
+    # 만들기 전에 실패시킨다(batch_jobs.hourly_segment_feature_job과 같은 방침).
     if snapshot_dates != {road_snapshot_date}:
         raise ValueError(
-            f"{road_segment_path}: expected snapshot_date {road_snapshot_date}, "
+            f"{partition_uri}: expected snapshot_date {road_snapshot_date}, "
             f"got {sorted(snapshot_dates)}"
         )
     return {
@@ -190,7 +231,7 @@ def run_current_score_job(
     standard 스냅샷이 새로 생겼으므로 갱신 대상이다.
     """
     rule_config = rule_config if rule_config is not None else load_weather_rule_config()
-    segment_zones = load_segment_zones(config.road_segment_path, config.road_snapshot_date)
+    segment_zones = load_segment_zones(config.road_segment_uri, config.road_snapshot_date)
     weather_by_zone = load_latest_zone_weather(connection)
 
     if changed_zones_only:

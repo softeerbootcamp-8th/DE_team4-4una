@@ -32,8 +32,10 @@ zone만 재계산한다(`jobs/current_score.py`는 이 이슈에서 변경하지
 그대로 남아 있다.
 
 `current_score`는 segment -> zone 매핑을 `road_segment` Parquet에서 읽는다. 이 매핑은
-PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
-`CURRENT_SCORE_ROAD_SEGMENT_PATH`/`CURRENT_SCORE_ROAD_SNAPSHOT_DATE`를 채워 준다.
+PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 직접 읽는다(#400,
+`jobs/weather.py`/`jobs/current_score.py`가 `de4_core.ObjectStore`로 local path/`file://`/
+`s3://` URI를 모두 처리) — 로컬 compose는 `ZONE_MASTER_URI`/`CURRENT_SCORE_ROAD_SEGMENT_URI`
+기본값을 볼륨 마운트된 로컬 경로로 채워 주고, 운영은 같은 키를 reference S3 URI로 덮어쓴다.
 `zone`이 없는 segment는 `current_segment_comfort_score.location_id`가 NOT NULL이라
 행이 만들어지지 않는다 — `standard_segment_comfort_score`에만 남는다.
 
@@ -75,6 +77,52 @@ PostgreSQL에 없다. compose가 `data/processed`를 `:ro`로 마운트하고
   `POSTGRES_PASSWORD` — `current_score_pipeline`의 PythonOperator
   (`jobs/current_score.py`)가 `airflow-scheduler` 프로세스의 환경변수에서
   직접 읽는 서빙 Postgres 접속 정보다.
+- `ZONE_MASTER_URI`, `CURRENT_SCORE_ROAD_SEGMENT_URI` — `zone_weather_pipeline`
+  (`jobs/weather.py`)과 `current_score_pipeline`(`jobs/current_score.py`)이 각각
+  reference 데이터(`zone_master.parquet`, `road_segment`)를 읽을 URI다(#400).
+  `AIRFLOW_VAR_*`가 아니라 `POSTGRES_*`와 같은 방식으로 `airflow-scheduler`
+  프로세스의 환경변수에서 직접 읽는다. 로컬에서는 비워 두면
+  `infra/compose/airflow.yaml`이 볼륨 마운트된 로컬 경로
+  (`data/reference/tlc_zone/zone_master.parquet`, `data/processed/road_segment`)를
+  기본값으로 채운다. 운영에서는 reference S3 버킷을 가리키는 값을 넣는다.
+
+  ```env
+  ZONE_MASTER_URI=s3://<reference-bucket>/normalized/zone_master/zone_master.parquet
+  CURRENT_SCORE_ROAD_SEGMENT_URI=s3://<reference-bucket>/normalized/road_segment
+  ```
+
+  `CURRENT_SCORE_ROAD_SEGMENT_URI`는 root를 가리키고, `jobs/current_score.py`가
+  `CURRENT_SCORE_ROAD_SNAPSHOT_DATE`로 그 아래 `snapshot_date=<date>/` partition만
+  골라 읽는다 — root 전체를 스캔하지 않는다(그 아래 여러 날짜가 함께 쌓여 있을 수
+  있어서다). 두 URI 모두 local path/`file://`/`s3://` 형식을 다
+  받는다(`de4_core.ObjectStore`가 처리). S3를 쓰려면 Monitoring EC2의 CloudWatch
+  IAM 준비와 마찬가지로 Airflow(Project) EC2의 IAM Role에 **reference 버킷**에 대한
+  `s3:GetObject`, `s3:ListBucket` 권한이 미리 부여돼 있어야 한다 — access
+  key/secret은 여기에 넣지 않고 EC2 Instance Role의 boto3 기본 credential chain을
+  쓴다.
+- `ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`, `BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI`
+  — `zone_weather_pipeline`(`jobs/weather.py`)이 15분마다 쓰는 Bronze
+  `zone_weather_snapshot` 이력의 root와, `bronze_compaction`(`jobs/bronze_compaction.py`,
+  #271)이 그 소파일을 압축할 때 읽는 root다(#400). **두 값은 항상 같은 root를
+  가리켜야 한다** — 하나만 바꾸면 compaction이 새 파일을 못 찾는다. 로컬에서는
+  비워 두면 둘 다 같은 로컬 기본값
+  (`data/local-lake/bronze/zone_weather_snapshot`)을 쓴다. 운영에서는 이 project의
+  Data Lake bucket(`<data-lake-bucket>`), **Bronze
+  계층**(Silver 아님 — raw collection history라서)을 가리키는 값을 넣는다.
+
+  ```env
+  ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI=s3://<data-lake-bucket>/bronze/weather-snapshots
+  BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI=s3://<data-lake-bucket>/bronze/weather-snapshots
+  ```
+
+  `jobs/weather.py`의 `write_zone_weather_snapshot()`도 `de4_core.ObjectStore` +
+  `join_uri()`로 쓴다 — local path/`file://`/`s3://` 모두 지원하고, 같은
+  `target_time`으로 재실행되면 같은 object 키(`weather_date=D/weather_time=T.parquet`)를
+  덮어써 중복 snapshot이 생기지 않는 기존 계약을 그대로 유지한다. S3를 쓰려면
+  Airflow(Project) EC2의 IAM Role에 **Data Lake 버킷**에 대한 `s3:GetObject`,
+  `s3:PutObject`, `s3:DeleteObject`(`bronze_compaction`이 병합 후 원본을 지우는 데
+  필요), `s3:ListBucket` 권한이 미리 부여돼 있어야 한다 — reference 버킷과 권한
+  요구사항이 다르다(reference는 읽기 전용, 이 버킷은 읽기/쓰기/삭제).
 - `AIRFLOW_VAR_POSTGRES_HOST` 등 `AIRFLOW_VAR_POSTGRES_*` 5개 키,
   `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_DATA_LAKE_URI`,
   `AIRFLOW_VAR_STANDARD_COMFORT_SCORE_WINDOW_HOURS` — `standard_score` 단계가
@@ -207,10 +255,20 @@ UPSERT보다 먼저 `zone_weather_snapshot` Parquet 이력을 남긴다(#222). �
 `ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`(비우면 `data/local-lake/bronze/zone_weather_snapshot`)
 아래 `weather_date=YYYY-MM-DD/weather_time=....parquet`로, `weather_time`이 파일
 키라 같은 tick을 재시도해도 파일을 덮어쓸 뿐 중복 snapshot이 생기지 않는다.
-지금은 로컬 경로만 지원한다 — S3 연동은 #222 범위 밖이라, 나중에 이 값을
-`s3://...`로 바꿀 때 `write_zone_weather_snapshot`의 내부 쓰기 방식만 바뀌고
-config/호출부는 그대로 둘 수 있게만 이름을 지어뒀다(de4-core는 batch-jobs
-이미지에만 설치돼 있어 이 lightweight 컨테이너에서는 못 쓴다).
+`write_zone_weather_snapshot`은 이제 `de4_core.ObjectStore`로 쓴다(#400) — local
+path/`file://`/`s3://` URI를 모두 받고, 반환값도 항상 URI다. 운영에서는
+`ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`를 `bronze/weather-snapshots`를 가리키는
+`s3://...`로 채운다 — 이 project의 Data Lake 계약상 zone_weather_snapshot은
+가공 전 raw collection history이므로 Silver가 아니라 **Bronze**다. `de4-core`는
+`bronze_compaction`(#271)이 처음 쓴 이래로 이미 이 컨테이너에 볼륨 마운트 +
+`PYTHONPATH`로 들어와 있다(공식 이미지에 설치돼 있는 게 아니다 — 위 compose
+주석 참고) — 새 boto3 코드를 여기에 추가하지 않았다.
+
+`bronze_compaction`(#271, `jobs.bronze_compaction`)은 이 `zone_weather_snapshot`을
+날짜 파티션별로 소파일 병합하는 job이다 — `BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI`가
+`ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`와 **항상 같은 root**를 가리켜야 이 job이 weather
+수집이 방금 쓴 파일을 찾는다. 두 값 다 비우면 같은 로컬 기본 경로를 쓰므로 로컬에서는
+자동으로 맞다 — 운영에서 둘 중 하나만 바꾸는 실수를 주의한다.
 
 `zone_weather_snapshot`은 요청한 zone 전체를 매번 한 행씩 남긴다 — target_time
 데이터가 없던 zone도 측정값/`weather_state`/`impact_signature`는 NULL로,
