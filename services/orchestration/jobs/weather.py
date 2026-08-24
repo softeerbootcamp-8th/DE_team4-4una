@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -14,6 +15,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+from de4_core import ObjectStore, join_uri
 from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -55,7 +57,7 @@ HTTP_RETRY_TOTAL = 3
 HTTP_RETRY_BACKOFF_FACTOR = 1.0
 HTTP_RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
-DEFAULT_ZONE_MASTER_PATH = Path("data/reference/tlc_zone/zone_master.parquet")
+DEFAULT_ZONE_MASTER_URI = "data/reference/tlc_zone/zone_master.parquet"
 DEFAULT_ZONE_WEATHER_SNAPSHOT_URI = "data/local-lake/bronze/zone_weather_snapshot"
 
 TABLE = "latest_zone_weather"
@@ -143,7 +145,7 @@ class ZoneCoordinate:
 
 @dataclass(frozen=True, slots=True)
 class LatestZoneWeatherJobConfig:
-    zone_master_path: Path
+    zone_master_uri: str
     zone_weather_snapshot_uri: str
     postgres_host: str
     postgres_port: int
@@ -155,9 +157,7 @@ class LatestZoneWeatherJobConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> LatestZoneWeatherJobConfig:
         source = env if env is not None else os.environ
         return cls(
-            zone_master_path=Path(
-                source.get("ZONE_MASTER_PATH") or DEFAULT_ZONE_MASTER_PATH
-            ),
+            zone_master_uri=source.get("ZONE_MASTER_URI") or DEFAULT_ZONE_MASTER_URI,
             zone_weather_snapshot_uri=(
                 source.get("ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI")
                 or DEFAULT_ZONE_WEATHER_SNAPSHOT_URI
@@ -218,9 +218,14 @@ def _build_default_session() -> requests.Session:
 
 
 # zone_master.parquet에서 location_id/대표좌표를 읽는다 — 좌표 없는 zone(264, 265)은 제외.
-def load_zone_coordinates(zone_master_path: Path) -> list[ZoneCoordinate]:
+# zone_master_uri는 local path/file:// URI/s3:// URI를 모두 받는다(#400) — 실제 접근은
+# de4_core.ObjectStore에 위임해 S3 접근 로직을 중복 구현하지 않는다.
+def load_zone_coordinates(
+    zone_master_uri: str | Path, *, store: ObjectStore | None = None
+) -> list[ZoneCoordinate]:
+    active_store = store if store is not None else ObjectStore()
     table = pq.read_table(
-        zone_master_path,
+        io.BytesIO(active_store.read_bytes(str(zone_master_uri))),
         columns=["location_id", "representative_latitude", "representative_longitude"],
     )
     location_ids = table.column("location_id").to_pylist()
@@ -327,27 +332,33 @@ def classify_weather_state(reading: Mapping[str, float | int | None]) -> str:
     return "dry"
 
 
-# weather_time을 키로 삼아 zone_weather_snapshot에 15분 관측 전체를 Parquet 1개로 남긴다.
-# 같은 weather_time으로 재실행되면 같은 키를 덮어써서 중복 snapshot이 생기지 않는다.
-# snapshot_root는 로컬 경로만 지원한다 — s3:// 전환은 후속 이슈(#222 범위 밖)이고,
-# 그때도 이 함수의 시그니처와 호출부는 그대로 두고 안쪽 쓰기 방식만 바뀔 것이다.
+# weather_time을 키로 삼아 zone_weather_snapshot(Bronze)에 15분 관측 전체를 Parquet
+# 1개로 남긴다. 같은 weather_time으로 재실행되면 같은 object URI를 덮어써서 중복
+# snapshot이 생기지 않는다. snapshot_root는 local path/file:// URI/s3:// URI를 모두
+# 받는다(#400) — 운영에서는 bronze/weather-snapshots를 가리키는 s3:// URI가 들어오고,
+# bronze_compaction(#271)이 이 root를 그대로 압축 대상으로 재사용한다. 실제 저장은
+# de4_core.ObjectStore에 위임해 S3 접근 로직을 중복 구현하지 않는다.
 def write_zone_weather_snapshot(
-    snapshot_root: str | Path,
+    snapshot_root: str,
     target_time: datetime,
     rows: Sequence[Mapping[str, object]],
+    *,
+    store: ObjectStore | None = None,
 ) -> str:
-    path = (
-        Path(snapshot_root)
-        / f"weather_date={target_time.strftime('%Y-%m-%d')}"
-        / f"weather_time={target_time.strftime('%Y-%m-%dT%H-%M-%SZ')}.parquet"
+    active_store = store if store is not None else ObjectStore()
+    uri = join_uri(
+        str(snapshot_root),
+        f"weather_date={target_time.strftime('%Y-%m-%d')}",
+        f"weather_time={target_time.strftime('%Y-%m-%dT%H-%M-%SZ')}.parquet",
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(
         [{column: row[column] for column in _SNAPSHOT_ROW_COLUMNS} for row in rows],
         schema=_SNAPSHOT_SCHEMA,
     )
-    pq.write_table(table, path)
-    return str(path)
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer)
+    active_store.write_bytes(uri, buffer.getvalue())
+    return uri
 
 
 # latest_zone_weather에 UPSERT — location_id당 최신 관측 1행만 유지된다.
@@ -375,7 +386,7 @@ def run_latest_zone_weather_job(
     target_time = _validate_target_time(target_time)
     # zone마다 YAML을 다시 읽지 않도록 한 번만 로드해 돌려 쓴다.
     rule_config = rule_config if rule_config is not None else load_weather_rule_config()
-    zones = load_zone_coordinates(config.zone_master_path)
+    zones = load_zone_coordinates(config.zone_master_uri)
     readings, failure_reasons = fetch_open_meteo(zones, target_time, session=session)
     fetched_at = datetime.now(UTC)
 
