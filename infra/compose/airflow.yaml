@@ -52,6 +52,22 @@ x-airflow-env: &airflow-env
     # (de4-data-quality-docs)을 그대로 쓴다. AWS 자격증명은 여기서 넘기지 않고
     # EMR Serverless execution role(IAM)에 위임한다(#295 논의).
     AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET: ${AIRFLOW_VAR_GOLD_AUDIT_S3_BUCKET}
+    # DAG 실행 결과 Slack 알림(#409). base_url은 [api] 섹션 설정이다(Airflow 3.3.1,
+    # webserver 섹션 아님) — DAG Run/Task Instance 알림 링크가 이 값을 기준으로
+    # 생성된다.
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_API_BASE_URL:-http://localhost:8080}
+    AIRFLOW_CONN_SLACK_API_DEFAULT: ${AIRFLOW_CONN_SLACK_API_DEFAULT}
+    AIRFLOW_VAR_SLACK_ALERT_CHANNEL: ${AIRFLOW_VAR_SLACK_ALERT_CHANNEL}
+    # EmrServerlessStartJobOperator(dags/emr_serverless.py)가 Job Run 로그를
+    # 영구 저장할 S3 위치. 비어 있으면 emr_serverless.py의 기본값을 쓴다.
+    AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI: ${AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI}
+    # notifications.py의 on_failure_callback이 구조화된 실패 기록(JSON)을 쓰는
+    # 관측 버킷. 비어 있으면 notifications.py의 기본값(사용자가 사전에 만든
+    # de4-observability-473551908409-ap-northeast-2-a 버킷)을 쓴다.
+    AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI: ${AIRFLOW_VAR_OBSERVABILITY_FAILED_TASKS_S3_URI}
+    # jobs/dag_owners.py가 config/dag_owners.yaml을 읽는 경로 — 아래
+    # airflow-scheduler/airflow-dag-processor volumes의 마운트 위치와 맞춘다.
+    DAG_OWNERS_CONFIG_PATH: ${AIRFLOW_HOME}/config/dag_owners.yaml
     # current_score_pipeline의 PythonOperator(jobs/current_score.py,
     # CurrentScoreJobConfig.from_env())가 scheduler 프로세스의 os.environ에서
     # 직접 읽는 값이라, 위 AIRFLOW_VAR_POSTGRES_*(Airflow Variable)와는 별개로
@@ -92,6 +108,14 @@ services:
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
+    environment:
+      <<: *airflow-env
+      # notifications.py의 on_success_callback(DAG 단위)이 이 프로세스에서 실행되므로
+      # (Airflow의 DagFileProcessor가 DAG-level 콜백을 실행한다) 여기도 필요하다.
+      _PIP_ADDITIONAL_REQUIREMENTS: "pyyaml>=6.0,<7.0 apache-airflow-providers-slack>=9.10.2 datadog>=0.47.0"
+    volumes:
+      - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+      - ../../config:${AIRFLOW_HOME}/config:ro
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -153,9 +177,10 @@ services:
       # de4_core.ObjectStore가 쓴다.
       # datadog은 DogStatsD 연동에 필요하다(위 x-airflow-env 참고) — 이 키를 여기서
       # 통째로 재선언하므로 공통 env 값은 안 물려받아 따로 추가했다.
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0 datadog>=0.47.0"
+      _PIP_ADDITIONAL_REQUIREMENTS: "pyyaml>=6.0,<7.0 apache-airflow-providers-slack>=9.10.2 requests>=2.32,<3.0 psycopg2-binary>=2.9,<3.0 pyarrow>=25.0.1 great-expectations>=1.21.0 pandas>=2.0.0 boto3>=1.40,<2.0 datadog>=0.47.0"
     volumes:
       - ../../services/orchestration/dags:${AIRFLOW_HOME}/dags
+      - ../../config:${AIRFLOW_HOME}/config:ro
       - ../../services/orchestration/jobs:${AIRFLOW_HOME}/orchestration/jobs
       # bronze_compaction(#271)의 jobs.bronze_compaction이 임포트하는 de4_core 패키지
       # 소스 — jobs 마운트와 같은 이유로 필요(공식 이미지에 de4-core 미설치, :ro).

@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import datetime
 
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 from emr_serverless import submit_batch_jobs_command
+from notifications import on_failure_callback, on_success_callback
 
 # standard_score_pipeline.py의 _POSTGRES_DRIVER_ENV와 같은 내용이다(#292). 그
 # 파일은 이 이슈(#295)의 제외 범위라 공유 모듈로 뽑지 않고 그대로 복제한다.
@@ -50,6 +52,20 @@ def _audit_gold_driver_env() -> dict[str, str]:
     return {**_POSTGRES_DRIVER_ENV, "GOLD_AUDIT_S3_BUCKET": _GOLD_AUDIT_S3_BUCKET}
 
 
+def _report_audit_counts() -> dict:
+    import psycopg2
+    from jobs.pipeline_counts import PostgresConfig, count_audit_gold_tables
+
+    config = PostgresConfig.from_env()
+    connection = psycopg2.connect(**config.as_connect_kwargs())
+    try:
+        counts = count_audit_gold_tables(connection=connection)
+    finally:
+        connection.close()
+    print(counts)
+    return counts
+
+
 with DAG(
     dag_id="data_quality_audit",
     description="Gold(standard/current_segment_comfort_score) at-rest 품질 감시 — 매일 1회, soft fail",
@@ -59,7 +75,9 @@ with DAG(
     default_args={
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
+        "on_failure_callback": on_failure_callback,
     },
+    on_success_callback=on_success_callback,
     tags=["data-quality-audit", "comfort-score"],
 ) as dag:
     # 두 task는 서로 독립이라(의존관계 없음) 병렬로 실행된다. outlet이 없어
@@ -80,3 +98,12 @@ with DAG(
         ],
         driver_env=_audit_gold_driver_env(),
     )
+
+    report_audit_counts = PythonOperator(
+        task_id="report_audit_counts",
+        python_callable=_report_audit_counts,
+    )
+    [
+        audit_standard_segment_comfort_score,
+        audit_current_segment_comfort_score,
+    ] >> report_audit_counts

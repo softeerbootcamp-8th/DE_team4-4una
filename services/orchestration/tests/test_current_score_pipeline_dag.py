@@ -106,3 +106,12 @@ def test_both_assets_triggering_prefers_full_recompute():
         ZONE_WEATHER_ASSET: ["event"],
     }
     assert module._changed_zones_only(triggering_asset_events) is False
+
+
+def test_dag_wires_shared_slack_notification_callbacks():
+    import notifications
+
+    module = _load_dag_module()
+
+    assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
+    assert module.dag.on_success_callback is notifications.on_success_callback

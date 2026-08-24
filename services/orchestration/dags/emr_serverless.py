@@ -17,6 +17,14 @@ _APPLICATION_ID_TEMPLATE = "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
 _EXECUTION_ROLE_ARN_TEMPLATE = "{{ var.value.EMR_SERVERLESS_EXECUTION_ROLE_ARN }}"
 _ENTRY_POINT_TEMPLATE = "{{ var.value.BATCH_JOBS_EMR_ENTRY_POINT }}"
 
+# EMR Serverless Job Run의 driver/executor 로그를 영구 저장할 S3 위치(#409). 지금까지
+# monitoringConfiguration이 없어 로그가 EMR 콘솔에 잠깐 노출됐다 사라졌다 — 실패
+# 알림(dags/notifications.py)이 참조할 EmrServerlessS3LogsLink XCom도 이 설정이
+# 있어야 채워진다.
+_EMR_SERVERLESS_LOG_S3_URI_TEMPLATE = (
+    "{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', 's3://de4-emr-serverless-logs/') }}"
+)
+
 # batch-jobs 커스텀 이미지는 python3.12 전용 경로에만 설치되는데, base 이미지의
 # 기본 python3는 3.9라 PYSPARK_PYTHON을 명시하지 않으면 Spark driver/executor가
 # batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
@@ -113,6 +121,14 @@ def submit_batch_jobs_command(
         application_id=_APPLICATION_ID_TEMPLATE,
         execution_role_arn=_EXECUTION_ROLE_ARN_TEMPLATE,
         job_driver={"sparkSubmit": spark_submit},
+        # monitoringConfiguration은 job_driver가 아니라 configuration_overrides에
+        # 둬야 EMR Serverless가 인식한다(#409 조사 기록 — provider의
+        # is_monitoring_in_job_override()가 configuration_overrides를 검사).
+        configuration_overrides={
+            "monitoringConfiguration": {
+                "s3MonitoringConfiguration": {"logUri": _EMR_SERVERLESS_LOG_S3_URI_TEMPLATE}
+            }
+        },
         name=task_id,
         outlets=outlets or [],
     )

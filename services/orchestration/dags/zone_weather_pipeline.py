@@ -18,9 +18,10 @@ from airflow.providers.standard.operators.python import (
 from airflow.sdk import DAG
 from airflow.timetables.interval import CronDataIntervalTimetable
 from assets import ZONE_WEATHER_ASSET
+from notifications import on_failure_callback, on_success_callback
 
 
-def _collect_latest_zone_weather(data_interval_end) -> None:
+def _collect_latest_zone_weather(data_interval_end) -> dict:
     import psycopg2
     from jobs.weather import LatestZoneWeatherJobConfig, run_latest_zone_weather_job
 
@@ -36,14 +37,14 @@ def _collect_latest_zone_weather(data_interval_end) -> None:
         summary = run_latest_zone_weather_job(config, data_interval_end, connection)
     finally:
         connection.close()
-    print(
-        {
-            "requested_zone_count": summary.requested_zone_count,
-            "collected_count": summary.collected_count,
-            "failed_zone_count": summary.failed_zone_count,
-            "snapshot_uri": summary.snapshot_uri,
-        }
-    )
+    result = {
+        "requested_zone_count": summary.requested_zone_count,
+        "collected_count": summary.collected_count,
+        "failed_zone_count": summary.failed_zone_count,
+        "snapshot_uri": summary.snapshot_uri,
+    }
+    print(result)
+    return result
 
 
 def _validate_weather_collection(data_interval_end) -> None:
@@ -108,7 +109,9 @@ with DAG(
         # 15분 주기라 hourly_pipeline의 5분 재시도 간격은 너무 길다. retry_delay는 재시도 대기 시간일 뿐 실행 시간 제한이 아니다.
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),
+        "on_failure_callback": on_failure_callback,
     },
+    on_success_callback=on_success_callback,
     tags=["zone-weather-pipeline"],
 ) as dag:
     run_weather_collection = PythonOperator(
