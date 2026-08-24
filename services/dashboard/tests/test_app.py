@@ -8,14 +8,21 @@ import streamlit as st
 from dashboard import app as app_module
 from dashboard.app import (
     Viewport,
+    _candidate_set,
     _group_indices_by_borough,
     _render_metrics,
     _resolve_viewport_update,
+    _segment_render_key,
     _sync_map_state,
     _visible_segments,
 )
 from dashboard.config import MAX_RENDERED_SEGMENTS
+from dashboard.map_view import join_road_segments_with_scores
 from dashboard.road_geometry import RoadSegment
+from dashboard.serving_api_client import ComfortScore
+from dashboard.zone_master import Borough
+from shapely.geometry import box
+from shapely.strtree import STRtree
 
 # Leaflet의 bounds 페이로드 형태를 그대로 흉내낸다.
 BOUNDS = {
@@ -36,19 +43,28 @@ def _segment(segment_id: str, location_id: int | None = None) -> RoadSegment:
     )
 
 
-def test_max_rendered_segments_is_1500() -> None:
-    assert MAX_RENDERED_SEGMENTS == 1500
+def _tree(bounds_list) -> STRtree:
+    return STRtree([box(*bounds) for bounds in bounds_list])
+
+
+def test_max_rendered_segments_is_1000() -> None:
+    assert MAX_RENDERED_SEGMENTS == 1000
 
 
 class TestVisibleSegments:
+    """_visible_segments()는 R-tree(공간 인덱스)로 뷰포트와 겹치는 segment를 먼저
+    찾고, candidate_set으로 현재 borough 소속 여부만 확인한다(#421 후속) --
+    R-tree의 내부 순회 순서는 보장되지 않으므로, 반환 순서가 아니라 집합으로 검증한다.
+    """
+
     def test_returns_nothing_before_the_first_viewport_is_known(self):
         # 첫 렌더는 Leaflet이 bounds를 보고하기 전에 일어난다.
         segments = [_segment("1"), _segment("2")]
 
         visible, in_viewport_count = _visible_segments(
-            candidate_indices=[0, 1],
             road_segments=segments,
-            segment_bounds=[INSIDE, INSIDE],
+            spatial_index=_tree([INSIDE, INSIDE]),
+            candidate_set=frozenset({0, 1}),
             viewport=None,
             max_rendered=10,
         )
@@ -61,14 +77,30 @@ class TestVisibleSegments:
         bounds = [INSIDE, OUTSIDE, OUTSIDE, INSIDE, OUTSIDE]
 
         visible, in_viewport_count = _visible_segments(
-            candidate_indices=list(range(5)),
             road_segments=segments,
-            segment_bounds=bounds,
+            spatial_index=_tree(bounds),
+            candidate_set=frozenset(range(5)),
             viewport=VIEWPORT,
             max_rendered=10,
         )
 
-        assert [segment.segment_id for segment in visible] == ["0", "3"]
+        assert {segment.segment_id for segment in visible} == {"0", "3"}
+        assert in_viewport_count == 2
+
+    def test_none_candidate_set_means_everything_is_a_candidate(self):
+        # zone master가 없어 borough 개념 자체가 없는 스냅샷 전체 모드(#421 후속).
+        segments = [_segment(str(i)) for i in range(3)]
+        bounds = [INSIDE, OUTSIDE, INSIDE]
+
+        visible, in_viewport_count = _visible_segments(
+            road_segments=segments,
+            spatial_index=_tree(bounds),
+            candidate_set=None,
+            viewport=VIEWPORT,
+            max_rendered=10,
+        )
+
+        assert {segment.segment_id for segment in visible} == {"0", "2"}
         assert in_viewport_count == 2
 
     def test_a_borough_sized_selection_does_not_all_come_back(self):
@@ -78,9 +110,9 @@ class TestVisibleSegments:
         expected_in_view = borough_size // 1000
 
         visible, in_viewport_count = _visible_segments(
-            candidate_indices=list(range(borough_size)),
             road_segments=segments,
-            segment_bounds=bounds,
+            spatial_index=_tree(bounds),
+            candidate_set=frozenset(range(borough_size)),
             viewport=VIEWPORT,
             max_rendered=MAX_RENDERED_SEGMENTS,
         )
@@ -93,30 +125,63 @@ class TestVisibleSegments:
         segments = [_segment(str(i)) for i in range(10)]
 
         visible, in_viewport_count = _visible_segments(
-            candidate_indices=list(range(10)),
             road_segments=segments,
-            segment_bounds=[INSIDE] * 10,
+            spatial_index=_tree([INSIDE] * 10),
+            candidate_set=frozenset(range(10)),
             viewport=VIEWPORT,
             max_rendered=3,
         )
 
         assert in_viewport_count == 10
-        assert [segment.segment_id for segment in visible] == ["0", "1", "2"]
+        assert len(visible) == 3
 
-    def test_candidate_order_and_indices_outside_the_candidate_set_are_ignored(self):
+    def test_indices_outside_the_candidate_set_are_ignored(self):
         segments = [_segment(str(i)) for i in range(4)]
         bounds = [INSIDE, INSIDE, INSIDE, INSIDE]
 
         visible, in_viewport_count = _visible_segments(
-            candidate_indices=[2, 0],
             road_segments=segments,
-            segment_bounds=bounds,
+            spatial_index=_tree(bounds),
+            candidate_set=frozenset({0, 2}),
             viewport=VIEWPORT,
             max_rendered=10,
         )
 
-        assert [segment.segment_id for segment in visible] == ["2", "0"]
+        assert {segment.segment_id for segment in visible} == {"0", "2"}
         assert in_viewport_count == 2
+
+    def test_empty_candidate_set_returns_nothing(self):
+        # boroughs는 로드됐지만 아직 아무것도 선택 안 한 상태(#421 후속).
+        segments = [_segment("0")]
+
+        visible, in_viewport_count = _visible_segments(
+            road_segments=segments,
+            spatial_index=_tree([INSIDE]),
+            candidate_set=frozenset(),
+            viewport=VIEWPORT,
+            max_rendered=10,
+        )
+
+        assert visible == []
+        assert in_viewport_count == 0
+
+
+class TestCandidateSet:
+    def _borough(self, name: str) -> Borough:
+        return Borough(
+            name=name,
+            geometry={"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+            bounds=(0.0, 0.0, 1.0, 1.0),
+        )
+
+    def test_no_boroughs_means_everything_is_a_candidate(self):
+        assert _candidate_set(config=None, boroughs=[], borough=None) is None
+
+    def test_boroughs_present_but_none_selected_returns_an_empty_set(self):
+        result = _candidate_set(
+            config=None, boroughs=[self._borough("Manhattan")], borough=None
+        )
+        assert result == frozenset()
 
 
 class TestRenderMetrics:
@@ -248,3 +313,64 @@ class TestMapFragment:
         # st.rerun(scope="fragment")를 직접 부르면 안 된다.
         source = inspect.getsource(_sync_map_state)
         assert "st.rerun(" not in source
+
+    def test_render_map_wires_feature_group_to_add(self):
+        # base map은 pan/zoom에 안정적이어야 하므로 road layer는 별도
+        # FeatureGroup으로 만들어 st_folium에 feature_group_to_add로 넘긴다(#421).
+        source = inspect.getsource(app_module._render_map)
+        assert "build_base_map(" in source
+        assert "build_segment_feature_group(" in source
+        assert "feature_group_to_add=road_layer" in source
+
+    def test_render_map_still_fetches_scores_only_for_visible_segments(self):
+        source = inspect.getsource(app_module._render_map)
+        assert "if visible_segments:" in source
+        assert "_load_scores_cached(" in source
+
+    def test_render_map_reuses_the_feature_group_when_unchanged(self):
+        source = inspect.getsource(app_module._render_map)
+        assert "_segment_render_key(" in source
+
+
+class TestSegmentRenderKey:
+    def _score(self, segment_id: str, comfort_score: float) -> ComfortScore:
+        return ComfortScore(
+            segment_id=segment_id,
+            comfort_score=comfort_score,
+            confidence_score=0.9,
+            source="current",
+            weather_time="2026-08-24T00:00:00Z",
+        )
+
+    def test_identical_segments_and_scores_produce_the_same_key(self):
+        segments = [_segment("1"), _segment("2")]
+        scores = {"1": self._score("1", 90.0)}
+
+        key_a = _segment_render_key(join_road_segments_with_scores(segments, scores))
+        key_b = _segment_render_key(join_road_segments_with_scores(segments, scores))
+
+        assert key_a == key_b
+
+    def test_a_different_score_changes_the_key(self):
+        segments = [_segment("1")]
+
+        low = _segment_render_key(
+            join_road_segments_with_scores(segments, {"1": self._score("1", 10.0)})
+        )
+        high = _segment_render_key(
+            join_road_segments_with_scores(segments, {"1": self._score("1", 95.0)})
+        )
+
+        assert low != high
+
+    def test_a_different_segment_set_changes_the_key(self):
+        scores = {"1": self._score("1", 90.0)}
+
+        one = _segment_render_key(
+            join_road_segments_with_scores([_segment("1")], scores)
+        )
+        two = _segment_render_key(
+            join_road_segments_with_scores([_segment("1"), _segment("2")], scores)
+        )
+
+        assert one != two

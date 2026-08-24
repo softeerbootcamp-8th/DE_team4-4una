@@ -33,8 +33,9 @@ BOROUGH_MAP_ZOOM = 12
 ALL_BOROUGHS = "All boroughs"
 
 # viewport당 그리는(그리고 #414 이후로는 score 조회도 하는) segment 상한 —
-# 많이 축소하면 viewport가 여전히 borough 전체를 덮을 수 있다.
-MAX_RENDERED_SEGMENTS = 1500
+# 많이 축소하면 viewport가 여전히 borough 전체를 덮을 수 있다. serving API의
+# MAX_COMFORT_SCORE_BATCH_ITEMS와 값을 맞춰 배치 조회가 한 번의 요청으로 끝나게 한다(#421).
+MAX_RENDERED_SEGMENTS = 1000
 
 
 @dataclass(frozen=True, slots=True)
