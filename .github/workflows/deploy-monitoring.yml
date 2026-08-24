@@ -1,6 +1,6 @@
 # 모니터링 설정을 두 EC2에 배포한다.
 #
-# ci.yml이 변경된 경로를 보고 호출하며, 필요한 쪽만 배포된다.
+# 배포 호스트가 둘로 갈리므로 아래 select job이 변경 경로를 보고 필요한 쪽만 돌린다.
 #   exporters  -> Project EC2    (node-exporter, cAdvisor)
 #   monitoring -> Monitoring EC2 (Prometheus, Grafana)
 #
@@ -9,22 +9,87 @@
 name: Deploy Monitoring
 
 on:
-  workflow_call:
+  # infra/monitoring/statsd는 여기 없다. Airflow StatsD Exporter가 쓰는 것이라 아래
+  # rsync가 statsd/를 제외하고, 재기동은 deploy-orchestration.yml이 담당한다.
+  # README와 .env.example은 배포에 영향이 없어 하위 디렉터리를 명시한다.
+  push:
+    branches: [develop]
+    paths:
+      - 'infra/compose/monitoring.yaml'
+      - 'infra/compose/exporters.yaml'
+      - 'infra/monitoring/prometheus/**'
+      - 'infra/monitoring/grafana/**'
+      - '.github/workflows/deploy-monitoring.yml'
+  # 수동 실행에서는 경로 판정이 없으므로 어느 쪽을 돌릴지 직접 고른다.
+  workflow_dispatch:
     inputs:
       deploy-exporters:
+        description: Project EC2의 exporter를 배포한다
         type: boolean
-        default: false
+        default: true
       deploy-monitoring-stack:
+        description: Monitoring EC2의 Prometheus/Grafana를 배포한다
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  # 위 push 필터는 "이 워크플로를 띄울지"만 정한다. 두 호스트 중 어디에 배포할지는
+  # 여기서 다시 판정한다. 전에는 ci.yml의 select job이 하던 일이다.
+  select:
+    name: Select Targets
+    runs-on: ubuntu-latest
+    outputs:
+      exporters: ${{ steps.select.outputs.exporters }}
+      monitoring-stack: ${{ steps.select.outputs.monitoring-stack }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          # 워크플로 자신이 양쪽에 다 들어간 것은, 워크플로를 고쳤으면 두 배포가 다
+          # 돌아야 그 변경이 검증되기 때문이다.
+          filters: |
+            monitoring-stack:
+              - 'infra/compose/monitoring.yaml'
+              - 'infra/monitoring/prometheus/**'
+              - 'infra/monitoring/grafana/**'
+              - '.github/workflows/deploy-monitoring.yml'
+            exporters:
+              - 'infra/compose/exporters.yaml'
+              - '.github/workflows/deploy-monitoring.yml'
+
+      - name: Resolve targets
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          FILTER_EXPORTERS: ${{ steps.filter.outputs.exporters }}
+          FILTER_STACK: ${{ steps.filter.outputs.monitoring-stack }}
+          INPUT_EXPORTERS: ${{ inputs.deploy-exporters }}
+          INPUT_STACK: ${{ inputs.deploy-monitoring-stack }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            exporters="$INPUT_EXPORTERS"
+            stack="$INPUT_STACK"
+          else
+            exporters="$FILTER_EXPORTERS"
+            stack="$FILTER_STACK"
+          fi
+
+          echo "exporters=$exporters" >> "$GITHUB_OUTPUT"
+          echo "monitoring-stack=$stack" >> "$GITHUB_OUTPUT"
+          echo "배포 대상 — exporters: $exporters, monitoring-stack: $stack"
+
   exporters:
     name: Exporters (Project EC2)
-    if: inputs.deploy-exporters
+    needs: select
+    if: needs.select.outputs.exporters == 'true'
     runs-on: ubuntu-24.04-arm
     concurrency:
       group: deploy-monitoring-exporters
@@ -149,7 +214,8 @@ jobs:
 
   monitoring:
     name: Monitoring stack (Monitoring EC2)
-    if: inputs.deploy-monitoring-stack
+    needs: select
+    if: needs.select.outputs.monitoring-stack == 'true'
     runs-on: ubuntu-24.04-arm
     concurrency:
       group: deploy-monitoring-stack
