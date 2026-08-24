@@ -43,6 +43,7 @@ from airflow.sdk import DAG, TaskGroup, Variable
 from airflow.timetables.interval import CronDataIntervalTimetable
 from comfort_score_assets import STANDARD_SCORE_ASSET
 from emr_serverless import submit_batch_jobs_command
+from notifications import on_failure_callback, on_success_callback
 
 # standard_score TaskGroup의 두 task가 공유하는 Postgres 자격증명 driver_env.
 # 모듈 docstring의 "임시 방편" 설명 참고.
@@ -113,6 +114,45 @@ def _resolve_road_snapshot_date() -> str:
     return fallback
 
 
+def _report_processing_counts(
+    target_hour: str,
+    as_of: str,
+    quarantine_output_path: str,
+    feature_output_path: str,
+    hourly_comfort_output_path: str,
+) -> dict:
+    import datetime as dt
+
+    import psycopg2
+    from jobs.pipeline_counts import (
+        PostgresConfig,
+        count_standard_score_pipeline_outputs,
+    )
+
+    config = PostgresConfig.from_env()
+    connection = psycopg2.connect(**config.as_connect_kwargs())
+    try:
+        counts = count_standard_score_pipeline_outputs(
+            target_hour=dt.datetime.fromisoformat(target_hour),
+            as_of=dt.datetime.fromisoformat(as_of),
+            quarantine_output_path=quarantine_output_path,
+            feature_output_path=feature_output_path,
+            hourly_comfort_output_path=hourly_comfort_output_path,
+            connection=connection,
+        )
+    finally:
+        connection.close()
+
+    result = {
+        "quarantine_count": counts.quarantine_count,
+        "feature_count": counts.feature_count,
+        "hourly_comfort_score_count": counts.hourly_comfort_score_count,
+        "standard_segment_comfort_score_count": counts.standard_segment_comfort_score_count,
+    }
+    print(result)
+    return result
+
+
 with DAG(
     dag_id="standard_score_pipeline",
     description="sensor processing -> scoring -> standard 3단계 시간배치 파이프라인",
@@ -129,7 +169,9 @@ with DAG(
     default_args={
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
+        "on_failure_callback": on_failure_callback,
     },
+    on_success_callback=on_success_callback,
     tags=["standard-score-pipeline", "comfort-score"],
 ) as dag:
     with TaskGroup(group_id="sensor_processing") as sensor_processing:
@@ -269,4 +311,16 @@ with DAG(
         )
         run_standard_score >> validate_standard_score
 
-    sensor_processing >> hourly_scoring >> standard_score
+    report_processing_counts = PythonOperator(
+        task_id="report_processing_counts",
+        python_callable=_report_processing_counts,
+        op_kwargs={
+            "target_hour": "{{ data_interval_start.isoformat() }}",
+            "as_of": "{{ data_interval_end.isoformat() }}",
+            "quarantine_output_path": _CLEANSING_QUARANTINE_OUTPUT_PATH,
+            "feature_output_path": _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+            "hourly_comfort_output_path": _HOURLY_COMFORT_OUTPUT_PATH,
+        },
+    )
+
+    sensor_processing >> hourly_scoring >> standard_score >> report_processing_counts

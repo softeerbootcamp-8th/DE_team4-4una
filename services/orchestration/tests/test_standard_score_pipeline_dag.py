@@ -223,6 +223,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "hourly_scoring.validate_hourly_scoring",
         "standard_score.run_standard_score",
         "standard_score.validate_standard_score",
+        "report_processing_counts",
     }
 
 
@@ -287,7 +288,7 @@ def test_task_groups_follow_standard_score_pipeline_order():
     assert validate_standard_score.upstream_task_ids == {
         "standard_score.run_standard_score"
     }
-    assert validate_standard_score.downstream_task_ids == set()
+    assert validate_standard_score.downstream_task_ids == {"report_processing_counts"}
 
 
 def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
@@ -330,3 +331,32 @@ def test_validate_standard_score_emits_standard_score_asset():
 
     task = module.dag.get_task("standard_score.validate_standard_score")
     assert task.outlets == [STANDARD_SCORE_ASSET]
+
+
+def test_report_processing_counts_runs_after_standard_score_group():
+    module = _load_dag_module()
+
+    task = module.dag.get_task("report_processing_counts")
+    assert isinstance(task, PythonOperator)
+    assert task.python_callable is module._report_processing_counts
+    assert task.upstream_task_ids == {"standard_score.validate_standard_score"}
+
+
+def test_report_processing_counts_templates_the_same_paths_as_upstream_tasks():
+    module = _load_dag_module()
+
+    task = module.dag.get_task("report_processing_counts")
+    assert task.op_kwargs["quarantine_output_path"] == module._CLEANSING_QUARANTINE_OUTPUT_PATH
+    assert task.op_kwargs["feature_output_path"] == module._HOURLY_SEGMENT_FEATURE_OUTPUT_PATH
+    assert task.op_kwargs["hourly_comfort_output_path"] == module._HOURLY_COMFORT_OUTPUT_PATH
+    assert task.op_kwargs["target_hour"] == "{{ data_interval_start.isoformat() }}"
+    assert task.op_kwargs["as_of"] == "{{ data_interval_end.isoformat() }}"
+
+
+def test_dag_wires_shared_slack_notification_callbacks():
+    import notifications
+
+    module = _load_dag_module()
+
+    assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
+    assert module.dag.on_success_callback is notifications.on_success_callback
