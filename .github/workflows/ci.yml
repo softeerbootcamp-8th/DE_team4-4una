@@ -10,9 +10,12 @@
 name: CI
 
 on:
-  # develop, main 브랜치로 향하는 PR에서 실행한다.
+  # develop, main 브랜치로 향하는 PR에서 실행한다. merge를 막는 게이트는 이쪽이다.
   pull_request:
     branches: [develop, main]
+  # merge된 뒤에도 한 번 더 돈다. 각각 통과한 PR 둘이 합쳐져서 깨지는 경우를 다음
+  # PR이 열릴 때까지 모르지 않기 위한 알람이다. 배포를 막지는 못한다 — deploy-*.yml이
+  # 같은 push를 따로 받아 병렬로 돌기 때문에, 여기가 실패해도 배포는 진행된다.
   push:
     branches: [develop, main]
 
@@ -33,9 +36,6 @@ jobs:
       # test matrix가 그대로 쓰는 {name, pkg, paths} 배열
       targets: ${{ steps.select.outputs.targets }}
       workspace: ${{ steps.filter.outputs.workspace }}
-      # 모니터링 배포는 호스트가 둘로 갈리므로 각각 따로 판정한다.
-      monitoring-stack: ${{ steps.filter.outputs.monitoring-stack }}
-      exporters: ${{ steps.filter.outputs.exporters }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,18 +83,6 @@ jobs:
             # 모든 Python 변경이 승격되어 버린다.
             python:
               - '**/*.py'
-            # 모니터링 배포 대상. Prometheus/Grafana는 Monitoring EC2, exporter는
-            # Project EC2로 가므로 필터를 나눠 필요한 쪽만 배포한다. 워크플로 자신이
-            # 양쪽에 다 들어간 것은, 워크플로를 고쳤으면 두 배포가 다 돌아야 그 변경이
-            # 검증되기 때문이다.
-            monitoring-stack:
-              - 'infra/compose/monitoring.yaml'
-              - 'infra/monitoring/prometheus/**'
-              - 'infra/monitoring/grafana/**'
-              - '.github/workflows/deploy-monitoring.yml'
-            exporters:
-              - 'infra/compose/exporters.yaml'
-              - '.github/workflows/deploy-monitoring.yml'
 
       # 필터 이름을 (uv 패키지, pytest 경로) 쌍으로 바꾼다.
       #
@@ -268,77 +256,3 @@ jobs:
                 ;;
             esac
           done
-
-  # CI가 통과한 커밋만 배포한다.
-  #
-  # 선택적 CI job(test, workspace)이 skipped되어도
-  # CI Passed가 성공했다면 deploy job은 실행한다.
-  deploy-serving-api:
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop'
-    uses: ./.github/workflows/deploy-serving-api.yml
-    permissions:
-      contents: read
-      id-token: write
-    secrets: inherit
-
-  deploy-kafka:
-    needs: ci-passed
-    if: >-
-      always() &&
-      needs.ci-passed.result == 'success' &&
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main'
-    uses: ./.github/workflows/deploy-kafka.yml
-    permissions:
-      contents: read
-    secrets: inherit
-
-  deploy-batch-jobs:
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop'
-    uses: ./.github/workflows/deploy-batch-jobs.yml
-    permissions:
-      contents: read
-      id-token: write
-    secrets: inherit
-
-  deploy-orchestration:
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop'
-    uses: ./.github/workflows/deploy-orchestration.yml
-    permissions:
-      contents: read
-      id-token: write
-    secrets: inherit
-
-  deploy-stream-processor:
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop'
-    uses: ./.github/workflows/deploy-stream-processor.yml
-    permissions:
-      contents: read
-      id-token: write
-    secrets: inherit
-
-  # 다른 배포와 달리 경로 판정 결과가 필요해 select에 의존한다. 바깥 if는 job 자체를
-  # 띄울지 정하고, with로 넘긴 두 값이 안쪽에서 어느 호스트에 배포할지 정한다.
-  # 서드파티 이미지만 쓰므로 id-token(OIDC) 권한은 필요하지 않다.
-  deploy-monitoring:
-    needs: select
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/develop' &&
-      (needs.select.outputs.monitoring-stack == 'true' ||
-       needs.select.outputs.exporters == 'true')
-    uses: ./.github/workflows/deploy-monitoring.yml
-    with:
-      deploy-exporters: ${{ needs.select.outputs.exporters == 'true' }}
-      deploy-monitoring-stack: ${{ needs.select.outputs.monitoring-stack == 'true' }}
-    permissions:
-      contents: read
-    secrets: inherit

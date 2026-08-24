@@ -1,10 +1,19 @@
 # EC2에 Kafka Compose 설정을 동기화하고 broker와 필수 topic을 준비한다.
-# ci.yml이 자동 배포 시 호출하는 reusable workflow다.
+#
+# 다른 배포와 달리 main 기준이다. broker를 건드리면 스트림 전체가 멈추므로 develop
+# 병합만으로는 반영하지 않는다. CI는 branch protection의 required status check
+# ("CI Passed")이 main으로 향하는 PR에서 보장한다.
 
 name: Deploy Kafka
 
 on:
-  workflow_call:
+  # 고정 이미지(apache/kafka)를 쓰므로 배포에 영향을 주는 것은 compose 설정뿐이다.
+  push:
+    branches: [main]
+    paths:
+      - 'infra/compose/kafka.yaml'
+      - '.github/workflows/deploy-kafka.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -1,10 +1,23 @@
-# main에 들어간 Batch Jobs 이미지를 ECR에 배포하고
+# develop에 들어간 Batch Jobs 이미지를 ECR에 배포하고
 # EMR Serverless Application이 새 이미지를 사용하도록 갱신한다.
+#
+# CI를 기다리지 않는다. develop 병합은 branch protection의 required status check
+# ("CI Passed")을 통과해야만 가능하므로, develop에 올라온 시점에 이미 검증된 커밋이다.
 
 name: Deploy Batch Jobs
 
 on:
-  workflow_call:
+  # 이미지에 실제로 들어가는 경로만 본다. 이미지는 EMR Serverless가 pull하므로
+  # EC2에는 쌓이지 않는다.
+  push:
+    branches: [develop]
+    paths:
+      - 'services/batch-jobs/**'
+      - 'libs/de4-core/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/deploy-batch-jobs.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

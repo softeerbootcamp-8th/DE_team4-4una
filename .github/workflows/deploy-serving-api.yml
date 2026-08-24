@@ -1,7 +1,7 @@
-# main에 들어간 커밋을 serving-api 컨테이너로 배포한다.
+# develop에 들어간 커밋을 serving-api 컨테이너로 배포한다.
 #
-# ci.yml이 CI 통과 후 호출하는 reusable workflow다. 직접 트리거되지 않으며,
-# main push 여부 판정은 호출하는 쪽에서 한다.
+# CI를 기다리지 않는다. develop 병합은 branch protection의 required status check
+# ("CI Passed")을 통과해야만 가능하므로, develop에 올라온 시점에 이미 검증된 커밋이다.
 #
 # 순서: 이미지 빌드 -> ECR push -> SSH로 EC2에 배포 스크립트 전송 -> 결과 확인.
 # 컨테이너 교체와 health 확인, 실패 시 되돌리기는 인스턴스에서 실행되는
@@ -13,9 +13,21 @@
 name: Deploy Serving API
 
 on:
-  # ci.yml에서 호출된다. workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가 되어,
-  # main으로 제한한 OIDC trust policy와 어긋난다.
-  workflow_call:
+  # 이미지에 실제로 들어가는 경로만 본다. Dockerfile이 COPY . . 뒤에
+  # `uv sync --package serving-api`를 하므로 산출물을 바꾸는 것은 이 서비스와 공유
+  # 코드뿐이다. 공유 경로가 바뀌면 다른 서비스 배포도 함께 도는 것이 정상이다.
+  #
+  # push로 받는다. workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가 되어,
+  # 브랜치로 제한한 OIDC trust policy와 어긋난다.
+  push:
+    branches: [develop]
+    paths:
+      - 'services/serving-api/**'
+      - 'libs/de4-core/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/deploy-serving-api.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
