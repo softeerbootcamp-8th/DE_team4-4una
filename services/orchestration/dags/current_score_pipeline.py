@@ -10,6 +10,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG, AssetAny
 from assets import ZONE_WEATHER_ASSET
 from comfort_score_assets import STANDARD_SCORE_ASSET
+from notifications import on_failure_callback, on_success_callback
 
 
 def _changed_zones_only(triggering_asset_events) -> bool:
@@ -24,21 +25,21 @@ def _changed_zones_only(triggering_asset_events) -> bool:
     return not triggering_asset_events.get(STANDARD_SCORE_ASSET, [])
 
 
-def _run_current_score(triggering_asset_events) -> None:
+def _run_current_score(triggering_asset_events) -> dict:
     # dag-processor/webserver에는 마운트되지 않아 task 콜백 안에서 지연 import한다.
     from jobs.current_score import run_from_env
 
     changed_zones_only = _changed_zones_only(triggering_asset_events)
     summary = run_from_env(changed_zones_only=changed_zones_only)
-    print(
-        {
-            "changed_zones_only": changed_zones_only,
-            "zone_count": summary.zone_count,
-            "upserted_count": summary.upserted_count,
-            "skipped_unzoned_count": summary.skipped_unzoned_count,
-            "quarantined_count": summary.quarantined_count,
-        }
-    )
+    result = {
+        "changed_zones_only": changed_zones_only,
+        "zone_count": summary.zone_count,
+        "upserted_count": summary.upserted_count,
+        "skipped_unzoned_count": summary.skipped_unzoned_count,
+        "quarantined_count": summary.quarantined_count,
+    }
+    print(result)
+    return result
 
 
 with DAG(
@@ -53,7 +54,9 @@ with DAG(
     default_args={
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),
+        "on_failure_callback": on_failure_callback,
     },
+    on_success_callback=on_success_callback,
     tags=["current-score-pipeline", "comfort-score"],
 ) as dag:
     run_current_score = PythonOperator(
