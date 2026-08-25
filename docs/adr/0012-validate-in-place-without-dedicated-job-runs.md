@@ -249,3 +249,6 @@ fail 정책, at-rest `data_quality_audit` DAG 분리. 이 ADR은 ADR-0004의 "Ai
 - 개정 대상: ADR-0004의 "Airflow 연결" 및 Gold 조회 경로 항목
 - 베이스라인: `docs/perf/2026-08-25-comfort-score-pipeline-baseline.md` (#460, #462)
 - 유사 선례: ADR-0006 — 동일 배치 흐름 안의 중간 영속 경계를 제거한 결정
+- 임계치 변경: 2026-08-26 `quarantine_rate` 상한을 0.05 → 0.1로 상향한다(#517).
+  2026-08-25 16:00 UTC 실행에서 실측 격리율 5.28%(격리 442,577 / 입력 8,387,375,
+  전량 클렌징 리젝트)로 hard fail했다. 리젝트 사유 분포 분석 전의 잠정 조치다.

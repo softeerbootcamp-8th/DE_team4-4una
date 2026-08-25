@@ -89,6 +89,7 @@ class TestLoadExpectationSuite:
 
         assert suite.name == "sensor_processing_quarantine_rate_suite"
         assert len(suite.expectations) == 1
+        assert suite.expectations[0].max_value == 0.1
 
 
 class TestRunSensorProcessingValidation:
@@ -199,7 +200,7 @@ class TestRunSensorProcessingValidation:
         config = self.config(tmp_path)
         features_df = self.feature_rows_df(spark, [self.feature_row(sample_count=10)])
         write_hourly_segment_features(spark, features_df, config.feature_output_path, TARGET_HOUR, "run-1")
-        # rate = 5 / (5 + 10) ≈ 0.33, suite의 max_value(0.05)를 넘는다.
+        # rate = 5 / (5 + 10) ≈ 0.33, suite의 max_value(0.1)를 넘는다.
         quarantine_df = self.quarantine_rows_df(spark, [self.quarantine_row() for _ in range(5)])
         write_hourly_quarantine(spark, quarantine_df, config.quarantine_output_path, TARGET_HOUR, "run-1")
 

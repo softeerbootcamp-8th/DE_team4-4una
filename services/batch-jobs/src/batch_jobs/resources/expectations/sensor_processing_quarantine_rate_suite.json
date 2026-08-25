@@ -3,7 +3,7 @@
     {
       "kwargs": {
         "column": "quarantine_rate",
-        "max_value": 0.05,
+        "max_value": 0.1,
         "min_value": 0.0
       },
       "meta": {},
