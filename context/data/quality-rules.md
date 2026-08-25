@@ -112,10 +112,11 @@ conservation invariant is reframed around those two:
 
 ## Hourly comfort score quality (Silver3)
 
-`hourly_comfort_score` is the `run_hourly_scoring` output: a full recompute of
-every historical hour from `hourly_segment_features`, overwritten in place on
-each run (no hour partitioning, unlike `hourly_segment_features`). Validation
-therefore checks the current output in full rather than a single-hour slice.
+`hourly_comfort_score` is the `run_hourly_scoring` output, partitioned by
+`data_period_date=YYYY-MM-DD/hour=HH` exactly like `hourly_segment_features`
+(issue #469). Each run scores one Silver2 hour partition and replaces the
+matching Silver3 partition, so validation scopes to that partition rather than
+the whole table.
 
 - **Directional score ranges**: `vertical_score`, `longitudinal_score`, and
   `lateral_score` must fall between 0 and 100 inclusive. Implemented as a GX
@@ -124,16 +125,28 @@ therefore checks the current output in full rather than a single-hour slice.
   `resources/hourly_comfort.yaml`'s documented constraint that
   `comfort_score/loader.py::_select_latest_scoring_version` compares versions as
   a dot-separated integer array. Same suite as above.
-- **Zero-sample rate**: the fraction of rows with `sample_count = 0` must stay
-  at or below 5% (provisional threshold, mirrors the `sensor_processing`
-  quarantine-rate precedent — revisit once a real distribution is observed).
-  Implemented as a GX Expectation on a one-row `zero_sample_rate` DataFrame
-  (`resources/expectations/hourly_comfort_score_zero_sample_rate_suite.json`).
-- All of the above run in `batch_jobs.hourly_scoring_validation` (issue #249,
-  ADR-0004), as the `validate_hourly_scoring` task right after
-  `run_hourly_scoring`. Schema and required-column invariants remain hard
-  invariants enforced by `HOURLY_COMFORT_SCORE_SCHEMA` at write time (ADR-0004:
-  hard invariants stay in code, not GX).
+- Both run in `batch_jobs.hourly_scoring_validation` (issue #249, ADR-0004), as
+  the `validate_hourly_scoring` task right after `run_hourly_scoring`. Schema
+  and required-column invariants remain hard invariants enforced by
+  `HOURLY_COMFORT_SCORE_SCHEMA` at write time (ADR-0004: hard invariants stay
+  in code, not GX).
+
+A zero-sample-rate expectation used to live here. It was removed in #469: the
+`eligible` filter in `hourly_comfort.py` only admits rows with
+`sample_count > 0`, so the rate's numerator was always zero and the check could
+never fail. The meaningful equivalent would be a rejection rate
+(`rejected / (scored + rejected)`), mirroring the `sensor_processing`
+quarantine-rate precedent; it is not implemented yet.
+
+**Mixed `scoring_version` inside the standard score window.** Before #469 every
+run recomputed the whole table, so bumping `scoring_version` silently reunified
+all history on the next run. With hour partitions that side effect is gone: a
+bump applies only to hours scored after it, and the 168-hour window
+`run_standard_score` reads can hold more than one version. This is accepted —
+`N` (qualifying hours) and `Confidence` stay intact and the change phases in
+over seven days instead of landing as a cliff. See
+`docs/superpowers/specs/2026-08-25-hourly-comfort-score-partitioning-design.md`
+for the alternatives considered and the path to an explicit backfill.
 
 ## Zone weather quality (Silver/Serving)
 

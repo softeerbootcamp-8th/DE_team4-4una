@@ -178,6 +178,54 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
     아니다). 로컬 기본값은 `http://localhost:8080`, 운영(EC2)에서는 실제
     접속 URL로 채운다.
 
+## hourly_comfort_score 파티션 전환 (#469) — 배포 시 1회
+
+`hourly_comfort_score`는 원래 파티션 없이 루트에 평면으로 쌓였다. 파티션 writer를
+배포하기 전에 기존 평면 데이터를 루트에서 치워야 한다 — 평면 파일과 파티션
+디렉터리가 한 루트에 공존하면 `spark.read.parquet()`가
+`Conflicting directory structures`로 실패한다.
+
+재파티션하지 않고 reference 버킷으로 옮긴다. 삭제가 아니라 이동이므로 판단이
+틀렸을 때 되꺼낼 수 있다.
+
+```bash
+# 1. standard_score_pipeline DAG 일시정지 (웹 UI 또는 CLI)
+
+# 2. Silver3 평면 데이터를 아카이브로 이동
+aws s3 mv --recursive \
+    s3://<lake>/silver/hourly_comfort_score/ \
+    s3://<reference>/raw/comfort_score_archive/hourly_comfort_score/
+
+# 3. quarantine도 같이 (읽는 곳은 없지만 같은 문제를 갖는다)
+aws s3 mv --recursive \
+    s3://<lake>/quarantine/hourly_comfort_score/ \
+    s3://<reference>/raw/comfort_score_archive/quarantine_hourly_comfort_score/
+
+# 4. 코드 배포 (파티션 writer/reader)
+
+# 5. DAG 재개, 첫 실행 확인
+```
+
+**4단계를 2~3단계보다 먼저 하면 안 된다.** 구 writer가 평면 파일을 다시 만들어
+같은 문제가 재발한다.
+
+### 전환 후 168시간은 점수가 눌린다
+
+이동 직후 `run_standard_score`의 168시간 윈도우에는 방금 채점한 1시간만 들어 있다.
+
+```
+N(qualifying hours): 1
+Confidence = N / (N + k) = 1 / 11 ≈ 0.091   (k=10, comfort_score.yaml)
+Score = (N·observed + k·mu) / (N + k)       → 91%가 모집단 평균
+```
+
+구간 간 점수 차이가 사실상 사라진 상태가 윈도우를 다시 채울 때까지 이어진다.
+`current_segment_comfort_score`도 `standard_segment_comfort_score`를 그대로 읽어
+날씨 보정만 얹으므로(`jobs/current_score.py`) 같은 영향을 받는다. 개발 단계라
+감수하기로 한 판단이다 — 배경은
+`docs/superpowers/specs/2026-08-25-hourly-comfort-score-partitioning-design.md`
+참고.
+
 ## standard_score_pipeline — EMR Serverless 실행 (#292, ADR-0001)
 
 `standard_score_pipeline`은 UTC 기준 매시 정각에 `[logical_date, logical_date + 1시간)`

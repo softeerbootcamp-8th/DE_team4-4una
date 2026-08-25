@@ -261,6 +261,8 @@ with DAG(
                 "score-hourly-comfort",
                 "--run-id",
                 "{{ run_id }}",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
                 "--input-path",
                 _HOURLY_COMFORT_INPUT_PATH,
                 "--output-path",
@@ -269,15 +271,16 @@ with DAG(
                 _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
             ],
         )
-        # validate_hourly_scoring은 run_hourly_scoring이 방금 overwrite한
-        # hourly_comfort_score 전체(풀 리컴퓨트 결과)를 읽으므로(#249, ADR-0004),
-        # 같은 Airflow Variable(HOURLY_COMFORT_OUTPUT_PATH)을 재사용해 항상 같은
-        # 경로를 가리키게 한다. sensor_processing과 달리 hour 파티션이 없어
-        # --target-hour는 필요 없다.
+        # validate_hourly_scoring은 run_hourly_scoring이 방금 쓴 target_hour 파티션만
+        # 읽으므로(#249, ADR-0004, #469), 같은 Airflow Variable
+        # (HOURLY_COMFORT_OUTPUT_PATH)과 같은 시각 템플릿을 재사용해 두 task가 항상
+        # 같은 파티션을 가리키게 한다 — sensor_processing과 같은 방식이다.
         validate_hourly_scoring = submit_batch_jobs_command(
             task_id="validate_hourly_scoring",
             entry_point_arguments=[
                 "validate-hourly-scoring",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
                 "--output-path",
                 _HOURLY_COMFORT_OUTPUT_PATH,
             ],

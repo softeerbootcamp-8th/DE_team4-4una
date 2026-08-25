@@ -38,14 +38,40 @@ def load_hourly_comfort_score_for_gold(
       운영 S3 루트(`s3://...`)를 함수 수정 없이 그대로 바꿔 끼울 수 있는
       파라미터다 (join_uri가 두 스킴을 모두 처리한다).
     - 매 호출마다 [as_of - window_hours, as_of) 구간 전체를 다시 읽는다 (증분 없음).
+    - 루트를 읽되 파티션 컬럼으로 먼저 잘라, 윈도우 밖 파티션은 파일을 열지 않는다(#469).
     """
     comfort_score_uri = join_uri(data_lake_uri, "silver", "hourly_comfort_score")
 
     comfort_score_df = _read_validated_parquet(
         spark, comfort_score_uri, HOURLY_COMFORT_SCORE_SCHEMA
     )
-    windowed = _filter_window_hours(comfort_score_df, as_of, window_hours)
+    pruned = _filter_window_partitions(comfort_score_df, as_of, window_hours)
+    windowed = _filter_window_hours(pruned, as_of, window_hours)
     return _select_latest_scoring_version(windowed)
+
+
+def _filter_window_partitions(
+    df: DataFrame, as_of: datetime, window_hours: int
+) -> DataFrame:
+    """파티션 컬럼(`data_period_date`, `hour`)만으로 `[start, as_of)`를 정확히 자른다.
+
+    데이터 컬럼(`data_period_start`)에만 조건을 걸면 DataFilters로 들어가 모든 파일을
+    연 뒤에 걸러진다. 파티션 컬럼에 걸어야 Spark가 디렉터리 단위로 먼저 쳐낸다.
+
+    날짜 범위로만 자르면 양 끝 날의 시(hour)는 못 걸러 최대 24시간을 더 읽으므로,
+    경계 날짜에서는 hour까지 비교한다. `hour=09` 경로를 Spark가 정수로 추론하므로
+    비교 대상도 int다.
+    """
+    start = as_of - timedelta(hours=window_hours)
+    date_column = F.col("data_period_date")
+    hour_column = F.col("hour")
+    at_or_after_start = (date_column > F.lit(start.date())) | (
+        (date_column == F.lit(start.date())) & (hour_column >= F.lit(start.hour))
+    )
+    before_as_of = (date_column < F.lit(as_of.date())) | (
+        (date_column == F.lit(as_of.date())) & (hour_column < F.lit(as_of.hour))
+    )
+    return df.filter(at_or_after_start & before_as_of)
 
 
 def _read_validated_parquet(spark: SparkSession, uri: str, expected: StructType) -> DataFrame:
@@ -81,6 +107,10 @@ def _filter_window_hours(df: DataFrame, as_of: datetime, window_hours: int) -> D
 
     상한을 배타적으로 둔다: as_of는 "지금"을 뜻하고, 그 시각에 시작하는 시간은
     아직 끝나지 않았으므로 이번 윈도우에 포함하지 않는다.
+
+    `_filter_window_partitions`가 이미 파티션 단위로 잘랐지만, 파티션 경로 값과 행의
+    `data_period_start`가 어긋난 경우(수동 조작, 잘못된 백필)를 막는 안전망으로 남긴다.
+    이미 프루닝된 뒤라 비용은 미미하다.
     """
     window_start = as_of - timedelta(hours=window_hours)
     return df.filter(

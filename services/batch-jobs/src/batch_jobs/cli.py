@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     cleanse_parser.add_argument("--map-matching-config-path", type=Path)
 
     score_parser = subparsers.add_parser("score-hourly-comfort")
+    # 없으면 어느 시간대를 처리할지 결정할 수 없다. 기본값을 두면 DAG 배선이 빠졌을 때
+    # 조용히 엉뚱한 시간대를 처리하므로 명시적으로 실패시킨다.
+    score_parser.add_argument(
+        "--target-hour", type=datetime.fromisoformat, required=True
+    )
     score_parser.add_argument("--input-path")
     score_parser.add_argument("--output-path")
     score_parser.add_argument("--rejected-output-path")
@@ -83,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate_sensor_processing_parser.add_argument("--quarantine-output-path")
 
     validate_hourly_scoring_parser = subparsers.add_parser("validate-hourly-scoring")
+    validate_hourly_scoring_parser.add_argument(
+        "--target-hour", type=datetime.fromisoformat, required=True
+    )
     validate_hourly_scoring_parser.add_argument("--output-path")
 
     validate_standard_score_parser = subparsers.add_parser("validate-standard-score")
@@ -224,7 +232,9 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
         spark = build_spark_session()
     try:
         with perf_phase(logger, f"hourly_scoring.{_JOB_PHASE}"):
-            summary = run_hourly_comfort_job(spark, config, run_id, datetime.now(UTC))
+            summary = run_hourly_comfort_job(
+                spark, config, run_id, datetime.now(UTC), arguments.target_hour
+            )
         print(
             json.dumps(
                 {
@@ -404,7 +414,6 @@ def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
     config = HourlyScoringValidationConfig(
         score_output_path=arguments.output_path or defaults.score_output_path,
         score_ranges_suite_path=defaults.score_ranges_suite_path,
-        zero_sample_rate_suite_path=defaults.zero_sample_rate_suite_path,
     )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -412,13 +421,14 @@ def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
         spark = build_spark_session()
     try:
         with perf_phase(logger, f"validate_hourly_scoring.{_JOB_PHASE}"):
-            summary = run_hourly_scoring_validation(spark, config)
+            summary = run_hourly_scoring_validation(
+                spark, config, arguments.target_hour
+            )
         print(
             json.dumps(
                 {
+                    "target_hour": summary.target_hour.isoformat(),
                     "row_count": summary.row_count,
-                    "zero_sample_count": summary.zero_sample_count,
-                    "zero_sample_rate": summary.zero_sample_rate,
                     "success": summary.success,
                 },
                 sort_keys=True,

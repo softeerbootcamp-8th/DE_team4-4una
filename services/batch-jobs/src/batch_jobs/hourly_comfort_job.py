@@ -17,6 +17,10 @@ from batch_jobs.comfort_scoring_config import (
     load_hourly_scoring_config,
 )
 from batch_jobs.hourly_comfort import calculate_hourly_comfort_scores
+from batch_jobs.hourly_comfort_storage import write_hourly_comfort_partition
+from batch_jobs.hourly_segment_feature_storage import (
+    hour_output_path as feature_hour_path,
+)
 from batch_jobs.schemas import (
     HOURLY_COMFORT_SCORE_SCHEMA,
     HOURLY_SEGMENT_FEATURE_SCHEMA,
@@ -74,11 +78,12 @@ def run_hourly_comfort_job(
     config: HourlyComfortJobConfig,
     run_id: str,
     processed_at: datetime,
+    target_hour: datetime,
 ) -> HourlyComfortJobSummary:
-    """Read Silver2, calculate directional scores, and overwrite one output slice."""
+    """Score one Silver2 hour partition and replace the matching Silver3 partition."""
     _validate_job_config(config)
     features = spark.read.schema(HOURLY_SEGMENT_FEATURE_SCHEMA).parquet(
-        config.feature_input_path
+        feature_hour_path(config.feature_input_path, target_hour)
     )
     scoring_config = load_hourly_scoring_config(config.scoring_config_path)
     result = calculate_hourly_comfort_scores(
@@ -90,15 +95,42 @@ def run_hourly_comfort_job(
     rejected = result.rejected.persist(StorageLevel.MEMORY_AND_DISK)
 
     try:
-        summary = HourlyComfortJobSummary(scored.count(), rejected.count())
-        # 같은 시간 범위를 재실행해도 행이 누적되지 않도록 해당 출력 경로를 교체한다
-        scored.write.mode("overwrite").parquet(config.score_output_path)
-        rejected.write.mode("overwrite").parquet(config.rejected_output_path)
+        # 재실행해도 행이 누적되지 않도록 해당 시간 파티션만 교체한다(ADR-0011).
+        score_result = write_hourly_comfort_partition(
+            spark,
+            scored,
+            config.score_output_path,
+            target_hour,
+            run_id,
+            HOURLY_COMFORT_SCORE_SCHEMA,
+        )
+        # rejected에는 선언된 스키마 상수가 없다(hourly_comfort.py가 즉석에서 만든다).
+        # writer가 read-back에 쓸 스키마가 필요해 자기 것을 그대로 넘긴다.
+        # 격리 대상이 하나도 없는 것이 정상이므로 빈 결과를 허용한다 — 점수 출력과 달리
+        # 0행이 이상 신호가 아니다.
+        rejected_result = write_hourly_comfort_partition(
+            spark,
+            rejected,
+            config.rejected_output_path,
+            target_hour,
+            run_id,
+            rejected.schema,
+            allow_empty=True,
+        )
+        summary = HourlyComfortJobSummary(
+            score_result.row_count, rejected_result.row_count
+        )
     finally:
         scored.unpersist()
         rejected.unpersist()
 
-    _log_summary(config, run_id=run_id, processed_at=processed_at, summary=summary)
+    _log_summary(
+        config,
+        run_id=run_id,
+        processed_at=processed_at,
+        target_hour=target_hour,
+        summary=summary,
+    )
     return summary
 
 
@@ -107,19 +139,21 @@ def _log_summary(
     *,
     run_id: str,
     processed_at: datetime,
+    target_hour: datetime,
     summary: HourlyComfortJobSummary,
 ) -> None:
-    """이번 실행이 어느 경로를, 어느 시각 기준으로 처리했는지 한 줄로 남긴다(#406).
+    """이번 실행이 어느 시간대를, 어느 경로에서 처리했는지 한 줄로 남긴다(#406, #469).
 
-    이 job은 target_hour 인자를 따로 받지 않는다 — 대상 시간대는 Airflow가
-    실행마다 템플릿으로 갈아끼우는 feature_input_path에 들어 있으므로, 경로를
-    남기면 어느 시간대였는지 함께 추적된다. S3 경로는 자격증명이 아니라 로그에
-    남겨도 안전하다.
+    이전에는 target_hour 인자가 없어 "대상 시간대는 Airflow가 템플릿으로 갈아끼우는
+    feature_input_path에 들어 있다"고 설명했지만 사실이 아니었다 — DAG는 시간 템플릿이
+    없는 고정 Variable을 넘겼다. 이제 target_hour를 직접 받아 그대로 남긴다. S3 경로는
+    자격증명이 아니라 로그에 남겨도 안전하다.
     """
     logger.info(
-        "hourly comfort scoring finished run_id=%s processed_at=%s "
+        "hourly comfort scoring finished run_id=%s target_hour=%s processed_at=%s "
         "input=%s score_output=%s rejected_output=%s scored=%d rejected=%d",
         run_id,
+        target_hour.isoformat(),
         processed_at.isoformat(),
         config.feature_input_path,
         config.score_output_path,

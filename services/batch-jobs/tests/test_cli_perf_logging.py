@@ -9,6 +9,7 @@ Job Run 총시간(EMR GetJobRun)만으로는 Spark 세션을 띄우는 데 쓴 �
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from dataclasses import dataclass
@@ -20,9 +21,8 @@ from de4_core import PERF_LOG_PREFIX
 
 @dataclass(frozen=True)
 class FakeValidationSummary:
+    target_hour: dt.datetime = dt.datetime(2026, 8, 25, 2, tzinfo=dt.UTC)
     row_count: int = 10
-    zero_sample_count: int = 0
-    zero_sample_rate: float = 0.0
     success: bool = True
 
 
@@ -54,7 +54,7 @@ def _fake_hourly_scoring_validation(monkeypatch):
     monkeypatch.setattr(
         hourly_scoring_validation,
         "run_hourly_scoring_validation",
-        lambda spark, config: FakeValidationSummary(),
+        lambda spark, config, target_hour: FakeValidationSummary(),
     )
 
 
@@ -62,7 +62,15 @@ def test_cli_logs_spark_session_build_and_job_separately(
     caplog, capsys, _fake_hourly_scoring_validation
 ):
     with caplog.at_level(logging.INFO):
-        main(["validate-hourly-scoring", "--output-path", "s3://lake/scores"])
+        main(
+            [
+                "validate-hourly-scoring",
+                "--target-hour",
+                "2026-08-25T02:00:00+00:00",
+                "--output-path",
+                "s3://lake/scores",
+            ]
+        )
 
     capsys.readouterr()
     payloads = _perf_payloads(caplog)
@@ -173,7 +181,15 @@ def test_score_hourly_comfort_logs_session_and_job(caplog, capsys, monkeypatch):
     )
 
     with caplog.at_level(logging.INFO):
-        main(["score-hourly-comfort", "--run-id", "run-1"])
+        main(
+            [
+                "score-hourly-comfort",
+                "--run-id",
+                "run-1",
+                "--target-hour",
+                "2026-08-25T02:00:00+00:00",
+            ]
+        )
 
     capsys.readouterr()
     assert set(_perf_payloads(caplog)) == {

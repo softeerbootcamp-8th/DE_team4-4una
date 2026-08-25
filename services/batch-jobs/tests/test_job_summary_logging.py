@@ -31,26 +31,31 @@ _TARGET_HOUR = dt.datetime(2026, 8, 24, 4, tzinfo=dt.UTC)
 
 
 def test_hourly_comfort_summary_logs_paths_and_time_reference(caplog):
+    # 경로는 시간대를 담지 않는 루트다. 대상 시간대는 target_hour로 따로 넘어온다(#469).
     config = HourlyComfortJobConfig(
-        feature_input_path="s3://lake/silver/hourly_segment_features/hour=2026-08-24T04",
-        score_output_path="s3://lake/silver/hourly_comfort_score/hour=2026-08-24T04",
-        rejected_output_path="s3://lake/quarantine/hourly_comfort_score/hour=2026-08-24T04",
+        feature_input_path="s3://lake/silver/hourly_segment_features",
+        score_output_path="s3://lake/silver/hourly_comfort_score",
+        rejected_output_path="s3://lake/quarantine/hourly_comfort_score",
         scoring_config_path=Path("config/hourly_scoring.yaml"),
     )
+    processed_at = dt.datetime(2026, 8, 24, 5, 12, tzinfo=dt.UTC)
 
     with caplog.at_level(logging.INFO):
         log_hourly_comfort_summary(
             config,
             run_id="run-1",
-            processed_at=_TARGET_HOUR,
+            processed_at=processed_at,
+            target_hour=_TARGET_HOUR,
             summary=HourlyComfortJobSummary(scored_count=10, rejected_count=2),
         )
 
     message = caplog.text
-    assert "s3://lake/silver/hourly_segment_features/hour=2026-08-24T04" in message
-    assert "s3://lake/silver/hourly_comfort_score/hour=2026-08-24T04" in message
-    assert "s3://lake/quarantine/hourly_comfort_score/hour=2026-08-24T04" in message
-    assert "2026-08-24T04:00:00+00:00" in message
+    assert "s3://lake/silver/hourly_segment_features" in message
+    assert "s3://lake/silver/hourly_comfort_score" in message
+    assert "s3://lake/quarantine/hourly_comfort_score" in message
+    # 처리 시각과 대상 시간대가 서로 구분되어 남아야 추적이 된다.
+    assert "target_hour=2026-08-24T04:00:00+00:00" in message
+    assert "processed_at=2026-08-24T05:12:00+00:00" in message
     assert "scored=10" in message
     assert "rejected=2" in message
 

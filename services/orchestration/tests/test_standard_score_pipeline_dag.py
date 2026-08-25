@@ -200,6 +200,10 @@ def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id()
     assert args[0] == "score-hourly-comfort"
     assert "--run-id" in args
     assert "{{ run_id }}" in args
+    # 어느 시간 파티션을 채점할지 DAG가 정해 넘긴다(#469) — sensor_processing과 같은 방식.
+    assert args[args.index("--target-hour") + 1] == (
+        "{{ data_interval_start.isoformat() }}"
+    )
 
 
 def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path():
@@ -209,6 +213,10 @@ def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path
         module.dag.get_task("hourly_scoring.validate_hourly_scoring")
     )
     assert args[0] == "validate-hourly-scoring"
+    # run_hourly_scoring이 쓴 파티션만 검증한다(#469).
+    assert args[args.index("--target-hour") + 1] == (
+        "{{ data_interval_start.isoformat() }}"
+    )
     run_args = _entry_point_arguments(
         module.dag.get_task("hourly_scoring.run_hourly_scoring")
     )
