@@ -275,6 +275,20 @@ def test_validate_standard_score_runs_without_a_job_run():
     assert task.op_kwargs["as_of"] == "{{ data_interval_end.isoformat() }}"
 
 
+def test_gold_root_template_falls_back_when_the_variable_is_empty():
+    """compose가 .env에 없는 값을 빈 문자열로 채우면 var.value.get의 default가 안 먹는다(#409).
+
+    빈 문자열이 그대로 렌더링되면 join_uri가 "file URI must contain a path"로 죽는다.
+    """
+    module = _load_dag_module()
+
+    default = "data/local-lake"
+    assert module._STANDARD_COMFORT_SCORE_DATA_LAKE_URI == (
+        f"{{{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', '{default}') "
+        f"or '{default}' }}}}"
+    )
+
+
 def test_validate_standard_score_points_at_the_gold_root_run_wrote():
     """두 task가 다른 경로를 보면 검증이 엉뚱한 데이터를 통과시킨다."""
     module = _load_dag_module()

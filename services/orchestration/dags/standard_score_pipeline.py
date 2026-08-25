@@ -98,8 +98,14 @@ _HOURLY_COMFORT_REJECTED_OUTPUT_PATH = (
 )
 # run_standard_score가 쓴 Gold snapshot을 validate_standard_score가 그대로 읽어야
 # 하므로(#495, ADR-0012) 위 경로 상수들과 같은 이유로 한 곳에서 정의해 공유한다.
+# airflow.yaml이 이 env var를 항상 선언해서, 호스트 .env에 값이 없으면 docker
+# compose가 빈 문자열로 채운다 — 그러면 var.value.get의 default가 아니라 그 빈
+# 문자열이 그대로 렌더링된다. emr_serverless._EMR_SERVERLESS_LOG_S3_URI_TEMPLATE와
+# 같은 이유로 `or`를 한 번 더 둔다(#409). 폴백 값은 StandardComfortScoreJobConfig
+# .from_env()의 것과 같아야 한다.
 _STANDARD_COMFORT_SCORE_DATA_LAKE_URI = (
-    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', 'data/local-lake') }}"
+    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', 'data/local-lake') "
+    "or 'data/local-lake' }}"
 )
 _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI = (
     "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
