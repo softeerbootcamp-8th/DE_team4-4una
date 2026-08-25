@@ -12,7 +12,16 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import pandas_udf
 from pyspark.sql.types import DoubleType
 
-from batch_jobs.map_matching.candidates import OUTPUT_COLUMNS
+from batch_jobs.map_matching.candidates import OUTPUT_COLUMNS, validate_search_radius
+
+
+def validate_score_weights(distance_weight: float, heading_weight: float) -> None:
+    if not all(
+        math.isfinite(w) and 0.0 <= w <= 1.0 for w in (distance_weight, heading_weight)
+    ):
+        raise ValueError("distance_weight and heading_weight must be between 0.0 and 1.0")
+    if not math.isclose(distance_weight + heading_weight, 1.0):
+        raise ValueError("distance_weight + heading_weight must sum to 1.0")
 
 
 def score_segment_candidates(
@@ -23,14 +32,8 @@ def score_segment_candidates(
     heading_weight: float,
 ) -> DataFrame:
     """candidate_df에 road_bearing_deg, heading_diff_deg, match_score를 추가한다."""
-    if not math.isfinite(search_radius_m) or search_radius_m <= 0:
-        raise ValueError("search_radius_m must be finite and greater than 0")
-    if not all(
-        math.isfinite(w) and 0.0 <= w <= 1.0 for w in (distance_weight, heading_weight)
-    ):
-        raise ValueError("distance_weight and heading_weight must be between 0.0 and 1.0")
-    if not math.isclose(distance_weight + heading_weight, 1.0):
-        raise ValueError("distance_weight + heading_weight must sum to 1.0")
+    validate_search_radius(search_radius_m)
+    validate_score_weights(distance_weight, heading_weight)
 
     joined = candidate_df.join(
         sensor_df.select("event_id", "heading"), on="event_id", how="left"
@@ -106,8 +109,8 @@ def compute_road_bearing(
     directions = traffic_direction.to_numpy()[has_geometry]
     headings = heading.to_numpy(dtype="float64", na_value=np.nan)[has_geometry]
 
-    diff_forward = _circular_diff(headings, forward_bearing)
-    diff_reverse = _circular_diff(headings, reverse_bearing)
+    diff_forward = circular_heading_diff(headings, forward_bearing)
+    diff_reverse = circular_heading_diff(headings, reverse_bearing)
     two_way_bearing = np.where(diff_forward <= diff_reverse, forward_bearing, reverse_bearing)
     two_way_bearing = np.where(np.isnan(headings), np.nan, two_way_bearing)
 
@@ -119,5 +122,29 @@ def compute_road_bearing(
     return pd.Series(road_bearing, index=geometry_wkb.index)
 
 
-def _circular_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def circular_heading_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """두 방위각(deg) 간 원형 차이. NaN이 섞이면 NaN으로 전파된다."""
     return np.abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def compute_match_scores(
+    distance_m: np.ndarray,
+    heading_diff_deg: np.ndarray,
+    search_radius_m: float,
+    distance_weight: float,
+    heading_weight: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """distance_score, heading_score, match_score를 score_segment_candidates()와 동일한 공식으로 NumPy로 계산한다."""
+    distance_score = _clamp_score_np(1.0 - distance_m / search_radius_m, distance_m)
+    heading_score = _clamp_score_np(1.0 - heading_diff_deg / 180.0, heading_diff_deg)
+    match_score = np.where(
+        np.isnan(heading_score),
+        distance_score,
+        distance_weight * distance_score + heading_weight * heading_score,
+    )
+    return distance_score, heading_score, match_score
+
+
+def _clamp_score_np(raw: np.ndarray, null_when: np.ndarray) -> np.ndarray:
+    clamped = np.where(raw < 0.0, 0.0, raw)
+    return np.where(np.isnan(null_when), np.nan, clamped)

@@ -16,6 +16,10 @@ from batch_jobs.map_matching.candidates import (
     process_batch,
 )
 from batch_jobs.map_matching.config import load_map_matching_config
+from batch_jobs.map_matching.matching import (
+    match_segment_candidates,
+    select_best_candidates,
+)
 from batch_jobs.map_matching.scoring import score_segment_candidates
 from batch_jobs.map_matching.selection import select_best_segment
 from pyproj import Transformer
@@ -606,3 +610,411 @@ class TestSelectBestSegment:
 
         with pytest.raises(ValueError, match="missing required columns"):
             select_best_segment(candidate_df)
+
+
+# #479: match_segment_candidates()가 legacy 3단계 파이프라인과 동일한 결과를 내는지 검증한다.
+
+SENSOR_HEADING_FULL_SCHEMA = StructType(
+    [
+        StructField("event_id", StringType(), nullable=False),
+        StructField("latitude", DoubleType(), nullable=True),
+        StructField("longitude", DoubleType(), nullable=True),
+        StructField("heading", DoubleType(), nullable=True),
+    ]
+)
+
+
+def oriented_line(distance_m: float, bearing_deg: float, length: float = 200.0) -> LineString:
+    """BASE 지점에서 정확히 distance_m만큼 떨어진 곳에 bearing_deg 방향(0=N, 시계방향)으로 뻗는 직선을 만든다."""
+    theta = math.radians(bearing_deg)
+    direction = (math.sin(theta), math.cos(theta))
+    perpendicular = (math.cos(theta), -math.sin(theta))
+    center_x = BASE_X + perpendicular[0] * distance_m
+    center_y = BASE_Y + perpendicular[1] * distance_m
+    half = length / 2
+    start = (center_x - direction[0] * half, center_y - direction[1] * half)
+    end = (center_x + direction[0] * half, center_y + direction[1] * half)
+    return LineString([start, end])
+
+
+def run_legacy_pipeline(
+    spark,
+    sensor_rows: list[tuple],
+    road_rows: list[tuple],
+    search_radius_m: float = 30.0,
+    distance_weight: float = 0.7,
+    heading_weight: float = 0.3,
+):
+    """legacy 3단계 파이프라인 결과를 (event_id -> row dict, 펼쳐진 candidate row 수)로 반환한다."""
+    road_df = spark.createDataFrame(road_rows, ROAD_SEGMENT_COLUMNS)
+    sensor_df = spark.createDataFrame(sensor_rows, SENSOR_HEADING_FULL_SCHEMA)
+
+    candidates = find_segment_candidates(sensor_df, road_df, search_radius_m)
+    scored = score_segment_candidates(
+        candidates, sensor_df, search_radius_m, distance_weight, heading_weight
+    )
+    selected = select_best_segment(scored).collect()
+    return {row["event_id"]: row.asDict() for row in selected}, candidates.count()
+
+
+def run_optimized_pipeline(
+    spark,
+    sensor_rows: list[tuple],
+    road_rows: list[tuple],
+    search_radius_m: float = 30.0,
+    distance_weight: float = 0.7,
+    heading_weight: float = 0.3,
+):
+    """match_segment_candidates() 결과를 (event_id -> row dict, 결과 row 수)로 반환한다."""
+    road_df = spark.createDataFrame(road_rows, ROAD_SEGMENT_COLUMNS)
+    sensor_df = spark.createDataFrame(sensor_rows, SENSOR_HEADING_FULL_SCHEMA)
+
+    result = match_segment_candidates(
+        sensor_df, road_df, search_radius_m, distance_weight, heading_weight
+    ).collect()
+    return {row["event_id"]: row.asDict() for row in result}, len(result)
+
+
+def assert_same_match_result(legacy_row: dict, optimized_row: dict) -> None:
+    """legacy와 optimized 결과 한 쌍이 event_id별로 완전히 동일한지 검증한다."""
+    assert legacy_row["segment_id"] == optimized_row["segment_id"]
+    assert legacy_row["road_snapshot_date"] == optimized_row["road_snapshot_date"]
+    assert legacy_row["candidate_count"] == optimized_row["candidate_count"]
+    assert legacy_row["map_match_status"] == optimized_row["map_match_status"]
+    for field in ("map_match_distance_m", "map_match_heading_diff_deg", "map_match_score"):
+        legacy_value, optimized_value = legacy_row[field], optimized_row[field]
+        if legacy_value is None or optimized_value is None:
+            assert legacy_value is None and optimized_value is None, field
+        else:
+            assert legacy_value == pytest.approx(optimized_value, abs=1e-9), field
+
+
+class TestSelectBestCandidates:
+    """select_best_candidates()가 select_best_segment()과 동일한 tie-break 순서를 갖는지 하드코딩된 값으로 검증한다."""
+
+    @staticmethod
+    def _candidates_df(rows: list[tuple]) -> pd.DataFrame:
+        return pd.DataFrame(
+            rows, columns=["position", "segment_id", "distance_m", "heading_diff_deg", "match_score"]
+        )
+
+    def test_selects_candidate_with_highest_score(self) -> None:
+        rows = [
+            (0, "S1", 5.0, 30.0, 0.8),
+            (0, "S2", 8.0, 10.0, 0.9),
+        ]
+
+        best = select_best_candidates(self._candidates_df(rows))
+
+        assert len(best) == 1
+        assert best.iloc[0]["segment_id"] == "S2"
+
+    def test_score_tie_selects_nearest_candidate(self) -> None:
+        rows = [
+            (0, "S1", 10.0, 20.0, 0.8),
+            (0, "S2", 5.0, 30.0, 0.8),
+        ]
+
+        best = select_best_candidates(self._candidates_df(rows))
+
+        assert best.iloc[0]["segment_id"] == "S2"
+
+    def test_distance_tie_selects_smallest_heading_diff(self) -> None:
+        rows = [
+            (0, "S1", 5.0, 30.0, 0.8),
+            (0, "S2", 5.0, 10.0, 0.8),
+        ]
+
+        best = select_best_candidates(self._candidates_df(rows))
+
+        assert best.iloc[0]["segment_id"] == "S2"
+
+    def test_exact_tie_uses_segment_id(self) -> None:
+        rows = [
+            (0, "S20", 5.0, 10.0, 0.8),
+            (0, "S10", 5.0, 10.0, 0.8),
+        ]
+
+        best = select_best_candidates(self._candidates_df(rows))
+
+        assert best.iloc[0]["segment_id"] == "S10"
+
+    def test_each_position_produces_exactly_one_row(self) -> None:
+        rows = [
+            (0, "S1", 5.0, 30.0, 0.8),
+            (0, "S2", 8.0, 10.0, 0.9),
+            (1, "S3", 3.0, 5.0, 0.95),
+        ]
+
+        best = select_best_candidates(self._candidates_df(rows))
+
+        assert len(best) == 2
+        assert best.set_index("position")["segment_id"].to_dict() == {0: "S2", 1: "S3"}
+
+    def test_selection_is_deterministic_regardless_of_input_order(self) -> None:
+        rows = [
+            (0, "S1", 5.0, 30.0, 0.8),
+            (0, "S2", 8.0, 10.0, 0.9),
+            (0, "S3", 3.0, 5.0, 0.7),
+        ]
+
+        forward = select_best_candidates(self._candidates_df(rows))
+        backward = select_best_candidates(self._candidates_df(list(reversed(rows))))
+
+        assert forward.iloc[0]["segment_id"] == backward.iloc[0]["segment_id"] == "S2"
+
+
+class TestMatchSegmentCandidatesMatchesLegacy:
+    """match_segment_candidates()가 legacy 3단계 파이프라인과 동일한 결과를 내는지 검증한다(#479)."""
+
+    def test_zero_candidates_is_unmatched(self, spark) -> None:
+        road_rows = [road_segment_row("FAR", offset_line(1000.0, 0.0))]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, row_count = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["candidate_count"] == 0
+        assert optimized["e1"]["map_match_status"] == "unmatched"
+        assert row_count == 1
+
+    def test_one_candidate(self, spark) -> None:
+        road_rows = [road_segment_row("S1", offset_line(10.0, 0.0), snapshot_date_=SNAPSHOT)]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "S1"
+        assert optimized["e1"]["candidate_count"] == 1
+
+    def test_multiple_candidates(self, spark) -> None:
+        road_rows = [
+            road_segment_row("A", offset_line(10.0, 0.0)),
+            road_segment_row("B", offset_line(-10.0, 0.0)),
+            road_segment_row("C", offset_line(0.0, 10.0)),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, legacy_candidate_rows = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, optimized_row_count = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["candidate_count"] == 3
+        # 핵심 성능 개선 지점: legacy는 후보 수만큼(3) row가 펼쳐지지만 optimized는 event당 1행이다.
+        assert legacy_candidate_rows == 3
+        assert optimized_row_count == 1
+
+    def test_distance_difference_prefers_closer_candidate(self, spark) -> None:
+        # 두 후보 모두 heading과 완전히 정렬돼(heading_diff=0) match_score 차이가 distance에서만 비롯된다.
+        road_rows = [
+            ("NEAR", SNAPSHOT, shapely.to_wkb(oriented_line(5.0, 0.0)), "W", "N1", "N2"),
+            ("FAR", SNAPSHOT, shapely.to_wkb(oriented_line(20.0, 0.0)), "W", "N1", "N2"),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "NEAR"
+
+    def test_heading_difference_prefers_aligned_candidate(self, spark) -> None:
+        road_rows = [
+            ("ALIGNED", SNAPSHOT, shapely.to_wkb(oriented_line(10.0, 0.0)), "W", "N1", "N2"),
+            ("OFFANGLE", SNAPSHOT, shapely.to_wkb(oriented_line(10.0, 90.0)), "W", "N1", "N2"),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "ALIGNED"
+
+    def test_null_heading_uses_distance_score_only(self, spark) -> None:
+        road_rows = [road_segment_row("S1", offset_line(10.0, 0.0))]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, None)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["map_match_heading_diff_deg"] is None
+        assert optimized["e1"]["map_match_score"] is not None
+
+    @pytest.mark.parametrize(
+        "traffic_direction, heading, expect_diff",
+        [
+            ("W", 10.0, 10.0),  # 순방향(bearing=0)과 heading 차이 그대로
+            ("A", 10.0, 170.0),  # 역방향(bearing=180)과의 차이
+            ("T", 10.0, 10.0),  # 양방향, heading이 순방향에 더 가까움
+            ("T", 170.0, 10.0),  # 양방향, heading이 역방향에 더 가까움
+        ],
+    )
+    def test_traffic_direction_resolves_road_bearing(
+        self, spark, traffic_direction: str, heading: float, expect_diff: float
+    ) -> None:
+        road_rows = [
+            ("S1", SNAPSHOT, shapely.to_wkb(oriented_line(10.0, 0.0)), traffic_direction, "N1", "N2")
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, heading)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["map_match_heading_diff_deg"] == pytest.approx(expect_diff, abs=1e-6)
+
+    def test_tie_on_distance_falls_back_to_heading_diff(self, spark) -> None:
+        # 동일 geometry(distance 동일)에 방향만 W/A로 반대라 heading_diff만 다르며, distance_weight=1.0으로 match_score까지 tie를 만들어 heading_diff tie-break를 강제한다.
+        line = oriented_line(10.0, 0.0)
+        road_rows = [
+            ("W_DIR", SNAPSHOT, shapely.to_wkb(line), "W", "N1", "N2"),
+            ("A_DIR", SNAPSHOT, shapely.to_wkb(line), "A", "N1", "N2"),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(
+            spark, sensor_rows, road_rows, distance_weight=1.0, heading_weight=0.0
+        )
+        optimized, _ = run_optimized_pipeline(
+            spark, sensor_rows, road_rows, distance_weight=1.0, heading_weight=0.0
+        )
+
+        assert legacy["e1"]["map_match_score"] == legacy["e1"]["map_match_score"]  # sanity
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "W_DIR"
+
+    def test_tie_on_score_falls_back_to_distance(self, spark) -> None:
+        # 같은 bearing으로 heading_diff를 동일하게 만들고 distance_weight=0.0으로 match_score까지 tie가 되게 해 distance tie-break를 강제한다.
+        road_rows = [
+            ("NEAR", SNAPSHOT, shapely.to_wkb(oriented_line(5.0, 0.0)), "W", "N1", "N2"),
+            ("FAR", SNAPSHOT, shapely.to_wkb(oriented_line(15.0, 0.0)), "W", "N1", "N2"),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(
+            spark, sensor_rows, road_rows, distance_weight=0.0, heading_weight=1.0
+        )
+        optimized, _ = run_optimized_pipeline(
+            spark, sensor_rows, road_rows, distance_weight=0.0, heading_weight=1.0
+        )
+
+        assert legacy["e1"]["map_match_score"] == pytest.approx(
+            optimized["e1"]["map_match_score"], abs=1e-9
+        )
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "NEAR"
+
+    def test_exact_tie_uses_segment_id_lexicographic_order(self, spark) -> None:
+        # 완전히 동일한 geometry/traffic_direction이라 distance/heading_diff/match_score도 전부 동일해 segment_id tie-break만 남는다.
+        line = oriented_line(10.0, 0.0)
+        road_rows = [
+            ("S20", SNAPSHOT, shapely.to_wkb(line), "W", "N1", "N2"),
+            ("S10", SNAPSHOT, shapely.to_wkb(line), "W", "N1", "N2"),
+        ]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["segment_id"] == "S10"
+
+    def test_invalid_and_null_gps_are_unmatched(self, spark) -> None:
+        road_rows = [road_segment_row("NEAR", offset_line(10.0, 0.0))]
+        sensor_rows = [
+            ("matched", BASE_LAT, BASE_LON, 0.0),
+            ("null_lat", None, BASE_LON, 0.0),
+            ("null_lon", BASE_LAT, None, 0.0),
+            ("nan_lat", float("nan"), BASE_LON, 0.0),
+            ("out_of_range_lat", 999.0, BASE_LON, 0.0),
+            ("inf_lon", BASE_LAT, float("inf"), 0.0),
+        ]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        for event_id in legacy:
+            assert_same_match_result(legacy[event_id], optimized[event_id])
+
+        assert optimized["matched"]["map_match_status"] == "matched"
+        for event_id in ("null_lat", "null_lon", "nan_lat", "out_of_range_lat", "inf_lon"):
+            assert optimized[event_id]["map_match_status"] == "unmatched"
+            assert optimized[event_id]["candidate_count"] == 0
+            # 후보가 없어도 어떤 snapshot으로 매칭을 시도했는지는 남아야 한다.
+            assert optimized[event_id]["road_snapshot_date"] == SNAPSHOT
+
+    def test_candidate_count_matches_number_of_real_candidates(self, spark) -> None:
+        road_rows = [
+            road_segment_row("A", offset_line(10.0, 0.0)),
+            road_segment_row("B", offset_line(-10.0, 0.0)),
+            road_segment_row("C", offset_line(0.0, 10.0)),
+        ]
+        sensor_rows = [
+            ("three_candidates", BASE_LAT, BASE_LON, 0.0),
+            ("zero_candidates", BASE_LAT + 1.0, BASE_LON, 0.0),
+        ]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert optimized["three_candidates"]["candidate_count"] == 3
+        assert optimized["zero_candidates"]["candidate_count"] == 0
+        for event_id in legacy:
+            assert_same_match_result(legacy[event_id], optimized[event_id])
+
+    def test_optimized_pipeline_returns_one_row_per_event_not_per_candidate(self, spark) -> None:
+        road_rows = [
+            road_segment_row("A", offset_line(10.0, 0.0)),
+            road_segment_row("B", offset_line(-10.0, 0.0)),
+            road_segment_row("C", offset_line(0.0, 10.0)),
+            road_segment_row("D", offset_line(-1.0, 3.0)),
+        ]
+        sensor_rows = [
+            ("e1", BASE_LAT, BASE_LON, 0.0),
+            ("e2", BASE_LAT, BASE_LON, 0.0),
+            ("e3", BASE_LAT + 1.0, BASE_LON, 0.0),  # 후보 없음
+        ]
+
+        road_df = spark.createDataFrame(road_rows, ROAD_SEGMENT_COLUMNS)
+        sensor_df = spark.createDataFrame(sensor_rows, SENSOR_HEADING_FULL_SCHEMA)
+
+        legacy_candidates = find_segment_candidates(sensor_df, road_df, search_radius_m=30.0)
+        optimized_result = match_segment_candidates(sensor_df, road_df, 30.0, 0.7, 0.3)
+
+        # 이벤트 2개 * 후보 4개 + 후보 없는 이벤트 1개(빈 행 1개) = 9. legacy는 이만큼 펼쳐진다.
+        assert legacy_candidates.count() == 9
+        # optimized는 이벤트 수(3)만큼만 반환된다 -- candidate 펼침/Window 제거를 구조적으로 증명한다.
+        assert optimized_result.count() == 3
+        assert optimized_result.count() == sensor_df.count()
+
+    def test_optimized_pipeline_plan_has_no_window_stage(self, spark) -> None:
+        import contextlib
+        import io
+
+        road_rows = [road_segment_row("A", offset_line(10.0, 0.0))]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+        road_df = spark.createDataFrame(road_rows, ROAD_SEGMENT_COLUMNS)
+        sensor_df = spark.createDataFrame(sensor_rows, SENSOR_HEADING_FULL_SCHEMA)
+
+        candidates = find_segment_candidates(sensor_df, road_df, search_radius_m=30.0)
+        scored = score_segment_candidates(candidates, sensor_df, 30.0, 0.7, 0.3)
+        legacy_selected = select_best_segment(scored)
+        optimized_selected = match_segment_candidates(sensor_df, road_df, 30.0, 0.7, 0.3)
+
+        def captured_plan(df) -> str:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                df.explain(mode="extended")
+            return buffer.getvalue()
+
+        legacy_plan = captured_plan(legacy_selected)
+        optimized_plan = captured_plan(optimized_selected)
+
+        # legacy 경로엔 Window 연산자가 남지만, mapInPandas 안에서 선택까지 끝내는 optimized 경로엔 없어야 한다(#479).
+        assert "Window" in legacy_plan
+        assert "Window" not in optimized_plan

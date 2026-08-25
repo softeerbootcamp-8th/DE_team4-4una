@@ -73,16 +73,20 @@ class RoadSegmentCandidate:
     to_node_id: str
 
 
+def validate_search_radius(search_radius_m: float) -> None:
+    if not math.isfinite(search_radius_m) or search_radius_m <= 0:
+        raise ValueError("search_radius_m must be finite and greater than 0")
+
+
 def find_segment_candidates(
     sensor_df: DataFrame,
     road_segment_df: DataFrame,
     search_radius_m: float,
 ) -> DataFrame:
     """센서 GPS별 주변 LION Segment 후보와 거리를 반환한다."""
-    if not math.isfinite(search_radius_m) or search_radius_m <= 0:
-        raise ValueError("search_radius_m must be finite and greater than 0")
+    validate_search_radius(search_radius_m)
 
-    road_records = _collect_road_segment_candidates(road_segment_df)
+    road_records = collect_road_segment_candidates(road_segment_df)
 
     spark = sensor_df.sparkSession
     road_records_broadcast = spark.sparkContext.broadcast(road_records)
@@ -103,7 +107,7 @@ def find_segment_candidates(
 
 
 # road_segment_df에서 필요한 컬럼만 뽑아 driver로 모으고 broadcast에 적합한지 검증한다
-def _collect_road_segment_candidates(road_segment_df: DataFrame) -> list[RoadSegmentCandidate]:
+def collect_road_segment_candidates(road_segment_df: DataFrame) -> list[RoadSegmentCandidate]:
     missing_columns = [c for c in ROAD_SEGMENT_COLUMNS if c not in road_segment_df.columns]
     if missing_columns:
         raise ValueError(f"road_segment_df is missing required columns: {missing_columns}")
