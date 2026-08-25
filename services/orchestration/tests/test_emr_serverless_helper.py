@@ -154,3 +154,128 @@ def test_all_job_runs_persist_logs_to_s3_monitoring_configuration():
     assert log_uri == (
         f"{{{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', '{default}') or '{default}' }}}}"
     )
+
+
+# --- #432: 파이프라인 종료 후 Application을 명시적으로 stop시키는 task들 ---
+
+
+class _FakePaginator:
+    def __init__(self, pages, recorder):
+        self._pages = pages
+        self._recorder = recorder
+
+    def paginate(self, **kwargs):
+        self._recorder.append(kwargs)
+        return self._pages
+
+
+class _FakeConn:
+    def __init__(self, pages, recorder):
+        self._pages = pages
+        self._recorder = recorder
+
+    def get_paginator(self, operation_name):
+        assert operation_name == "list_job_runs"
+        return _FakePaginator(self._pages, self._recorder)
+
+
+def _patch_hook(monkeypatch, pages):
+    """emr_serverless_has_no_running_jobs가 함수 안에서 지연 import하는
+    EmrServerlessHook을, list_job_runs 페이지를 미리 정해둔 가짜로 바꾼다."""
+    import airflow.providers.amazon.aws.hooks.emr as emr_hooks
+
+    recorder: list[dict] = []
+
+    class _FakeHook:
+        JOB_INTERMEDIATE_STATES = emr_hooks.EmrServerlessHook.JOB_INTERMEDIATE_STATES
+
+        def __init__(self, *args, **kwargs):
+            self.conn = _FakeConn(pages, recorder)
+
+    monkeypatch.setattr(emr_hooks, "EmrServerlessHook", _FakeHook)
+    return recorder
+
+
+def test_idle_check_is_true_when_no_job_run_is_in_flight(monkeypatch):
+    from emr_serverless import emr_serverless_has_no_running_jobs
+
+    _patch_hook(monkeypatch, pages=[{"jobRuns": []}])
+
+    assert emr_serverless_has_no_running_jobs("00abc") is True
+
+
+def test_idle_check_is_false_while_another_dags_job_run_is_in_flight(monkeypatch):
+    # data_quality_audit(daily 03:00 UTC)이 같은 Application을 쓰므로 hourly
+    # 파이프라인이 끝난 시점에도 남의 Job Run이 돌고 있을 수 있다 — 이때 stop을
+    # 걸면 ValidationException으로 실패하므로 건너뛰어야 한다(#432).
+    from emr_serverless import emr_serverless_has_no_running_jobs
+
+    _patch_hook(monkeypatch, pages=[{"jobRuns": [{"id": "job-from-audit"}]}])
+
+    assert emr_serverless_has_no_running_jobs("00abc") is False
+
+
+def test_idle_check_only_counts_job_runs_in_non_terminal_states(monkeypatch):
+    from emr_serverless import emr_serverless_has_no_running_jobs
+
+    recorder = _patch_hook(monkeypatch, pages=[{"jobRuns": []}])
+
+    emr_serverless_has_no_running_jobs("00abc")
+
+    assert recorder[0]["applicationId"] == "00abc"
+    assert set(recorder[0]["states"]) == {"PENDING", "RUNNING", "SCHEDULED", "SUBMITTED"}
+
+
+def test_idle_check_task_resolves_the_application_id_from_the_shared_variable():
+    from airflow.providers.standard.operators.python import ShortCircuitOperator
+    from emr_serverless import check_emr_serverless_is_idle
+
+    with DAG(
+        dag_id="test_emr_serverless_helper_stop",
+        start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    ):
+        operator = check_emr_serverless_is_idle(task_id="check_emr_serverless_idle")
+
+    assert isinstance(operator, ShortCircuitOperator)
+    # op_kwargs는 템플릿 필드라 실행 시점에 Variable이 렌더링된다.
+    assert operator.op_kwargs == {
+        "application_id": "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
+    }
+    assert "op_kwargs" in ShortCircuitOperator.template_fields
+
+
+def test_stop_task_targets_the_shared_application_without_cancelling_other_jobs():
+    from airflow.providers.amazon.aws.operators.emr import (
+        EmrServerlessStopApplicationOperator,
+    )
+    from emr_serverless import stop_emr_serverless_application
+
+    with DAG(
+        dag_id="test_emr_serverless_helper_stop_op",
+        start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    ):
+        operator = stop_emr_serverless_application(
+            task_id="stop_emr_serverless_application"
+        )
+
+    assert isinstance(operator, EmrServerlessStopApplicationOperator)
+    assert operator.application_id == "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
+    # force_stop=True는 다른 DAG의 Job Run까지 취소해버린다 — 반드시 False여야 한다.
+    assert operator.force_stop is False
+
+
+def test_stop_task_waits_for_the_stopped_state_within_a_bounded_window():
+    # provider 기본값(60초 × 25회 = 25분)은 hourly DAG가 붙들고 있기엔 너무 길다.
+    from emr_serverless import stop_emr_serverless_application
+
+    with DAG(
+        dag_id="test_emr_serverless_helper_stop_waiter",
+        start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    ):
+        operator = stop_emr_serverless_application(
+            task_id="stop_emr_serverless_application"
+        )
+
+    assert operator.wait_for_completion is True
+    assert operator.waiter_delay == 15
+    assert operator.waiter_max_attempts == 20
