@@ -6,12 +6,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-
-def _trip_window(*extra_partition_columns: str) -> Window:
-    """같은 trip(및 추가 파티션 컬럼) 내부에서만 이전 행을 찾기 위한 결정적 정렬 Window."""
-    return Window.partitionBy("trip_id", *extra_partition_columns).orderBy(
-        "trip_seq", "event_time", "event_id"
-    )
+from batch_jobs.sensor_features.trip_window import trip_window as _trip_window
 
 
 def add_steering_rate(df: DataFrame, max_gap_seconds: float) -> DataFrame:

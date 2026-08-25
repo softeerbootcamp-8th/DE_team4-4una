@@ -6,10 +6,7 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-
-def _trip_window() -> Window:
-    # 같은 trip 내부에서만 이전 행을 찾도록 정렬한 Window
-    return Window.partitionBy("trip_id").orderBy("trip_seq", "event_time", "event_id")
+from batch_jobs.sensor_features.trip_window import trip_window as _trip_window
 
 
 # candidate_condition이 연속 True인 구간을 episode로 묶어, 지속 시간이

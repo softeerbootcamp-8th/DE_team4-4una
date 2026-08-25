@@ -37,12 +37,7 @@ from batch_jobs.sensor_features.config import (
     load_event_feature_config,
     load_steering_feature_config,
 )
-from batch_jobs.sensor_features.events import (
-    add_hard_acceleration_event,
-    add_hard_braking_event,
-    add_sharp_steering_event,
-)
-from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
+from batch_jobs.sensor_features.feature_pipeline import add_steering_and_event_features
 
 logger = logging.getLogger(__name__)
 
@@ -161,27 +156,17 @@ def run_hourly_segment_feature_job(
         )
 
         steering_event_started = time.monotonic()
-        steering_df = add_steering_reversal(
-            add_steering_rate(matched_df, steering_config.max_gap_seconds.value),
-            steering_config.steering_rate_deadband_deg_per_sec.value,
-        )
-        event_df = add_hard_acceleration_event(
-            steering_df,
-            event_config.hard_accel_threshold_mps2.value,
-            event_config.min_event_duration_seconds.value,
-            event_config.max_gap_seconds.value,
-        )
-        event_df = add_hard_braking_event(
-            event_df,
-            event_config.hard_brake_threshold_mps2.value,
-            event_config.min_event_duration_seconds.value,
-            event_config.max_gap_seconds.value,
-        )
-        event_df = add_sharp_steering_event(
-            event_df,
-            event_config.sharp_steer_threshold_deg_per_sec.value,
-            event_config.sharp_steer_min_duration_seconds.value,
-            event_config.max_gap_seconds.value,
+        # steering_rate/reversal + 3개 episode를 한 파이프라인에서 계산해 반복되는 trip-order Window를 줄인다(#487).
+        event_df = add_steering_and_event_features(
+            matched_df,
+            steering_max_gap_seconds=steering_config.max_gap_seconds.value,
+            steering_rate_deadband_deg_per_sec=steering_config.steering_rate_deadband_deg_per_sec.value,
+            hard_accel_threshold_mps2=event_config.hard_accel_threshold_mps2.value,
+            hard_brake_threshold_mps2=event_config.hard_brake_threshold_mps2.value,
+            sharp_steer_threshold_deg_per_sec=event_config.sharp_steer_threshold_deg_per_sec.value,
+            event_max_gap_seconds=event_config.max_gap_seconds.value,
+            min_event_duration_seconds=event_config.min_event_duration_seconds.value,
+            sharp_steer_min_duration_seconds=event_config.sharp_steer_min_duration_seconds.value,
         )
 
         # 입력이 이미 대상 시간뿐이라 이 필터는 안전장치다. 재계산 방지를 위해 persist한다.
