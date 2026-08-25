@@ -28,4 +28,5 @@ de4-core = { workspace = true }
 members = [
     "libs/*",
     "services/*",
+    "tools/*",
 ]
