@@ -13,7 +13,9 @@ standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 
 PostgreSQL 적재 전에 S3 Gold snapshot을 먼저 저장하도록 바뀌었다(Task 구조는 그대로).
 이슈 #402: road_snapshot_date를 하드코딩된 Variable 대신 road_environment_uri의
 active pointer/manifest(#389)에서 읽도록, sensor_processing 맨 앞에
-resolve_road_snapshot_date task를 추가했다.
+resolve_road_snapshot_date task를 추가했다. 이슈 #432: 마지막에 EMR Serverless
+Application을 명시적으로 stop시키는 task를 붙여 idle timeout(15분)을 기다리지
+않게 했다.
 
 ## EMR Serverless 실행 방식 (#292, ADR-0001)
 
@@ -42,7 +44,11 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG, TaskGroup, Variable
 from airflow.timetables.interval import CronDataIntervalTimetable
 from comfort_score_assets import STANDARD_SCORE_ASSET
-from emr_serverless import submit_batch_jobs_command
+from emr_serverless import (
+    check_emr_serverless_is_idle,
+    stop_emr_serverless_application,
+    submit_batch_jobs_command,
+)
 from notifications import on_failure_callback, on_success_callback
 
 # standard_score TaskGroup의 두 task가 공유하는 Postgres 자격증명 driver_env.
@@ -101,9 +107,20 @@ def _resolve_road_snapshot_date() -> str:
     """
     from jobs.road_environment import resolve_active_road_snapshot_date
 
+    # 어느 snapshot을 골랐는지 XCom에만 담기면 Airflow Log 탭에서 확인할 길이
+    # 없다(#406) — 같은 파일의 다른 PythonOperator처럼 print({...}) 요약을 남긴다.
+    # S3 URI는 자격증명이 아니라 로그에 남겨도 안전하다(#406 논의).
     road_environment_uri = Variable.get("REFERENCE_DATA_LAKE_URI", default="")
     if road_environment_uri:
-        return resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+        road_snapshot_date = resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+        print(
+            {
+                "source": "REFERENCE_DATA_LAKE_URI",
+                "road_environment_uri": road_environment_uri,
+                "road_snapshot_date": road_snapshot_date,
+            }
+        )
+        return road_snapshot_date
 
     fallback = Variable.get("HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE", default="")
     if not fallback:
@@ -111,6 +128,13 @@ def _resolve_road_snapshot_date() -> str:
             "REFERENCE_DATA_LAKE_URI or HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE "
             "must be set"
         )
+    print(
+        {
+            "source": "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE",
+            "road_environment_uri": None,
+            "road_snapshot_date": fallback,
+        }
+    )
     return fallback
 
 
@@ -323,4 +347,16 @@ with DAG(
         },
     )
 
+    # 파이프라인이 다 끝나면 EMR Serverless Application을 바로 내려서 idle
+    # timeout(15분)만큼의 유휴 과금을 없앤다(#432). 기본 trigger_rule(all_success)
+    # 이라 앞 task가 하나라도 실패하면 여기까지 오지 않고, 그 경우에는 기존
+    # idle timeout이 그대로 안전망으로 남는다.
+    check_emr_serverless_idle = check_emr_serverless_is_idle(
+        task_id="check_emr_serverless_idle",
+    )
+    stop_emr_serverless = stop_emr_serverless_application(
+        task_id="stop_emr_serverless_application",
+    )
+
     sensor_processing >> hourly_scoring >> standard_score >> report_processing_counts
+    report_processing_counts >> check_emr_serverless_idle >> stop_emr_serverless

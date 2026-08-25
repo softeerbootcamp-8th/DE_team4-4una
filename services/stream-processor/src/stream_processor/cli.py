@@ -21,7 +21,9 @@ from stream_processor.kafka_source import read_kafka_stream
 from stream_processor.metrics import StreamMetrics
 from stream_processor.progress import ProgressLogger
 
-# Kafka 커넥터는 pip 패키지가 아니라 Maven jar라서, 최초 실행 시 이 좌표로 내려받는다.
+# Docker 이미지 빌드 시 Kafka/S3A JAR를 resolve하기 위한 Maven 좌표.
+# 런타임에는 resolve된 JAR가 PySpark jars 디렉터리에 포함되어 있으므로
+# spark.jars.packages를 사용하지 않는다.
 # pyspark 버전과 정확히 맞아야 해서 하드코딩 대신 설치된 버전을 그대로 사용한다.
 KAFKA_PACKAGE = f"org.apache.spark:spark-sql-kafka-0-10_2.13:{pyspark.__version__}"
 _HADOOP_CLIENT_JAR = re.compile(r"hadoop-client-api-(?P<version>[0-9.]+)\.jar$")
@@ -57,7 +59,6 @@ def build_spark_session() -> SparkSession:
     time.tzset()
     builder = (
         SparkSession.builder.appName("stream-processor")
-        .config("spark.jars.packages", SPARK_PACKAGES)
         .config("spark.sql.session.timeZone", "UTC")
     )
     # spark-submit/클러스터에서는 master를 주입하지 않고, 단독 Docker 실행에서만 지정한다

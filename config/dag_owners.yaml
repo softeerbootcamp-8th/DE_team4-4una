@@ -1,39 +1,43 @@
-# DAG/task 담당자 및 심각도 레지스트리 (#409). services/orchestration/jobs/dag_owners.py가
-# 읽는다. 실제 팀원 정보로 값을 채워 넣는다 — 아래는 스키마를 보여주는 예시다.
+# DAG/task 담당자 및 심각도 레지스트리 (#409, #433).
+# services/orchestration/jobs/dag_owners.py가 읽는다.
+#
+# 항목을 추가/변경하는 절차는 services/orchestration/README.md 참고.
+# 팀 배정 원본은 Notion "DAG 담당자 · 심각도 레지스트리" 표에서 관리한다.
 #
 # `services:` 최상위 key(#447)는 ops_agent/owners.py가 읽는다. dag_owners.py는 무시한다.
 
 users:
-  alice:
-    email: alice@example.com   # slack_id가 없으면 알림 시점에 users.lookupByEmail로 조회
-  bob:
-    slack_id: U0BD2HRPCH4      # 이미 알고 있으면 email 조회를 건너뛰고 바로 멘션
-  hi653:
-    email: hi653@naver.com     # Slack 알림 수동 검증용(#409)
+  KIMYONGJIN:
+    # slack_id가 있으면 알림 시점에 users.lookupByEmail 조회를 건너뛰고 바로
+    # 멘션한다 — 조회 API 실패에 영향받지 않아 더 안정적이다(#433).
+    slack_id: U0BD8KAMQJ0
+    email: hi653@naver.com
 
 dags:
   standard_score_pipeline:
-    owner: alice
+    owner: KIMYONGJIN
     severity: critical
     tasks:
+      # 담당자는 DAG와 같지만 심각도만 낮춘다 — 이 task는 실패해도 파이프라인
+      # 전체가 멈추는 수준은 아니라는 판단(#433).
       sensor_processing.resolve_road_snapshot_date:
-        owner: bob
+        owner: KIMYONGJIN
         severity: high
   current_score_pipeline:
-    owner: alice
+    owner: KIMYONGJIN
     severity: high
   zone_weather_pipeline:
-    owner: bob
+    owner: KIMYONGJIN
     severity: medium
   data_quality_audit:
-    owner: alice
+    owner: KIMYONGJIN
     severity: medium
   bronze_compaction:
-    owner: hi653   # Slack 알림 수동 검증(#409) — 검증 끝나면 bob으로 되돌린다
+    owner: KIMYONGJIN
     severity: low
 
 # ops-agent(#447)가 escalation 시 멘션할 서비스별 담당자. dag_id가 아니라 alert label의 service 값과 매칭한다.
 services:
   stream-processor:
-    owner: bob
+    owner: KIMYONGJIN
     severity: high

@@ -216,6 +216,7 @@ def run_hourly_segment_feature_job(
                 map_matching_quarantined_count,
                 quarantine_write.row_count,
                 write_result,
+                config.road_segment_path,
             )
             return HourlySegmentFeatureJobSummary(
                 result_count=write_result.row_count,
@@ -316,15 +317,19 @@ def _log_summary(
     map_matching_quarantined_count: int,
     quarantined_count: int,
     write_result: HourlySegmentFeatureWriteResult,
+    road_segment_path: str,
 ) -> None:
     started = time.monotonic()
     sensor_count = sensor_df.count()
     logger.info(
+        # road_segment_path(map matching 입력)가 빠져 있어 어떤 도로망 스냅샷으로
+        # 매칭했는지 로그만 보고는 알 수 없었다(#406).
         "hourly segment feature job finished run_id=%s target_hour=%s "
-        "read=%d target=%d accepted=%d map_match_quarantined=%d "
+        "road_segment=%s read=%d target=%d accepted=%d map_match_quarantined=%d "
         "quarantined=%d result=%d output_path=%s elapsed=%.1fs",
         run_id,
         target_hour.isoformat(),
+        road_segment_path,
         sensor_count,
         target_count,
         accepted_count,

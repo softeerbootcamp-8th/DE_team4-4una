@@ -14,12 +14,10 @@ AWS OIDC/배포 Role/EC2 인스턴스 자체의 계정 단위 설정은
 
 ```
 develop에 머지 (경로 감지) → repository variables 확인
-  → orchestration 이미지 빌드, ECR push, EC2에 pull
   → rsync로 러너가 checkout한 저장소를 EC2 고정 경로에 동기화
   → SSH로 EC2에서 docker compose --env-file ... up -d
   → /api/v2/monitor/health 폴링 (metadatabase+scheduler 모두 healthy일 때까지)
        타임아웃되면 컨테이너 로그를 출력하고 실패 처리 (자동 롤백 없음)
-  → EC2에 쌓인 orchestration 이미지를 최신 2개만 남기고 정리
   → job summary에 commit, repo dir, health 엔드포인트 기록
 ```
 
@@ -29,7 +27,6 @@ develop에 머지 (경로 감지) → repository variables 확인
 ```
 services/orchestration/**   libs/de4-core/**
 infra/compose/airflow.yaml  infra/monitoring/statsd/**
-pyproject.toml              uv.lock
 .github/workflows/deploy-orchestration.yml
 ```
 
@@ -51,10 +48,11 @@ compose 스텝이 `airflow-statsd-exporter`를 명시적으로 재기동한다.
 check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 시점에 이미 검증된
 커밋이다.
 
-`services/orchestration/Dockerfile`로 빌드해 ECR에 올리고 EC2에 pull하는 스텝은
-그대로 두었다. 다만 `infra/compose/airflow.yaml`은 이 이미지를 쓰지 않고 공식
-`apache/airflow` 이미지를 직접 쓰므로, **실제로 이 이미지를 사용하는 곳은 없다.**
-제거는 별도 이슈로 다룬다.
+**커스텀 이미지를 만들지 않는다.** `infra/compose/airflow.yaml`이 공식
+`apache/airflow` 이미지를 직접 쓰고 DAG·jobs·`de4_core`는 rsync + bind mount로
+전달하므로, 예전에 `services/orchestration/Dockerfile`로 빌드해 ECR에 올리던
+이미지는 어디서도 실행되지 않았다. 그래서 Dockerfile과 ECR 관련 스텝을 함께
+제거했다. 이 워크플로는 이제 AWS 자격증명 없이 SSH만으로 동작한다.
 
 저장소 동기화에 `git clone/pull`이 아니라 `rsync`를 쓴 이유는, 러너가 이미
 `actions/checkout`으로 받아온 트리를 기존 SSH 연결(`EC2_SSH_PRIVATE_KEY`)로 그대로
@@ -69,8 +67,10 @@ check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 �
 
 | 변수 | 비고 |
 | --- | --- |
-| `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`, `EC2_HOST`, `EC2_SSH_PRIVATE_KEY`(secret) | serving-api/stream-processor와 공유 (같은 계정, 같은 인스턴스) |
-| `ORCHESTRATION_ECR_REPOSITORY` | orchestration 이미지 ECR 리포지토리 이름 (전체 URI 아님) |
+| `AWS_REGION`, `EC2_HOST`, `EC2_SSH_PRIVATE_KEY`(secret) | serving-api/stream-processor와 공유 (같은 계정, 같은 인스턴스) |
+
+`AWS_REGION`은 compose에 넘겨 컨테이너가 쓰는 리전 값이다. 워크플로 자체는 AWS를
+호출하지 않으므로 `AWS_DEPLOY_ROLE_ARN`이 필요 없다.
 
 ### Variables — 선택
 
@@ -84,15 +84,12 @@ check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 �
 
 ## AWS 사전 준비
 
-OIDC provider, 배포 Role, EC2 인스턴스 프로파일은
-[docs/deploy-serving-api.md](deploy-serving-api.md#aws-사전-준비)에서 계정당 한 번
-설정한 것을 그대로 재사용한다. orchestration을 위해 추가로 필요한 것은 두 가지다.
+orchestration 배포를 위해 추가로 설정할 것은 없다. 워크플로가 ECR을 쓰지 않으므로
+배포 Role도, 전용 ECR 리포지토리도 필요 없다.
 
-1. **배포 Role의 ECR push 권한**과 **인스턴스 프로파일의 ECR pull 권한**에
-   `ORCHESTRATION_ECR_REPOSITORY` 리포지토리 ARN을 각각의 policy `Resource`에
-   추가한다 (serving-api 문서의 2번·3번 policy 예시와 동일한 형태, 리소스만 추가).
-2. **ECR 리포지토리**를 `ORCHESTRATION_ECR_REPOSITORY` 이름으로 생성하고, serving-api
-   문서의 lifecycle policy(untagged 1일 후 삭제, 태그 10개만 유지)를 동일하게 붙인다.
+EC2 인스턴스 프로파일은 [docs/deploy-serving-api.md](deploy-serving-api.md#aws-사전-준비)에서
+설정한 것을 그대로 쓴다. Airflow 컨테이너가 S3·EMR Serverless를 호출할 때 쓰는 것이고,
+배포 절차와는 무관하다.
 
 ## EC2 사전 조건
 
@@ -143,25 +140,23 @@ condition: service_completed_successfully`) 나머지 세 컨테이너가 뜨므
 180초이며 `ORCHESTRATION_ENV_FILE`과 달리 워크플로 자체의 `HEALTH_TIMEOUT` 값으로
 고정돼 있다(필요하면 워크플로 파일을 수정한다). 타임아웃되면 4개 컨테이너의
 최근 로그(`docker compose logs --tail=200`)를 출력하고 워크플로를 실패로 끝낸다 —
-serving-api와 달리 이전 이미지로 자동 롤백하지 않는다.
+serving-api와 달리 직전 상태로 자동 롤백하지 않는다.
 
 ### 이미지 정리
 
-health를 통과한 뒤 EC2에서 orchestration 이미지를 **최신 2개만 남기고** 지운다.
-배포마다 ECR 태그(`<registry>/<repo>:<sha>`)와 로컬 태그(`orchestration:<sha>`)가
-하나씩 쌓이는데 지우는 곳이 없었다. 같은 EC2에서 stream-processor가
-`no space left on device`를 낸 것과 같은 구조다.
+배포가 이미지를 만들지 않으므로 정리할 것도 없다.
 
-두 태그는 같은 이미지를 가리키므로 둘 다 지워야 실제로 디스크가 빈다.
+다만 **이 변경 이전에 쌓인 이미지는 남아 있다.** 배포마다 ECR 태그
+(`<registry>/<repo>:<sha>`)와 로컬 태그(`orchestration:<sha>`)가 하나씩 쌓였고,
+이제 그것을 지우는 스텝이 없다. 한 번은 직접 정리해야 한다.
+
+```bash
+docker images --filter 'reference=orchestration:*'
+docker rmi <태그>
+```
+
 `docker image prune -af`는 쓰지 않는다 — 이 EC2에는 Kafka, Airflow, exporter 등
 다른 서비스 이미지가 함께 있다.
-
-serving-api와 방식이 다르다. 거기서는 돌고 있는 컨테이너에서 직전 이미지를 알아낼
-수 있지만, orchestration은 이 이미지로 컨테이너를 띄우지 않아 그럴 수 없다. 그래서
-생성 시각 기준으로 최신 2개를 고른다.
-
-이 워크플로를 도입하기 전에 쌓인 이미지는 자동으로 지워지지 않는다. 필요하면
-인스턴스에서 직접 확인하고 정리한다.
 
 ```bash
 docker images --filter "reference=orchestration:*" --format '{{.Repository}}:{{.Tag}}'

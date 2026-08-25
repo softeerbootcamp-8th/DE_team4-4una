@@ -184,7 +184,8 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
 구간을 처리하며, 아래 순서로 실행된다.
 
 ```text
-sensor_processing >> hourly_scoring >> standard_score
+sensor_processing >> hourly_scoring >> standard_score >> report_processing_counts
+  >> check_emr_serverless_idle >> stop_emr_serverless_application
 ```
 
 각 TaskGroup의 task는 `EmrServerlessStartJobOperator`(`dags/emr_serverless.py`의
@@ -213,10 +214,108 @@ Job Run 설정에 평문으로 남아 GetJobRun API로 조회 가능하다 — S
 지금 못 쓰는 상황이라 감수하기로 했다(#292 논의). 후속 이슈에서 IAM DB 인증
 등으로 교체할 예정이다.
 
+### 파이프라인 종료 후 Application 내리기 (#432)
+
+Application의 `autoStopConfiguration`은 idle timeout 15분이라, 파이프라인이
+끝나도 15분 동안 유휴 상태로 남는다. 이를 없애려고 마지막에 두 task를 둔다.
+
+| task | 하는 일 |
+| --- | --- |
+| `check_emr_serverless_idle` | `ListJobRuns`로 아직 terminal 상태가 아닌 Job Run(`PENDING`/`RUNNING`/`SCHEDULED`/`SUBMITTED`)이 있는지 확인하는 `ShortCircuitOperator` |
+| `stop_emr_serverless_application` | `EmrServerlessStopApplicationOperator`로 Application을 stop시키고 `STOPPED`까지 대기(15초 × 20회 = 최대 5분) |
+
+idle 확인을 앞에 두는 이유는 **`data_quality_audit`(daily 03:00 UTC)이 같은
+Application을 공유**하기 때문이다. EMR Serverless의 StopApplication은
+"All scheduled and running jobs must be completed or cancelled before stopping
+an application"이라, audit의 Job Run이 도는 중에 stop을 걸면
+`ValidationException`으로 실패한다. 실행 중 Job Run이 있으면
+`ShortCircuitOperator`가 stop task를 **skipped**로 만들어(실패가 아니다)
+DAG Run은 성공으로 남고, 그 경우에는 기존 idle timeout이 그대로 Application을
+내린다.
+
+`force_stop`은 기본값 `False`를 유지한다 — `True`면 다른 DAG의 Job Run까지
+취소해버린다.
+
+앞선 task가 실패하면 기본 `trigger_rule`(`all_success`)에 따라 여기까지 오지
+않으므로, 실패 실행에서는 기존 idle timeout(15분)이 그대로 안전망 역할을 한다.
+
+> **IAM**: `airflow-scheduler`가 쓰는 AWS 자격증명(로컬은 boto3 기본 체인,
+> 운영은 EC2 Instance Role — 현재 `de4-serving-api-ec2-role`)에 아래 두 권한이
+> 있어야 한다. `emr-serverless:GetApplication`(stop 완료 대기용)은 이미
+> 부여돼 있다.
+>
+> ```json
+> {
+>   "Effect": "Allow",
+>   "Action": [
+>     "emr-serverless:ListJobRuns",
+>     "emr-serverless:StopApplication"
+>   ],
+>   "Resource": "arn:aws:emr-serverless:ap-northeast-2:473551908409:/applications/00g85ljahc0svj2p"
+> }
+> ```
+>
+> 권한이 없으면 `check_emr_serverless_idle`이 `AccessDeniedException`으로
+> 실패하고 실패 알림이 울린다 — 다른 EMR 관련 권한과 마찬가지로 콘솔에서
+> 사람이 먼저 준비한다.
+
 > ⚠️ 이 DAG의 실제 EMR Serverless 트리거 검증(entry point 완성, Job Run
 > 정상 실행 확인)은 batch-jobs의 커스텀 이미지가 준비되고 Airflow가 EC2로
 > 이전된 뒤 별도로 진행한다(#289). 아래 "통합 테스트" 절의 backfill/검증
 > 절차는 옛 docker-run 방식 기준이라 지금은 그대로 재현할 수 없다.
+
+## EMR Serverless Job Run 로그 읽기 (#406, #409)
+
+**Airflow Log 탭에는 Spark job 내부 로그가 나오지 않는다.** EMR Serverless로
+제출한 task의 Airflow 로그에는 "Job Run을 제출하고 상태를 폴링했다"는 기록만
+남는다. batch-jobs가 `logger.info`로 남기는 실제 처리 요약(입출력 경로, 대상
+시간대, 처리 건수)은 Spark driver의 stdout으로 나가고, 그건 S3에 쌓인다.
+로그가 없는 게 아니라 **다른 시스템에 분리돼 있다**.
+
+로그 위치는 `AIRFLOW_VAR_EMR_SERVERLESS_LOG_S3_URI`가 정한다(비우면
+`dags/emr_serverless.py`의 기본값). 경로 규칙은 EMR Serverless가 정한다:
+
+```text
+<로그 루트>/applications/<application-id>/jobs/<job-run-id>/SPARK_DRIVER/stdout.gz
+```
+
+`<job-run-id>`는 Airflow task의 XCom(`return_value`)에 남고, 실패 알림(#409)의
+"EMR Serverless 원본 로그 열기" 링크가 이 경로로 바로 이동한다.
+
+```bash
+# 어떤 Job Run들이 있는지 (application-id는 AIRFLOW_VAR_EMR_SERVERLESS_APPLICATION_ID)
+aws s3 ls s3://de4-observability-473551908409-ap-northeast-2-an/emr-serverless/logs/applications/<application-id>/jobs/
+
+# driver stdout 읽기 — 여기에 각 job의 요약 한 줄이 있다
+aws s3 cp s3://de4-observability-473551908409-ap-northeast-2-an/emr-serverless/logs/applications/<application-id>/jobs/<job-run-id>/SPARK_DRIVER/stdout.gz - \
+  | gunzip
+
+# 예: 요약 줄만 뽑기
+aws s3 cp s3://.../SPARK_DRIVER/stdout.gz - | gunzip | grep "finished"
+```
+
+executor 로그가 필요하면(OOM으로 executor가 죽은 경우 등) 같은 Job Run 아래
+`SPARK_EXECUTOR/<executor-id>/stderr.gz`를 본다. 로테이션된 이전 조각은
+`SPARK_DRIVER/archived/stdout/stdout_0.gz`처럼 `archived/` 아래에 쌓인다.
+
+> ⚠️ **위 `aws s3 cp`는 Airflow EC2에 SSH로 들어가서 실행하면 실패한다.** 그
+> 인스턴스 롤에는 이 버킷에 대한 `s3:PutObject`/`ListBucket`만 있고
+> `s3:GetObject`가 없다(로그를 쓰기만 하고 읽지는 않는 역할이라 의도된 최소
+> 권한). 로그를 읽을 때는 본인 AWS 자격증명으로 로컬에서 받거나 S3 콘솔에서
+> 연다.
+
+각 요약 줄에 무엇이 들어 있는지:
+
+| 커맨드 | 요약에 담기는 것 |
+| --- | --- |
+| `cleanse-sensor-events` | `target_hour`, feature 입력 윈도우, bronze/quarantine/features 경로, 건수 |
+| (같은 Job Run의 feature 단계) | `target_hour`, `road_segment` 경로, 출력 경로, 건수 |
+| `score-hourly-comfort` | `processed_at`, 입력/점수/격리 경로, 건수 |
+| `load-standard-segment-comfort-score` | 집계 구간 `[as_of - window_hours, as_of)`, data_lake/road_environment/gold version URI, Postgres `host:port/db`, 건수 |
+| `audit-gold` | 감사 테이블, Postgres `host:port/db`, row_count, Data Docs S3 위치 |
+
+Postgres는 `host:port/db`만 남고 자격증명은 로그에 남지 않는다. S3 경로 자체는
+자격증명이 아니라 로그에 남겨도 안전하다(presigned URL은 남기지 않는다).
 
 ## data_quality_audit — EMR Serverless 실행 (#295, ADR-0001)
 

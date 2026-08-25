@@ -135,13 +135,20 @@ def run_cleansing_job(
             hourly_bronze.unpersist()
 
     _log_summary(
-        processed_count,
-        feature_summary.accepted_count,
-        cleansing_quarantined_count,
-        feature_summary.map_matching_quarantined_count,
-        feature_summary.quarantined_count,
-        feature_summary.result_count,
-        target_hour,
+        target_hour=target_hour,
+        window_start=window_start,
+        window_end=window_end,
+        bronze_input_path=cleansing_config.bronze_input_path,
+        # 격리 쓰기가 run_hourly_segment_feature_job 안으로 옮겨가면서(#438) 실제로
+        # 쓰인 경로는 feature_summary에만 있다 — 설정 root가 아니라 이 값을 남긴다.
+        quarantine_output_path=feature_summary.quarantine_output_path,
+        feature_output_path=feature_summary.output_path,
+        processed_count=processed_count,
+        accepted_count=feature_summary.accepted_count,
+        cleansing_quarantined_count=cleansing_quarantined_count,
+        map_matching_quarantined_count=feature_summary.map_matching_quarantined_count,
+        quarantined_count=feature_summary.quarantined_count,
+        feature_count=feature_summary.result_count,
     )
     logger.info(
         "hourly sensor processing finished run_id=%s elapsed=%.1fs",
@@ -193,18 +200,37 @@ def _union_frames(frames: list[DataFrame]) -> DataFrame:
 
 
 def _log_summary(
+    *,
+    target_hour: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    bronze_input_path: str,
+    quarantine_output_path: str,
+    feature_output_path: str,
     processed_count: int,
     accepted_count: int,
     cleansing_quarantined_count: int,
     map_matching_quarantined_count: int,
     quarantined_count: int,
     feature_count: int,
-    target_hour: datetime,
 ) -> None:
+    """무엇을 어느 구간에서 읽어 어디에 썼는지 요약 한 줄에 다 담는다(#406).
+
+    시작 로그에도 경로가 있지만 그건 설정된 root라, 실제로 쓰인 시간별 경로
+    (quarantine_output_path/feature_output_path)와 feature 입력 윈도우는 여기서만
+    확인된다. 요약 한 줄만 보고도 추적이 되도록 경로를 다시 남긴다.
+    """
     logger.info(
-        "target_hour=%s input=%d cleansed=%d accepted=%d "
-        "cleansing_quarantined=%d map_match_quarantined=%d quarantined=%d features=%d",
+        "target_hour=%s feature_input_window=[%s, %s) bronze=%s quarantine=%s "
+        "features=%s input=%d cleansed=%d accepted=%d "
+        "cleansing_quarantined=%d map_match_quarantined=%d quarantined=%d "
+        "features_written=%d",
         target_hour.isoformat(),
+        window_start.isoformat(),
+        window_end.isoformat(),
+        bronze_input_path,
+        quarantine_output_path,
+        feature_output_path,
         processed_count + cleansing_quarantined_count,
         processed_count,
         accepted_count,

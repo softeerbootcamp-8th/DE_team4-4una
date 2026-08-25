@@ -98,13 +98,35 @@ def run_hourly_comfort_job(
         scored.unpersist()
         rejected.unpersist()
 
+    _log_summary(config, run_id=run_id, processed_at=processed_at, summary=summary)
+    return summary
+
+
+def _log_summary(
+    config: HourlyComfortJobConfig,
+    *,
+    run_id: str,
+    processed_at: datetime,
+    summary: HourlyComfortJobSummary,
+) -> None:
+    """이번 실행이 어느 경로를, 어느 시각 기준으로 처리했는지 한 줄로 남긴다(#406).
+
+    이 job은 target_hour 인자를 따로 받지 않는다 — 대상 시간대는 Airflow가
+    실행마다 템플릿으로 갈아끼우는 feature_input_path에 들어 있으므로, 경로를
+    남기면 어느 시간대였는지 함께 추적된다. S3 경로는 자격증명이 아니라 로그에
+    남겨도 안전하다.
+    """
     logger.info(
-        "hourly comfort scoring finished run_id=%s scored=%d rejected=%d",
+        "hourly comfort scoring finished run_id=%s processed_at=%s "
+        "input=%s score_output=%s rejected_output=%s scored=%d rejected=%d",
         run_id,
+        processed_at.isoformat(),
+        config.feature_input_path,
+        config.score_output_path,
+        config.rejected_output_path,
         summary.scored_count,
         summary.rejected_count,
     )
-    return summary
 
 
 def _select_declared_score_schema(scored: DataFrame) -> DataFrame:

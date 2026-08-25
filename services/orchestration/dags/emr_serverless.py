@@ -5,13 +5,22 @@ Application ID·실행 역할 ARN·entry point는 모두 Airflow Variable로 관
 `AIRFLOW_VAR_*` 환경변수로 주입할 수 있다(`.env.example`, `infra/compose/airflow.yaml`
 참고). entry point는 batch-jobs의 EMR Serverless 커스텀 이미지가 준비되기 전까지
 플레이스홀더다.
+
+이슈 #432: Job Run 제출뿐 아니라 파이프라인이 끝난 뒤 Application을 명시적으로
+내리는 task 팩토리(`check_emr_serverless_is_idle`,
+`stop_emr_serverless_application`)도 여기서 함께 제공한다 — Application ID
+Variable을 아는 곳이 이 모듈이라 stop 쪽도 같은 자리에 둔다.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+from airflow.providers.amazon.aws.operators.emr import (
+    EmrServerlessStartJobOperator,
+    EmrServerlessStopApplicationOperator,
+)
+from airflow.providers.standard.operators.python import ShortCircuitOperator
 
 _APPLICATION_ID_TEMPLATE = "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
 _EXECUTION_ROLE_ARN_TEMPLATE = "{{ var.value.EMR_SERVERLESS_EXECUTION_ROLE_ARN }}"
@@ -150,4 +159,82 @@ def submit_batch_jobs_command(
         },
         name=task_id,
         outlets=outlets or [],
+    )
+
+
+def emr_serverless_has_no_running_jobs(application_id: str) -> bool:
+    """Application에 아직 끝나지 않은 Job Run이 하나도 없으면 True를 돌려준다(#432).
+
+    `standard_score_pipeline`(hourly)과 `data_quality_audit`(daily 03:00 UTC)이
+    같은 Application을 공유하므로, hourly가 끝났다고 무조건 stop을 걸면 audit의
+    Job Run을 건드릴 수 있다. EMR Serverless의 StopApplication은
+    "All scheduled and running jobs must be completed or cancelled before
+    stopping an application"이라 이 상황에서 ValidationException으로 실패하는데,
+    그러면 매일 03시대에 stop task가 실패하며 실패 알림만 울린다. 그래서 stop
+    앞에 이 확인을 두고, 남의 Job Run이 돌고 있으면 stop을 건너뛰어 기존
+    idle timeout(15분)에 맡긴다.
+
+    이 DAG 자신의 Job Run들은 EmrServerlessStartJobOperator가 완료를 기다린 뒤
+    성공해야 여기까지 오므로 이미 terminal 상태다 — 즉 여기서 잡히는 건 다른
+    DAG의 Job Run이다.
+    """
+    from airflow.providers.amazon.aws.hooks.emr import EmrServerlessHook
+
+    hook = EmrServerlessHook()
+    paginator = hook.conn.get_paginator("list_job_runs")
+    running_job_run_ids = [
+        job_run["id"]
+        for page in paginator.paginate(
+            applicationId=application_id,
+            states=list(EmrServerlessHook.JOB_INTERMEDIATE_STATES),
+        )
+        for job_run in page["jobRuns"]
+    ]
+    # 같은 파일의 다른 PythonOperator들처럼 판단 근거를 Log 탭에 남긴다(#406).
+    # Application ID와 Job Run ID는 자격증명이 아니라 로그에 남겨도 안전하다.
+    print(
+        {
+            "application_id": application_id,
+            "running_job_run_ids": running_job_run_ids,
+            "stop_application": not running_job_run_ids,
+        }
+    )
+    return not running_job_run_ids
+
+
+def check_emr_serverless_is_idle(task_id: str) -> ShortCircuitOperator:
+    """실행 중 Job Run이 없을 때만 downstream(stop task)을 실행시키는 task를 만든다(#432).
+
+    실행 중 Job Run이 있으면 downstream이 failed가 아니라 skipped가 되므로 DAG Run은
+    성공으로 남고 실패 알림도 울리지 않는다.
+    """
+    return ShortCircuitOperator(
+        task_id=task_id,
+        python_callable=emr_serverless_has_no_running_jobs,
+        # op_kwargs는 템플릿 필드라 Application ID Variable이 실행 시점에 렌더링된다.
+        op_kwargs={"application_id": _APPLICATION_ID_TEMPLATE},
+    )
+
+
+def stop_emr_serverless_application(task_id: str) -> EmrServerlessStopApplicationOperator:
+    """Application을 명시적으로 stop시키는 task를 만든다(#432).
+
+    autoStopConfiguration의 idle timeout(15분)을 다 기다리지 않고 바로 내려서
+    유휴 과금을 줄인다. idle timeout 자체는 그대로 두어, 이 task까지 오지 못한
+    실패 실행에서는 기존대로 안전망 역할을 하게 한다.
+
+    `force_stop`은 기본값 False를 유지한다 — True면 다른 DAG의 Job Run까지
+    취소해버린다. 앞단 `check_emr_serverless_is_idle`이 이미 실행 중 Job Run이
+    없음을 확인했으므로 취소할 대상도 없다.
+
+    waiter는 기본값(60초 × 25회 = 25분) 대신 15초 × 20회(최대 5분)로 줄인다.
+    STARTED에서 STOPPED까지는 보통 1분 안에 끝나므로, 5분을 넘기면 기다리기보다
+    실패로 드러내는 편이 낫다.
+    """
+    return EmrServerlessStopApplicationOperator(
+        task_id=task_id,
+        application_id=_APPLICATION_ID_TEMPLATE,
+        wait_for_completion=True,
+        waiter_delay=15,
+        waiter_max_attempts=20,
     )

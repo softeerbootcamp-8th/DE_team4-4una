@@ -33,6 +33,13 @@ _DAGS_DIR = str(DAG_PATH.parent)
 if _DAGS_DIR not in sys.path:
     sys.path.insert(0, _DAGS_DIR)
 
+# _resolve_road_snapshot_date가 함수 안에서 `from jobs.road_environment import ...`를
+# 지연 import하므로, top-level `jobs` 패키지가 보이도록 services/orchestration도
+# 추가한다(test_notifications.py와 같은 방식).
+_ORCHESTRATION_DIR = str(DAG_PATH.parents[1])
+if _ORCHESTRATION_DIR not in sys.path:
+    sys.path.insert(0, _ORCHESTRATION_DIR)
+
 from comfort_score_assets import STANDARD_SCORE_ASSET
 
 
@@ -224,6 +231,9 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
         "standard_score.run_standard_score",
         "standard_score.validate_standard_score",
         "report_processing_counts",
+        # 파이프라인 종료 후 EMR Serverless Application을 내리는 두 task(#432).
+        "check_emr_serverless_idle",
+        "stop_emr_serverless_application",
     }
 
 
@@ -360,3 +370,100 @@ def test_dag_wires_shared_slack_notification_callbacks():
 
     assert module.dag.default_args["on_failure_callback"] is notifications.on_failure_callback
     assert module.dag.on_success_callback is notifications.on_success_callback
+
+
+def test_resolve_road_snapshot_date_logs_what_it_resolved(monkeypatch, capsys):
+    # 어떤 snapshot을 골랐는지가 XCom에만 담기고 Airflow Log 탭에는 전혀 안 보였다(#406).
+    # 같은 파일의 다른 PythonOperator가 쓰는 print({...}) 요약 관례를 따른다.
+    import datetime as dt
+
+    import jobs.road_environment
+
+    module = _load_dag_module()
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(
+            lambda key, default=None: "s3://ref-bucket/road-environment"
+            if key == "REFERENCE_DATA_LAKE_URI"
+            else default
+        ),
+    )
+    monkeypatch.setattr(
+        jobs.road_environment,
+        "resolve_active_road_snapshot_date",
+        lambda uri: dt.date(2026, 8, 1),
+    )
+
+    assert module._resolve_road_snapshot_date() == "2026-08-01"
+
+    output = capsys.readouterr().out
+    assert "s3://ref-bucket/road-environment" in output
+    assert "2026-08-01" in output
+
+
+def test_resolve_road_snapshot_date_logs_the_fallback_source(monkeypatch, capsys):
+    # 폴백 경로로 갔을 때도 "어디서 온 값인지"가 로그로 구분돼야 한다(#406).
+    module = _load_dag_module()
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(
+            lambda key, default=None: ""
+            if key == "REFERENCE_DATA_LAKE_URI"
+            else "2026-07-15"
+        ),
+    )
+
+    assert module._resolve_road_snapshot_date() == "2026-07-15"
+
+    output = capsys.readouterr().out
+    assert "2026-07-15" in output
+    assert "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE" in output
+
+
+def test_stop_emr_serverless_application_runs_after_the_last_reporting_task():
+    """파이프라인이 다 끝난 뒤에만 Application을 내린다(#432) — idle timeout(15분)을
+    기다리지 않게 하되, 앞 task가 실패해 여기까지 오지 못하면 기존 timeout이
+    안전망으로 남아야 하므로 기본 trigger_rule(all_success)을 유지한다."""
+    from airflow.providers.amazon.aws.operators.emr import (
+        EmrServerlessStopApplicationOperator,
+    )
+    from airflow.providers.standard.operators.python import ShortCircuitOperator
+
+    module = _load_dag_module()
+
+    check = module.dag.get_task("check_emr_serverless_idle")
+    stop = module.dag.get_task("stop_emr_serverless_application")
+
+    assert isinstance(check, ShortCircuitOperator)
+    assert isinstance(stop, EmrServerlessStopApplicationOperator)
+    assert check.upstream_task_ids == {"report_processing_counts"}
+    assert stop.upstream_task_ids == {"check_emr_serverless_idle"}
+    assert stop.downstream_task_ids == set()
+    for task in (check, stop):
+        assert task.trigger_rule == "all_success"
+
+
+def test_stop_is_skipped_rather_than_failed_when_another_dag_is_still_running():
+    """data_quality_audit(daily 03:00 UTC)이 같은 Application을 쓰므로, 겹치는
+    시간대에는 stop을 건너뛰어야 한다. ShortCircuitOperator가 False를 돌려주면
+    downstream은 failed가 아니라 skipped가 되어 DAG Run은 성공으로 남는다(#432)."""
+    module = _load_dag_module()
+
+    check = module.dag.get_task("check_emr_serverless_idle")
+
+    assert check.python_callable.__name__ == "emr_serverless_has_no_running_jobs"
+    assert check.op_kwargs == {
+        "application_id": "{{ var.value.EMR_SERVERLESS_APPLICATION_ID }}"
+    }
+
+
+def test_stop_task_is_not_counted_as_a_batch_job_submission():
+    """stop task는 Job Run을 제출하지 않으므로 EmrServerlessStartJobOperator
+    검증(test_all_emr_tasks_submit_with_the_shared_variables) 대상이 아니다."""
+    module = _load_dag_module()
+
+    stop = module.dag.get_task("stop_emr_serverless_application")
+
+    assert not isinstance(stop, EmrServerlessStartJobOperator)
