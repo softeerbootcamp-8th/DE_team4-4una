@@ -26,6 +26,27 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # 보존 정책(#481). 이 값이 없으면 유일한 제한이 log.retention.hours 기본값
+      # 168시간(7일)뿐인데, zstd 적용 후 1.59 GB/hour 기준 7일은 267 GB라 실질적으로
+      # 무제한이다. 이 볼륨은 Airflow/serving-api/dashboard와 공유하므로 Kafka가
+      # 디스크를 채우면 broker만 죽는 게 아니라 scheduler와 API까지 멈춘다.
+      #
+      # retention은 produce를 거부하지 않는다 -- 상한을 넘으면 가장 오래된 segment를
+      # 지워 자리를 만든다. 즉 쓰기를 막는 장치가 아니라, 디스크가 꽉 차서 쓰기가
+      # 막히는 상황을 막는 장치다.
+      #
+      # 12시간을 고른 근거: Kafka는 consumer가 읽었는지 확인하지 않고 삭제하므로
+      # 보존 기간은 곧 stream-processor 장애를 발견해 복구하기까지의 시간이다.
+      # 1시간 이내 복구는 파이프라인이 흡수하고(standard_score_pipeline이 매시 정각에
+      # 직전 시간 Bronze를 읽는다), 발견은 그 DAG의 매시간 Slack 알림에 실리는
+      # feature_count가 0인 것으로 이루어진다 -- 야간이면 8~12시간이 걸린다.
+      # 그보다 긴 미발견은 디스크가 아니라 알림으로 풀 문제다.
+      KAFKA_LOG_RETENTION_HOURS: 12
+      # partition당 값이다. 3 partition이므로 topic 실제 상한은 19.2 GiB.
+      KAFKA_LOG_RETENTION_BYTES: 6871947674
+      # 기본값 1 GiB로는 상한 제어가 거칠다. Kafka는 segment 단위로만 삭제하고
+      # active segment는 지우지 못하므로, segment가 크면 실사용량이 상한을 넘을 수 있다.
+      KAFKA_LOG_SEGMENT_BYTES: 268435456
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
