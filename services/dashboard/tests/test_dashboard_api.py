@@ -14,11 +14,17 @@ from dashboard.dashboard_service import (
     BoroughSummary,
     SegmentPayload,
     UnknownBoroughError,
+    VehicleProfile,
 )
 from fastapi.testclient import TestClient
 
 BOOTSTRAP = Bootstrap(
     total_segment_count=166_222,
+    vehicle_profiles=(
+        VehicleProfile(vehicle_profile_id=0, name="All vehicles"),
+        VehicleProfile(vehicle_profile_id=3, name="SUV, compact"),
+    ),
+    default_vehicle_profile_id=0,
     boroughs=(
         BoroughSummary(
             name="Manhattan",
@@ -49,7 +55,7 @@ PAYLOAD = SegmentPayload(
 
 class _StubService:
     def __init__(self, **overrides) -> None:
-        self.calls: list[str | None] = []
+        self.calls: list[tuple[str | None, int | None]] = []
         self._overrides = overrides
 
     def bootstrap(self):
@@ -57,8 +63,8 @@ class _StubService:
             raise self._overrides["bootstrap"]
         return BOOTSTRAP
 
-    def get_segments(self, borough):
-        self.calls.append(borough)
+    def get_segments(self, borough, vehicle_profile_id=None):
+        self.calls.append((borough, vehicle_profile_id))
         if "segments" in self._overrides:
             raise self._overrides["segments"]
         return PAYLOAD
@@ -92,6 +98,29 @@ def test_health_returns_plain_text_ok(client):
     assert response.headers["content-type"].startswith("text/plain")
 
 
+def test_bootstrap_exposes_the_vehicle_profile_catalog(client):
+    """Serving API가 프로필 목록을 노출하지 않아 대시보드가 들고 내려준다."""
+    payload = client.get("/api/bootstrap").json()
+
+    assert payload["default_vehicle_profile_id"] == 0
+    assert payload["vehicle_profiles"] == [
+        {"vehicle_profile_id": 0, "name": "All vehicles"},
+        {"vehicle_profile_id": 3, "name": "SUV, compact"},
+    ]
+
+
+def test_the_requested_vehicle_profile_is_passed_through(client, stub):
+    client.get("/api/segments", params={"borough": "Manhattan", "vehicle_profile_id": 3})
+
+    assert stub.calls == [("Manhattan", 3)]
+
+
+def test_a_negative_vehicle_profile_is_rejected(client):
+    response = client.get("/api/segments", params={"vehicle_profile_id": -1})
+
+    assert response.status_code == 422
+
+
 def test_bootstrap_exposes_boroughs_and_snapshot_size(client):
     payload = client.get("/api/bootstrap").json()
 
@@ -105,7 +134,7 @@ def test_bootstrap_exposes_boroughs_and_snapshot_size(client):
 def test_segments_returns_the_whole_borough(client, stub):
     payload = client.get("/api/segments", params={"borough": "Manhattan"}).json()
 
-    assert stub.calls == ["Manhattan"]
+    assert stub.calls == [("Manhattan", None)]
     assert payload["segment_count"] == 30_000
     assert payload["truncated"] is False
     assert payload["features"]["type"] == "FeatureCollection"
@@ -114,7 +143,7 @@ def test_segments_returns_the_whole_borough(client, stub):
 def test_borough_is_optional(client, stub):
     client.get("/api/segments")
 
-    assert stub.calls == [None]
+    assert stub.calls == [(None, None)]
 
 
 def test_the_cached_gzip_body_is_sent_as_is(client):

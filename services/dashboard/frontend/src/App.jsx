@@ -9,6 +9,7 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState(null);
   const [bootstrapError, setBootstrapError] = useState(null);
   const [borough, setBorough] = useState(null);
+  const [vehicleProfileId, setVehicleProfileId] = useState(null);
   const [segments, setSegments] = useState(null);
   const [segmentsVersion, setSegmentsVersion] = useState(0);
   const [meta, setMeta] = useState(null);
@@ -18,7 +19,11 @@ export default function App() {
   useEffect(() => {
     const controller = new AbortController();
     fetchBootstrap(controller.signal)
-      .then(setBootstrap)
+      .then((payload) => {
+        setBootstrap(payload);
+        // 배포 기본값에서 시작한다. 사용자가 고르기 전에는 서버가 쓰는 값과 같다.
+        setVehicleProfileId(payload.default_vehicle_profile_id);
+      })
       .catch((exc) => {
         if (exc.name !== "AbortError") setBootstrapError(exc.message);
       });
@@ -28,7 +33,8 @@ export default function App() {
   // borough를 고르기 전에는 outline만 보여준다. zone master가 없는 배포에서는
   // borough 개념 자체가 없으므로 스냅샷을 바로 받는다.
   const needsBorough = bootstrap != null && bootstrap.boroughs.length > 0;
-  const shouldFetch = bootstrap != null && (!needsBorough || borough != null);
+  const shouldFetch =
+    bootstrap != null && vehicleProfileId != null && (!needsBorough || borough != null);
 
   useEffect(() => {
     if (!shouldFetch) {
@@ -39,7 +45,7 @@ export default function App() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetchSegments({ borough, signal: controller.signal })
+    fetchSegments({ borough, vehicleProfileId, signal: controller.signal })
       .then((payload) => {
         setSegments(payload.features);
         setSegmentsVersion((version) => version + 1);
@@ -54,7 +60,7 @@ export default function App() {
     // borough를 연달아 바꾸면 진행 중이던 요청을 취소한다. 그러지 않으면 먼저
     // 보낸 요청의 늦은 응답이 나중에 고른 borough를 덮어쓴다.
     return () => controller.abort();
-  }, [shouldFetch, borough]);
+  }, [shouldFetch, borough, vehicleProfileId]);
 
   const handleSelectBorough = useCallback((name) => {
     setBorough(name === ALL_BOROUGHS ? null : name);
@@ -86,6 +92,20 @@ export default function App() {
             {[ALL_BOROUGHS, ...boroughs.map((item) => item.name)].map((name) => (
               <option key={name} value={name}>
                 {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Vehicle profile
+          <select
+            value={vehicleProfileId ?? ""}
+            onChange={(event) => setVehicleProfileId(Number(event.target.value))}
+            disabled={bootstrap == null}
+          >
+            {(bootstrap?.vehicle_profiles ?? []).map((profile) => (
+              <option key={profile.vehicle_profile_id} value={profile.vehicle_profile_id}>
+                {profile.name}
               </option>
             ))}
           </select>
