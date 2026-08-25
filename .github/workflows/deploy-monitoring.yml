@@ -4,14 +4,14 @@
 #   exporters  -> Project EC2    (node-exporter, cAdvisor)
 #   monitoring -> Monitoring EC2 (Prometheus, Grafana)
 #
-# 다른 배포 워크플로와 달리 빌드할 이미지가 없다. 모두 서드파티 이미지를 그대로 쓰므로
-# ECR도 AWS 자격증명도 필요하지 않고, 설정 파일을 보내 compose로 반영하는 것이 전부다.
+# Prometheus/Grafana는 서드파티 이미지, ops-agent(#447)만 예외로 Monitoring EC2에서 저장소를 통째로 받아 직접 docker build한다(ECR 불필요).
 name: Deploy Monitoring
 
 on:
   # infra/monitoring/statsd는 여기 없다. Airflow StatsD Exporter가 쓰는 것이라 아래
   # rsync가 statsd/를 제외하고, 재기동은 deploy-orchestration.yml이 담당한다.
   # README와 .env.example은 배포에 영향이 없어 하위 디렉터리를 명시한다.
+  # services/ops-agent 등 나머지는 ops-agent(#447)를 로컬 docker build하는 데 필요해서 추가했다.
   push:
     branches: [develop]
     paths:
@@ -19,6 +19,10 @@ on:
       - 'infra/compose/exporters.yaml'
       - 'infra/monitoring/prometheus/**'
       - 'infra/monitoring/grafana/**'
+      - 'services/ops-agent/**'
+      - 'libs/de4-core/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
       - '.github/workflows/deploy-monitoring.yml'
   # 수동 실행에서는 경로 판정이 없으므로 어느 쪽을 돌릴지 직접 고른다.
   workflow_dispatch:
@@ -58,6 +62,10 @@ jobs:
               - 'infra/compose/monitoring.yaml'
               - 'infra/monitoring/prometheus/**'
               - 'infra/monitoring/grafana/**'
+              - 'services/ops-agent/**'
+              - 'libs/de4-core/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
               - '.github/workflows/deploy-monitoring.yml'
             exporters:
               - 'infra/compose/exporters.yaml'
@@ -267,27 +275,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$TARGET_DIR/infra/compose'"
+          ssh "${EC2_USER}@${EC2_HOST}" "mkdir -p '$TARGET_DIR'"
 
-          # compose 파일은 monitoring.yaml만 보낸다. 이 호스트에서 실행하지 않는
-          # airflow/kafka/postgres compose까지 올려둘 이유가 없다.
-          rsync -az \
-            -e 'ssh -o StrictHostKeyChecking=yes' \
-            infra/compose/monitoring.yaml \
-            "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/compose/"
-
-          # monitoring.yaml의 볼륨이 ../monitoring/... 상대 경로라 infra/ 구조를 그대로
-          # 유지해야 한다.
-          #
-          # .env를 제외하는 것이 중요하다. 이 파일은 저장소에 없고 인스턴스에만 있어서,
-          # --delete와 함께 제외하지 않으면 삭제되고 compose가 기동에 실패한다.
-          # statsd 매핑은 Project EC2의 Airflow StatsD Exporter가 쓰는 것이라 이 호스트
-          # 에는 필요 없다.
+          # ops-agent(#447)는 build context가 TARGET_DIR 전체라 uv workspace 전체가 있어야 `uv sync --locked`가 통과한다(부분 트리로 실제 빌드해 확인) — deploy-orchestration.yml처럼 저장소 전체를 보낸다.
+          # .env/statsd/*.pem은 인스턴스에만 있는 파일이라 --delete로 지워지지 않게 제외한다.
           rsync -az --delete \
+            --exclude='.git/' \
             --exclude='.env' \
+            --exclude='.venv/' \
+            --exclude='**/.venv/' \
+            --exclude='data/' \
+            --exclude='dist/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            --exclude='.ruff_cache/' \
             --exclude='statsd/' \
+            --exclude='*.pem' \
             -e 'ssh -o StrictHostKeyChecking=yes' \
-            infra/monitoring/ "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/infra/monitoring/"
+            ./ "${EC2_USER}@${EC2_HOST}:${TARGET_DIR}/"
 
       # .env는 저장소에 없고 인스턴스에서 사람이 만든다. 없으면 compose가
       # Project/Spark EC2 private IP 필수값 오류로 죽는데 원인이 바로 보이지
@@ -301,6 +306,13 @@ jobs:
           if ! ssh "${EC2_USER}@${EC2_HOST}" "test -f '$TARGET_DIR/infra/monitoring/.env'"; then
             echo "::error::$TARGET_DIR/infra/monitoring/.env 가 없습니다."
             echo "인스턴스에서 먼저 만들어야 합니다. infra/monitoring/.env.example을 참고하세요."
+            exit 1
+          fi
+
+          # ops-agent(#447)의 SSH 개인키. 인스턴스에 직접 준비해야 하는 파일이라 없으면 런타임 SSH 실패로 뒤늦게 드러나므로 여기서 먼저 잡는다.
+          if ! ssh "${EC2_USER}@${EC2_HOST}" "test -f '$TARGET_DIR/infra/monitoring/ops-agent/stream_processor.pem'"; then
+            echo "::error::$TARGET_DIR/infra/monitoring/ops-agent/stream_processor.pem 이 없습니다."
+            echo "인스턴스에서 먼저 준비해야 합니다. infra/monitoring/.env.example을 참고하세요."
             exit 1
           fi
 
@@ -327,11 +339,13 @@ jobs:
           #
           # Grafana dashboard JSON은 예외다 — provisioning의 updateIntervalSeconds가
           # 30초라 재기동 없이 반영된다.
+          #
+          # --build는 ops-agent(#447) 이미지를 소스 기준으로 다시 빌드한다 — build: 없는 prometheus/grafana는 영향받지 않는다.
           ssh "${EC2_USER}@${EC2_HOST}" \
             "cd '$TARGET_DIR' \
             && docker compose \
                  --env-file infra/monitoring/.env \
-                 -f infra/compose/monitoring.yaml up -d \
+                 -f infra/compose/monitoring.yaml up -d --build \
             && docker compose \
                  --env-file infra/monitoring/.env \
                  -f infra/compose/monitoring.yaml restart prometheus grafana"
@@ -372,6 +386,28 @@ jobs:
 
           wait_for prometheus http://localhost:9090/-/ready
           wait_for grafana http://localhost:3000/api/health
+
+          # ops-agent(#447)는 포트 미공개라 curl로 확인 못 하므로 컨테이너 running 상태만 본다.
+          wait_for_running() {
+            name="$1"
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              status="$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "not found")"
+              if [ "$status" = "running" ]; then
+                printf '[health] %s 정상(running)\n' "$name"
+                return 0
+              fi
+              sleep "$interval"
+            done
+
+            printf '[health] %s 실패 (status=%s)\n' "$name" "$status"
+            docker logs --tail 30 "$name" 2>&1 || true
+            return 1
+          }
+
+          wait_for_running ops-agent
           EOF
 
       # 그래프에 "여기서 배포됨" 선을 찍어 지표 변화와 배포 시점을 바로 연관짓는다.

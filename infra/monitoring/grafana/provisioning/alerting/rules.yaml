@@ -1,0 +1,92 @@
+# 예제 alert rule(#447). expr은 spark-streaming.json/prometheus_client.STREAM_PROCESSOR_STATUS_QUERY와 항상 동일하게 유지한다.
+# 값 3(QUERY STOPPED)/4(TARGET DOWN)만 StreamProcessorDown(auto_remediate)으로 재시작 대상이고,
+# 1(EVENT DATA STALE)/2(PROGRESS STALE)는 StreamProcessorStale로 분리해 알림만 보낸다 — 잠깐의 stale로 컨테이너를 재시작하면 안 되기 때문이다.
+# within_range의 params는 경계값을 배타적으로 취급한다([1,2]는 1도 2도 안 잡힘, 실제 Grafana로 확인함) — 그래서 [0.5, 2.5]를 쓴다.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: spark-streaming
+    folder: Ops Agent
+    interval: 1m
+    rules:
+      - uid: stream-processor-down
+        title: StreamProcessorDown
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                (4 * (up{job="stream-processor"} == bool 0) > 0)
+                or (3 * (stream_processor_query_running{job="stream-processor"} == bool 0) > 0)
+                or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"})
+                    and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)) > bool 330) > 0)
+                or (1 * (stream_processor_event_time_lag_seconds{job="stream-processor"} > bool 330) > 0)
+                or (0 * up{job="stream-processor"})
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        labels:
+          service: stream-processor
+          severity: high
+          auto_remediate: "true"
+        annotations:
+          summary: "stream-processor Component Status가 QUERY STOPPED 또는 TARGET DOWN 상태로 2분 이상 지속됨"
+
+      - uid: stream-processor-stale
+        title: StreamProcessorStale
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                (4 * (up{job="stream-processor"} == bool 0) > 0)
+                or (3 * (stream_processor_query_running{job="stream-processor"} == bool 0) > 0)
+                or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"})
+                    and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)) > bool 330) > 0)
+                or (1 * (stream_processor_event_time_lag_seconds{job="stream-processor"} > bool 330) > 0)
+                or (0 * up{job="stream-processor"})
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: within_range
+                    params: [0.5, 2.5]
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        labels:
+          service: stream-processor
+          severity: medium
+        annotations:
+          summary: "stream-processor Component Status가 EVENT DATA STALE 또는 PROGRESS STALE 상태로 2분 이상 지속됨 (자동 조치 없음, 확인 필요)"

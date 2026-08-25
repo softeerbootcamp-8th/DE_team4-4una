@@ -1,0 +1,27 @@
+[project]
+name = "ops-agent"
+version = "0.1.0"
+description = "Receives Grafana alerts, re-verifies incidents against Prometheus, and runs allowlisted remediation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "de4-core",
+    "fastapi>=0.136.3,<0.137.0",
+    "pyyaml>=6.0",
+    "requests>=2.32,<3.0",
+    "slack_sdk>=3.36,<4.0",
+    "uvicorn[standard]>=0.52.3",
+]
+
+# httpx2는 starlette.testclient가 요구한다(serving-api와 같은 이유).
+[dependency-groups]
+dev = [
+    "httpx2>=2.10.0",
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+ops-agent = "ops_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
