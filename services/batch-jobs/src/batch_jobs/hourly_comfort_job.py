@@ -10,13 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 from pyspark import StorageLevel
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 
 from batch_jobs.comfort_scoring_config import (
     DEFAULT_HOURLY_SCORING_CONFIG_PATH,
     load_hourly_scoring_config,
 )
-from batch_jobs.hourly_comfort import calculate_hourly_comfort_scores
+from batch_jobs.hourly_comfort import build_hourly_scoring_plan
 from batch_jobs.hourly_comfort_storage import write_hourly_comfort_partition
 from batch_jobs.hourly_segment_feature_storage import (
     hour_output_path as feature_hour_path,
@@ -86,28 +86,31 @@ def run_hourly_comfort_job(
         feature_hour_path(config.feature_input_path, target_hour)
     )
     scoring_config = load_hourly_scoring_config(config.scoring_config_path)
-    result = calculate_hourly_comfort_scores(
-        features, run_id, processed_at, scoring_config
-    )
-    scored = _select_declared_score_schema(result.scored).persist(
-        StorageLevel.MEMORY_AND_DISK
-    )
-    rejected = result.rejected.persist(StorageLevel.MEMORY_AND_DISK)
+    plan = build_hourly_scoring_plan(features, run_id, processed_at, scoring_config)
+    # scored와 rejected는 같은 채점 결과에서 갈라지는 두 갈래다. 나눈 뒤에 각각 캐시하면
+    # 공통 lineage(rate -> speed scale -> 방향별 점수)를 두 번 계산하므로, 분기 전에
+    # 필요한 컬럼만 남긴 공통 결과를 한 번만 캐시한다.
+    classified = plan.classified.persist(StorageLevel.MEMORY_AND_DISK)
 
     try:
+        # 이 Action 하나가 캐시를 채우면서 입력 검증과 두 출력의 행 수를 함께 구한다.
+        # 이후 쓰기는 캐시에서 필터만 하므로 점수 계산이 다시 일어나지 않는다.
+        counts = plan.audit(classified)
         # 재실행해도 행이 누적되지 않도록 해당 시간 파티션만 교체한다(ADR-0011).
         score_result = write_hourly_comfort_partition(
             spark,
-            scored,
+            plan.scored(classified),
             config.score_output_path,
             target_hour,
             run_id,
             HOURLY_COMFORT_SCORE_SCHEMA,
+            expected_count=counts.scored_count,
         )
         # rejected에는 선언된 스키마 상수가 없다(hourly_comfort.py가 즉석에서 만든다).
         # writer가 read-back에 쓸 스키마가 필요해 자기 것을 그대로 넘긴다.
         # 격리 대상이 하나도 없는 것이 정상이므로 빈 결과를 허용한다 — 점수 출력과 달리
         # 0행이 이상 신호가 아니다.
+        rejected = plan.rejected(classified)
         rejected_result = write_hourly_comfort_partition(
             spark,
             rejected,
@@ -116,13 +119,13 @@ def run_hourly_comfort_job(
             run_id,
             rejected.schema,
             allow_empty=True,
+            expected_count=counts.rejected_count,
         )
         summary = HourlyComfortJobSummary(
             score_result.row_count, rejected_result.row_count
         )
     finally:
-        scored.unpersist()
-        rejected.unpersist()
+        classified.unpersist()
 
     _log_summary(
         config,
@@ -160,15 +163,6 @@ def _log_summary(
         config.rejected_output_path,
         summary.scored_count,
         summary.rejected_count,
-    )
-
-
-def _select_declared_score_schema(scored: DataFrame) -> DataFrame:
-    return scored.select(
-        *[
-            scored[field.name].cast(field.dataType).alias(field.name)
-            for field in HOURLY_COMFORT_SCORE_SCHEMA
-        ]
     )
 
 

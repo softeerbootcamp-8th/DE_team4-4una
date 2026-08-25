@@ -43,6 +43,7 @@ def write_hourly_comfort_partition(
     expected_schema: StructType,
     *,
     allow_empty: bool = False,
+    expected_count: int | None = None,
 ) -> HourlyComfortWriteResult:
     """Replace only the requested UTC-hour partition after a read-back check.
 
@@ -53,6 +54,11 @@ def write_hourly_comfort_partition(
     아니므로 기본은 거부다(`hourly_segment_feature_storage`가 Silver2에 거는 가드와
     같다). quarantine처럼 비어 있는 것이 정상인 출력만 True로 열어 준다 — 그때는
     기존 파티션을 지우기만 하고 새로 쓰지 않는다.
+
+    `expected_count`는 호출자가 이미 행 수를 알고 있을 때 넘긴다
+    (`hourly_segment_feature_storage.write_hourly_segment_features`의 `result_count`와
+    같은 규약이다). 넘기지 않으면 여기서 직접 센다. 이 값은 아래 read-back 대조의
+    기준이 되므로, `frame`의 실제 행 수와 다른 값을 넘기면 교체 직전에 실패한다.
     """
     _require_safe_run_id(run_id)
     _require_utc_hour(target_hour)
@@ -60,7 +66,8 @@ def write_hourly_comfort_partition(
 
     final_path = hour_output_path(output_root, target_hour)
     staging_path = f"{output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
-    expected_count = frame.count()
+    if expected_count is None:
+        expected_count = frame.count()
     if expected_count == 0 and not allow_empty:
         # 여기서 막지 않으면 아래 _replace_partition이 기존 정상 데이터를 지운다.
         raise ValueError("refusing to write an empty result over an existing hour")
