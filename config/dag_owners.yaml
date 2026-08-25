@@ -1,11 +1,13 @@
 # DAG/task 담당자 및 심각도 레지스트리 (#409). services/orchestration/jobs/dag_owners.py가
 # 읽는다. 실제 팀원 정보로 값을 채워 넣는다 — 아래는 스키마를 보여주는 예시다.
+#
+# `services:` 최상위 key(#447)는 ops_agent/owners.py가 읽는다. dag_owners.py는 무시한다.
 
 users:
   alice:
     email: alice@example.com   # slack_id가 없으면 알림 시점에 users.lookupByEmail로 조회
   bob:
-    slack_id: U0456GHIJKL      # 이미 알고 있으면 email 조회를 건너뛰고 바로 멘션
+    slack_id: U0BD2HRPCH4      # 이미 알고 있으면 email 조회를 건너뛰고 바로 멘션
   hi653:
     email: hi653@naver.com     # Slack 알림 수동 검증용(#409)
 
@@ -29,3 +31,9 @@ dags:
   bronze_compaction:
     owner: hi653   # Slack 알림 수동 검증(#409) — 검증 끝나면 bob으로 되돌린다
     severity: low
+
+# ops-agent(#447)가 escalation 시 멘션할 서비스별 담당자. dag_id가 아니라 alert label의 service 값과 매칭한다.
+services:
+  stream-processor:
+    owner: bob
+    severity: high
