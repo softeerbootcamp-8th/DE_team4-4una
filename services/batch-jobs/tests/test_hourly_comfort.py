@@ -193,6 +193,15 @@ class TestCalculateHourlyComfortScores:
 
         assert (counts.scored_count, counts.rejected_count) == (1, 1)
 
+    def test_audit_of_an_empty_partition_reports_zero(self, spark):
+        """global aggregation은 빈 입력에도 한 행을 돌려주므로 0으로 확정돼야 한다."""
+        features = spark.createDataFrame([], HOURLY_SEGMENT_FEATURE_SCHEMA)
+        counts = build_hourly_scoring_plan(
+            features, "silver3-run", self.PROCESSED_AT
+        ).audit()
+
+        assert (counts.scored_count, counts.rejected_count) == (0, 0)
+
     # 데이터를 읽어야 아는 검증은 audit()의 단일 집계로 모았다. 계획을 만드는 단계는
     # 표현식만 세우므로 여기서는 아직 실패하지 않는다.
     def test_rejects_an_unsupported_feature_version(self, spark):

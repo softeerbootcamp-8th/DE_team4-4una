@@ -41,7 +41,9 @@ def _comfort_config(**overrides: float) -> ComfortScoreConfig:
     )
 
 
-def _hourly_config(weights: tuple[tuple[str, float], ...]) -> HourlyScoringConfig:
+def _hourly_config_with_components(
+    components: tuple[ComponentRule, ...],
+) -> HourlyScoringConfig:
     return HourlyScoringConfig(
         scoring_version="1.0.0",
         compatible_feature_versions=frozenset({"v1"}),
@@ -51,7 +53,13 @@ def _hourly_config(weights: tuple[tuple[str, float], ...]) -> HourlyScoringConfi
             ("a", NormalizationRange(comfortable=0.0, uncomfortable=1.0)),
             ("b", NormalizationRange(comfortable=0.0, uncomfortable=1.0)),
         ),
-        components=(ComponentRule(output_column="vertical_score", weights=weights),),
+        components=components,
+    )
+
+
+def _hourly_config(weights: tuple[tuple[str, float], ...]) -> HourlyScoringConfig:
+    return _hourly_config_with_components(
+        (ComponentRule(output_column="vertical_score", weights=weights),)
     )
 
 
@@ -85,6 +93,12 @@ class TestHourlyScoringConfigPremises:
         # 합은 1이라 기존 검사는 통과한다. penalty가 (1.0, 0.0)이면 점수는 150이 된다.
         with pytest.raises(ValueError, match="must not be negative"):
             _hourly_config((("a", -0.5), ("b", 1.5)))
+
+    def test_rejects_an_empty_component_set(self) -> None:
+        # component별 검증은 루프 안에 있어서, 비어 있으면 아무것도 검증하지 않고
+        # 통과한다. 그 설정으로는 방향별 점수를 하나도 만들 수 없다.
+        with pytest.raises(ValueError, match="components must be configured"):
+            _hourly_config_with_components(())
 
     def test_the_shipped_config_satisfies_the_premises(self) -> None:
         assert load_hourly_scoring_config() is not None

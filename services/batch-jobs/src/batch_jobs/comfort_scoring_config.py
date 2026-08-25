@@ -50,6 +50,10 @@ class HourlyScoringConfig:
             for _, anchors in self.normalizers
         ):
             raise ValueError("comfortable anchors must be below uncomfortable anchors")
+        # 아래 루프가 component별 검증을 하므로, 비어 있으면 아무것도 검증하지 않고
+        # 통과한다. 그런 설정은 방향별 점수를 하나도 만들지 못해 유효하지 않다.
+        if not self.components:
+            raise ValueError("scoring components must be configured")
         for component in self.components:
             # 합이 1이어도 음수가 섞이면 점수가 0~100을 벗어난다(ADR-0012).
             # 예: 가중치 (-0.5, 1.5)에 penalty (1.0, 0.0)이면 점수가 150이 된다.

@@ -81,7 +81,12 @@ class HourlyScoringPlan:
         `rejected()`는 캐시된 결과에서 필터만 한다.
         """
         frame = self.classified if classified is None else classified
-        return self._interpret_audit(frame.agg(*self.audit_columns).first())
+        row = frame.agg(*self.audit_columns).first()
+        if row is None:
+            # groupBy 없는 global aggregation은 빈 입력에도 한 행을 돌려주므로 정상
+            # 경로에서는 도달하지 않는다. 여기 걸리면 집계식 구성이 잘못된 것이다.
+            raise RuntimeError("hourly scoring audit returned no aggregation row")
+        return self._interpret_audit(row)
 
     def scored(self, classified: DataFrame | None = None) -> DataFrame:
         """점수를 만든 행을 선언된 Silver3 스키마 그대로 돌려준다."""
@@ -112,12 +117,13 @@ class HourlyScoringPlan:
         )
 
     def _interpret_audit(self, row) -> AuditCounts:
-        # collect_set은 NULL을 버리므로 NULL feature_version은 따로 센다.
         if row["null_version_count"]:
             raise ValueError("feature_version must not be null")
-        versions = set(row["feature_versions"])
-        if unsupported := versions - self.config.compatible_feature_versions:
-            raise ValueError(f"unsupported feature versions: {sorted(unsupported)}")
+        if row["unsupported_version_count"]:
+            raise ValueError(
+                "unsupported feature versions detected: "
+                f"{row['unsupported_version_sample']!r}"
+            )
         if row["total_count"] != row["distinct_key_count"]:
             raise ValueError("hourly feature input contains duplicate primary keys")
         return AuditCounts(
@@ -163,24 +169,35 @@ def build_hourly_scoring_plan(
 
     return HourlyScoringPlan(
         classified=classified,
-        audit_columns=_audit_columns(),
+        audit_columns=_audit_columns(config),
         config=config,
         run_id=run_id,
         processed_at=processed_at,
     )
 
 
-def _audit_columns() -> tuple[Column, ...]:
-    """입력 검증과 두 출력의 행 수를 한 번에 구하는 집계식."""
+def _audit_columns(config: HourlyScoringConfig) -> tuple[Column, ...]:
+    """입력 검증과 두 출력의 행 수를 한 번에 구하는 집계식.
+
+    버전 호환은 distinct 목록을 driver로 가져와 집합 연산하지 않고 Spark 안에서
+    카운터로 판정한다. driver로 넘어오는 것은 숫자와 예시 한 건뿐이라, feature_version
+    카디널리티가 커져도 driver 메모리가 늘지 않는다.
+    """
     rejected = F.col(REJECT_REASON_COLUMN)
+    version = F.col("feature_version")
+    unsupported_version = version.isNotNull() & ~version.isin(
+        *sorted(config.compatible_feature_versions)
+    )
     return (
         F.count(F.lit(1)).alias("total_count"),
         F.count_distinct(F.struct(*[F.col(name) for name in PRIMARY_KEY])).alias(
             "distinct_key_count"
         ),
-        F.collect_set("feature_version").alias("feature_versions"),
         # 빈 입력에서 F.sum은 NULL이라 0으로 확정한다.
-        _count_where(F.col("feature_version").isNull()).alias("null_version_count"),
+        _count_where(version.isNull()).alias("null_version_count"),
+        _count_where(unsupported_version).alias("unsupported_version_count"),
+        # 실패 메시지에 쓸 예시 한 건. 해당 행이 없으면 NULL이다.
+        F.min(F.when(unsupported_version, version)).alias("unsupported_version_sample"),
         _count_where(rejected.isNull()).alias("scored_count"),
         _count_where(rejected.isNotNull()).alias("rejected_count"),
     )
@@ -201,9 +218,12 @@ def _eligible(config: HourlyScoringConfig) -> Column:
         for rule in config.components
         for name, _ in rule.weights
     }
+    # initializer가 없으면 source_features가 빈 경우 reduce가 TypeError를 낸다.
+    # config 검증이 빈 components를 막지만, 여기서도 안전하게 접힌다.
     nonnegative = reduce(
         lambda left, right: left & right,
         [F.col(name).isNull() | (F.col(name) >= 0) for name in sorted(source_features)],
+        F.lit(True),
     )
     return F.coalesce(
         F.col("avg_speed_mps").isNotNull()
