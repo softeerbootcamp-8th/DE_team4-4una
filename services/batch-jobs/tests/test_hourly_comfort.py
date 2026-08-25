@@ -7,6 +7,10 @@ from batch_jobs.comfort_scoring_config import (
 )
 from batch_jobs.hourly_comfort import calculate_hourly_comfort_scores
 from batch_jobs.hourly_comfort_job import HourlyComfortJobConfig, run_hourly_comfort_job
+from batch_jobs.hourly_comfort_storage import hour_output_path as score_hour_path
+from batch_jobs.hourly_segment_feature_storage import (
+    hour_output_path as feature_hour_path,
+)
 from batch_jobs.schemas import (
     HOURLY_COMFORT_SCORE_SCHEMA,
     HOURLY_SEGMENT_FEATURE_SCHEMA,
@@ -153,12 +157,19 @@ class TestRunHourlyComfortJob:
     PERIOD_START = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
     PROCESSED_AT = datetime(2026, 8, 15, 11, 5, tzinfo=UTC)
 
-    def feature_row(self, segment_id: str, sample_count: int = 36_000) -> dict[str, object]:
+    def feature_row(
+        self,
+        segment_id: str,
+        sample_count: int = 36_000,
+        period_start: datetime | None = None,
+    ) -> dict[str, object]:
+        # period_start를 바꿀 수 있어야 여러 시간 파티션을 만드는 테스트를 쓸 수 있다(#469).
+        period_start = period_start or self.PERIOD_START
         return {
             "segment_id": segment_id,
             "vehicle_profile_id": 1,
-            "data_period_start": self.PERIOD_START,
-            "data_period_end": self.PERIOD_START + timedelta(hours=1),
+            "data_period_start": period_start,
+            "data_period_end": period_start + timedelta(hours=1),
             "road_snapshot_date": date(2026, 8, 1),
             "avg_speed_mps": 7.0,
             "rms_accel_x": 0.2,
@@ -186,29 +197,38 @@ class TestRunHourlyComfortJob:
             "_run_id": "silver2-run",
         }
 
+    def write_feature_partition(self, spark, feature_root, period_start, rows):
+        """Silver2의 해당 시간 파티션에 feature 행을 쓴다."""
+        spark.createDataFrame(rows, HOURLY_SEGMENT_FEATURE_SCHEMA).write.parquet(
+            feature_hour_path(str(feature_root), period_start)
+        )
+
     def test_reads_scores_and_idempotently_writes_parquet(self, spark, tmp_path):
         input_path = tmp_path / "features"
         score_path = tmp_path / "scores"
         rejected_path = tmp_path / "rejected"
-        spark.createDataFrame(
+        self.write_feature_partition(
+            spark,
+            input_path,
+            self.PERIOD_START,
             [self.feature_row("accepted"), self.feature_row("rejected", sample_count=0)],
-            HOURLY_SEGMENT_FEATURE_SCHEMA,
-        ).write.parquet(str(input_path))
+        )
         config = HourlyComfortJobConfig(
             str(input_path),
             str(score_path),
             str(rejected_path),
             DEFAULT_HOURLY_SCORING_CONFIG_PATH,
         )
+        score_partition = score_hour_path(str(score_path), self.PERIOD_START)
 
         first_summary = run_hourly_comfort_job(
-            spark, config, "silver3-run", self.PROCESSED_AT
+            spark, config, "silver3-run", self.PROCESSED_AT, self.PERIOD_START
         )
-        first_rows = spark.read.parquet(str(score_path)).collect()
+        first_rows = spark.read.parquet(score_partition).collect()
         second_summary = run_hourly_comfort_job(
-            spark, config, "silver3-run", self.PROCESSED_AT
+            spark, config, "silver3-run", self.PROCESSED_AT, self.PERIOD_START
         )
-        scores = spark.read.parquet(str(score_path))
+        scores = spark.read.parquet(score_partition)
 
         assert first_summary == second_summary
         assert (first_summary.scored_count, first_summary.rejected_count) == (1, 1)
@@ -222,7 +242,70 @@ class TestRunHourlyComfortJob:
         assert row["_run_id"] == "silver3-run"
         stored_epoch = scores.select(F.unix_timestamp("_processed_at")).first()[0]
         assert stored_epoch == int(self.PROCESSED_AT.timestamp())
-        assert spark.read.parquet(str(rejected_path)).first()["segment_id"] == "rejected"
+        rejected_partition = score_hour_path(str(rejected_path), self.PERIOD_START)
+        assert spark.read.parquet(rejected_partition).first()["segment_id"] == "rejected"
+
+    def test_reads_only_the_target_hour_partition_of_silver2(self, spark, tmp_path):
+        """Silver2 루트가 아니라 target_hour 파티션만 읽는다 (#469)."""
+        input_path = tmp_path / "features"
+        other_hour = self.PERIOD_START + timedelta(hours=1)
+        self.write_feature_partition(
+            spark, input_path, self.PERIOD_START, [self.feature_row("in-scope")]
+        )
+        self.write_feature_partition(
+            spark,
+            input_path,
+            other_hour,
+            [self.feature_row("out-of-scope", period_start=other_hour)],
+        )
+        config = HourlyComfortJobConfig(
+            str(input_path),
+            str(tmp_path / "scores"),
+            str(tmp_path / "rejected"),
+            DEFAULT_HOURLY_SCORING_CONFIG_PATH,
+        )
+
+        summary = run_hourly_comfort_job(
+            spark, config, "silver3-run", self.PROCESSED_AT, self.PERIOD_START
+        )
+
+        # 전체를 읽었다면 2행이 나온다.
+        assert summary.scored_count == 1
+        scored = spark.read.parquet(
+            score_hour_path(str(tmp_path / "scores"), self.PERIOD_START)
+        )
+        assert [row["segment_id"] for row in scored.collect()] == ["in-scope"]
+
+    def test_writes_only_the_target_hour_partition_of_silver3(self, spark, tmp_path):
+        """두 번째 실행이 첫 번째 시간대의 파티션을 덮어쓰지 않는다 (#469)."""
+        input_path = tmp_path / "features"
+        score_path = tmp_path / "scores"
+        second_hour = self.PERIOD_START + timedelta(hours=1)
+        self.write_feature_partition(
+            spark, input_path, self.PERIOD_START, [self.feature_row("first")]
+        )
+        self.write_feature_partition(
+            spark,
+            input_path,
+            second_hour,
+            [self.feature_row("second", period_start=second_hour)],
+        )
+        config = HourlyComfortJobConfig(
+            str(input_path),
+            str(score_path),
+            str(tmp_path / "rejected"),
+            DEFAULT_HOURLY_SCORING_CONFIG_PATH,
+        )
+
+        run_hourly_comfort_job(
+            spark, config, "run-1", self.PROCESSED_AT, self.PERIOD_START
+        )
+        run_hourly_comfort_job(spark, config, "run-2", self.PROCESSED_AT, second_hour)
+
+        first = spark.read.parquet(score_hour_path(str(score_path), self.PERIOD_START))
+        second = spark.read.parquet(score_hour_path(str(score_path), second_hour))
+        assert [row["segment_id"] for row in first.collect()] == ["first"]
+        assert [row["segment_id"] for row in second.collect()] == ["second"]
 
     def test_job_config_supports_environment_overrides(self, tmp_path):
         config_path = tmp_path / "scoring.yaml"

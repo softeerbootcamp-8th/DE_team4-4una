@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     cleanse_parser.add_argument("--map-matching-config-path", type=Path)
 
     score_parser = subparsers.add_parser("score-hourly-comfort")
+    # 없으면 어느 시간대를 처리할지 결정할 수 없다. 기본값을 두면 DAG 배선이 빠졌을 때
+    # 조용히 엉뚱한 시간대를 처리하므로 명시적으로 실패시킨다.
+    score_parser.add_argument(
+        "--target-hour", type=datetime.fromisoformat, required=True
+    )
     score_parser.add_argument("--input-path")
     score_parser.add_argument("--output-path")
     score_parser.add_argument("--rejected-output-path")
@@ -224,7 +229,9 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
         spark = build_spark_session()
     try:
         with perf_phase(logger, f"hourly_scoring.{_JOB_PHASE}"):
-            summary = run_hourly_comfort_job(spark, config, run_id, datetime.now(UTC))
+            summary = run_hourly_comfort_job(
+                spark, config, run_id, datetime.now(UTC), arguments.target_hour
+            )
         print(
             json.dumps(
                 {

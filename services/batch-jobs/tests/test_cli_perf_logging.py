@@ -173,7 +173,15 @@ def test_score_hourly_comfort_logs_session_and_job(caplog, capsys, monkeypatch):
     )
 
     with caplog.at_level(logging.INFO):
-        main(["score-hourly-comfort", "--run-id", "run-1"])
+        main(
+            [
+                "score-hourly-comfort",
+                "--run-id",
+                "run-1",
+                "--target-hour",
+                "2026-08-25T02:00:00+00:00",
+            ]
+        )
 
     capsys.readouterr()
     assert set(_perf_payloads(caplog)) == {

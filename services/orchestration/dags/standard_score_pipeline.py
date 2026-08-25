@@ -261,6 +261,8 @@ with DAG(
                 "score-hourly-comfort",
                 "--run-id",
                 "{{ run_id }}",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
                 "--input-path",
                 _HOURLY_COMFORT_INPUT_PATH,
                 "--output-path",
