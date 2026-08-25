@@ -14,7 +14,7 @@ from pathlib import Path
 import psycopg2
 import pyarrow as pa
 import pyarrow.parquet as pq
-from de4_core import ObjectStore, join_uri
+from de4_core import ObjectStore, join_uri, perf_phase
 from psycopg2.extras import execute_values
 
 from . import current_score_quarantine
@@ -231,7 +231,13 @@ def run_current_score_job(
     standard 스냅샷이 새로 생겼으므로 갱신 대상이다.
     """
     rule_config = rule_config if rule_config is not None else load_weather_rule_config()
-    segment_zones = load_segment_zones(config.road_segment_uri, config.road_snapshot_date)
+    # 17만 건 road_segment를 S3에서 읽는 구간과 Postgres UPSERT 구간을 갈라 놓는다(#461).
+    # 이 job은 Spark를 안 쓰므로(ADR-0007) event log가 없고, 이 로그가 유일한 근거다.
+    with perf_phase(logger, "current_score.load_segment_zones") as fields:
+        segment_zones = load_segment_zones(
+            config.road_segment_uri, config.road_snapshot_date
+        )
+        fields["rows"] = len(segment_zones)
     weather_by_zone = load_latest_zone_weather(connection)
 
     if changed_zones_only:
@@ -250,7 +256,10 @@ def run_current_score_job(
     quarantined = 0
     suite = current_score_quarantine.load_expectation_suite()
 
-    with connection.cursor() as write_cursor:
+    with (
+        perf_phase(logger, "current_score.upsert_loop") as loop_fields,
+        connection.cursor() as write_cursor,
+    ):
         # 두 트리거(15분/시간별)가 겹쳐도 같은 행을 서로 덮어쓰지 않게 직렬화한다.
         write_cursor.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
         try:
@@ -291,6 +300,7 @@ def run_current_score_job(
             connection.rollback()
             raise
         finally:
+            loop_fields["rows"] = upserted
             write_cursor.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 
     logger.info(
