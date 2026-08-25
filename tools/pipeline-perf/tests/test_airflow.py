@@ -51,6 +51,41 @@ def test_missing_credentials_are_reported_before_any_request():
         client.dag_runs("standard_score_pipeline", 5)
 
 
+def test_dag_runs_filters_on_run_after_not_logical_date():
+    """`run_after`가 `dag_run_id`에 박히는 시각이라 "9시 실행"과 일치한다."""
+    client, session = _client({("GET", "/dagRuns"): FakeResponse({"dag_runs": []})}, token="jwt")
+
+    client.dag_runs("standard_score_pipeline", 5)
+    assert session.calls[-1][2]["params"] == {"limit": 5, "order_by": "-run_after"}
+
+    client.dag_runs(
+        "standard_score_pipeline",
+        1,
+        since="2026-08-25T09:00:00+00:00",
+        until="2026-08-25T10:00:00+00:00",
+        state="success",
+    )
+    assert session.calls[-1][2]["params"] == {
+        "limit": 1,
+        "order_by": "-run_after",
+        "run_after_gte": "2026-08-25T09:00:00+00:00",
+        "run_after_lte": "2026-08-25T10:00:00+00:00",
+        "state": "success",
+    }
+
+
+def test_a_single_dag_run_is_fetched_by_id_and_a_missing_one_is_none():
+    client, session = _client(
+        {("GET", "/dagRuns/run-1"): FakeResponse({"dag_run_id": "run-1", "state": "success"})},
+        token="jwt",
+    )
+
+    assert client.dag_run("standard_score_pipeline", "run-1")["dag_run_id"] == "run-1"
+    assert session.calls[-1][1].endswith("/dags/standard_score_pipeline/dagRuns/run-1")
+    # 라우트가 없으면 404 — 오타 하나 때문에 나머지 수집을 버리지 않는다.
+    assert client.dag_run("standard_score_pipeline", "does-not-exist") is None
+
+
 def test_xcom_value_is_json_decoded():
     client, _ = _client(
         {("GET", "/xcomEntries/return_value"): FakeResponse({"value": '{"rows": 12}'})},

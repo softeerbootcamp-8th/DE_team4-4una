@@ -1,6 +1,7 @@
-"""`pipeline-perf` command line: collect / render / compare (#462).
+"""`pipeline-perf` command line: collect / render / compare (#462, #492).
 
     pipeline-perf collect --dag-id standard_score_pipeline --last 10 --out out/perf/
+    pipeline-perf collect --dag-id standard_score_pipeline --run-id scheduled__...
     pipeline-perf render out/perf/*.json > docs/perf/<날짜>-<이름>.md
     pipeline-perf compare --before before.json --after after.json
 
@@ -49,6 +50,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="수집할 DAG. 여러 번 지정할 수 있다.",
     )
     collect.add_argument("--last", type=int, default=5, help="DAG별로 최근 몇 건을 볼지 (기본 5)")
+    collect.add_argument(
+        "--run-id",
+        action="append",
+        dest="run_ids",
+        help=(
+            "수집할 DAG run을 지목한다. 여러 번 지정할 수 있고, 지정하면 "
+            "--last/--since/--until은 무시한다."
+        ),
+    )
+    collect.add_argument(
+        "--since",
+        type=_iso_timestamp,
+        default=None,
+        help="이 시각 이후에 실행된 run만 본다 (run_after 기준, ISO-8601)",
+    )
+    collect.add_argument(
+        "--until",
+        type=_iso_timestamp,
+        default=None,
+        help="이 시각 이전에 실행된 run만 본다 (run_after 기준, ISO-8601)",
+    )
     collect.add_argument("--out", type=Path, default=_DEFAULT_OUT_DIR, help="원시 JSON을 쓸 디렉터리")
     collect.add_argument("--airflow-base-url", default=None)
     collect.add_argument("--application-id", default=None, help="EMR Serverless Application ID")
@@ -83,6 +105,9 @@ def _run_collect(args: argparse.Namespace) -> int:
     config = CollectConfig(
         dag_ids=args.dag_ids,
         last=args.last,
+        run_ids=tuple(args.run_ids or ()),
+        since=args.since,
+        until=args.until,
         application_id=args.application_id,
         log_uri=args.log_uri,
         bronze_input_uri=args.bronze_input_uri,
@@ -115,6 +140,23 @@ def _run_compare(args: argparse.Namespace) -> int:
     after = json.loads(args.after.read_text(encoding="utf-8"))
     _emit(render_comparison(before, after), args.out)
     return 0
+
+
+def _iso_timestamp(value: str) -> str:
+    """`--since`/`--until` 값을 API에 넘기기 전에 확인하고 정규화한다.
+
+    시간대를 안 쓴 값은 UTC로 읽는다. 파이프라인의 시각 표기가 전부 UTC라 그쪽이
+    사람이 리포트를 보며 입력하는 값과 맞다.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"ISO-8601 시각이어야 한다: {value!r} (예: 2026-08-25T09:00:00Z)"
+        ) from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.isoformat()
 
 
 def _boto_session(profile: str | None, region: str | None) -> Any:

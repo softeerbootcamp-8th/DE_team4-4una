@@ -69,9 +69,26 @@ class FakeAirflowClient:
         self._variables = variables or {}
         self._asset_events = asset_events or {}
         self._task_logs = task_logs or {}
+        self.dag_runs_calls: list[dict[str, Any]] = []
 
-    def dag_runs(self, dag_id: str, limit: int) -> list[dict[str, Any]]:
+    def dag_runs(
+        self,
+        dag_id: str,
+        limit: int,
+        since: str | None = None,
+        until: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.dag_runs_calls.append(
+            {"dag_id": dag_id, "limit": limit, "since": since, "until": until, "state": state}
+        )
         return self._dag_runs.get(dag_id, [])[:limit]
+
+    def dag_run(self, dag_id: str, dag_run_id: str) -> dict[str, Any] | None:
+        for dag_run in self._dag_runs.get(dag_id, []):
+            if dag_run["dag_run_id"] == dag_run_id:
+                return dag_run
+        return None
 
     def task_instances(self, dag_id: str, dag_run_id: str) -> list[dict[str, Any]]:
         return self._task_instances.get(dag_run_id, [])
