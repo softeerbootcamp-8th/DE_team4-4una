@@ -13,6 +13,7 @@ members = [
     "dashboard",
     "de4",
     "de4-core",
+    "ops-agent",
     "orchestration",
     "sensor-producer",
     "serving-api",
@@ -1656,6 +1657,41 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8f/73/0cbdebcb4cf545fdd328da14f5137e37d0770c3f26185e478b0d15d94f50/opentelemetry_semantic_conventions-0.65b0.tar.gz", hash = "sha256:f9b2b81e9d5b64f11bc952075e7e9c7fb0aab075c7fd1c46d597f1b919852d60", size = 148774, upload-time = "2026-07-16T15:25:46.902Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a6/0e/49df70d9b81fb5cbae4bbf2a49d865b09bcbcbc4eb53f5851b1027738d78/opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl", hash = "sha256:1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb", size = 204645, upload-time = "2026-07-16T15:25:30.688Z" },
+]
+
+[[package]]
+name = "ops-agent"
+version = "0.1.0"
+source = { editable = "services/ops-agent" }
+dependencies = [
+    { name = "de4-core" },
+    { name = "fastapi" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "slack-sdk" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "httpx2" },
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "de4-core", editable = "libs/de4-core" },
+    { name = "fastapi", specifier = ">=0.136.3,<0.137.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.32,<3.0" },
+    { name = "slack-sdk", specifier = ">=3.36,<4.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "httpx2", specifier = ">=2.10.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
 ]
 
 [[package]]
