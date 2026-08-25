@@ -67,24 +67,32 @@ export default function App() {
   }, []);
 
   const boroughs = bootstrap?.boroughs ?? [];
+  const profiles = bootstrap?.vehicle_profiles ?? [];
   const selected = boroughs.find((item) => item.name === borough) ?? null;
   const scopeCount = selected ? selected.segment_count : (bootstrap?.total_segment_count ?? 0);
   const scopeLabel = borough ?? "the snapshot";
 
+  // 툴팁과 로딩 안내는 요청한 프로필이 아니라 실제로 조회에 쓴 프로필을 보여준다.
+  // 대체가 일어났으면 다른 차량 기준 점수를 보고 있는 것이기 때문이다.
+  const effectiveProfileId = meta?.effective_vehicle_profile_id ?? vehicleProfileId;
+  const profileName = (id) =>
+    profiles.find((profile) => profile.vehicle_profile_id === id)?.name ?? null;
+
   return (
     <div className="app">
-      <h1 className="app__title">NYC Road Comfort Score Map</h1>
-      <p className="app__caption">
-        Road geometry comes from the configured S3 snapshot. Comfort scores come only from the
-        Serving API.
-      </p>
+      <header className="app__header">
+        <h1 className="app__title">NYC Road Comfort Score Map</h1>
+        <p className="app__caption">
+          Comfort scores run 0–100 — higher is smoother — for the selected vehicle profile, and
+          are updated about every 15 minutes.
+        </p>
+      </header>
 
-      {bootstrapError && <div className="banner banner--error">{bootstrapError}</div>}
-
-      <div className="controls">
-        <label>
-          Borough
+      <div className="toolbar">
+        <label className="field">
+          <span className="field__label">Borough</span>
           <select
+            className="field__input"
             value={borough ?? ALL_BOROUGHS}
             onChange={(event) => handleSelectBorough(event.target.value)}
             disabled={boroughs.length === 0}
@@ -96,49 +104,64 @@ export default function App() {
             ))}
           </select>
         </label>
-        <label>
-          Vehicle profile
+
+        <label className="field">
+          <span className="field__label">Vehicle profile</span>
           <select
+            className="field__input"
             value={vehicleProfileId ?? ""}
             onChange={(event) => setVehicleProfileId(Number(event.target.value))}
             disabled={bootstrap == null}
           >
-            {(bootstrap?.vehicle_profiles ?? []).map((profile) => (
+            {profiles.map((profile) => (
               <option key={profile.vehicle_profile_id} value={profile.vehicle_profile_id}>
                 {profile.name}
               </option>
             ))}
           </select>
         </label>
-        <div>
-          <div className="metric__label">
-            {selected ? `Road segments in ${selected.name}` : "Road segments in snapshot"}
+
+        <div className="toolbar__metrics">
+          <div className="metric">
+            <span className="metric__label">
+              {selected ? `Segments in ${selected.name}` : "Segments in snapshot"}
+            </span>
+            <span className="metric__value">{scopeCount.toLocaleString()}</span>
           </div>
-          <div className="metric__value">{scopeCount.toLocaleString()}</div>
+          <div className="metric">
+            <span className="metric__label">Drawn</span>
+            <span className="metric__value">
+              {loading ? "—" : (meta?.segment_count ?? 0).toLocaleString()}
+            </span>
+          </div>
         </div>
       </div>
 
-      {bootstrap != null && !needsBorough && (
-        <div className="banner banner--info">
-          Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing part of the snapshot instead.
-        </div>
-      )}
-      {needsBorough && borough == null && (
-        <div className="banner banner--info">Click a borough to load its road segments.</div>
-      )}
-      {meta?.truncated && (
-        <div className="banner banner--info">
-          Only the first {meta.segment_count.toLocaleString()} segments of the snapshot are drawn.
-          Set DASHBOARD_ZONE_MASTER_S3_URI to browse by borough instead.
-        </div>
-      )}
-      {meta?.vehicle_profile_fallback && (
-        <div className="banner banner--warning">
-          Serving API used vehicle profile {meta.effective_vehicle_profile_id} instead of requested
-          profile {meta.requested_vehicle_profile_id}.
-        </div>
-      )}
-      {error && <div className="banner banner--error">{error}</div>}
+      <div className="banners">
+        {bootstrapError && <div className="banner banner--error">{bootstrapError}</div>}
+        {error && <div className="banner banner--error">{error}</div>}
+        {bootstrap != null && !needsBorough && (
+          <div className="banner banner--info">
+            Set DASHBOARD_ZONE_MASTER_S3_URI to pick a borough. Showing part of the snapshot
+            instead.
+          </div>
+        )}
+        {needsBorough && borough == null && (
+          <div className="banner banner--info">Pick a borough to load its road segments.</div>
+        )}
+        {meta?.truncated && (
+          <div className="banner banner--info">
+            Only the first {meta.segment_count.toLocaleString()} segments of the snapshot are
+            drawn. Set DASHBOARD_ZONE_MASTER_S3_URI to browse by borough instead.
+          </div>
+        )}
+        {meta?.vehicle_profile_fallback && (
+          <div className="banner banner--warning">
+            Vehicle profile {meta.requested_vehicle_profile_id} is unavailable. Showing scores for
+            profile {meta.effective_vehicle_profile_id} instead.
+          </div>
+        )}
+      </div>
 
       <RoadComfortMap
         boroughs={boroughs}
@@ -146,13 +169,10 @@ export default function App() {
         onSelectBorough={handleSelectBorough}
         segments={segments}
         segmentsVersion={segmentsVersion}
-        status={loading ? `Loading ${scopeLabel}...` : null}
+        vehicleProfileName={profileName(effectiveProfileId)}
+        loading={loading}
+        loadingLabel={`Loading ${scopeCount.toLocaleString()} segments in ${scopeLabel}…`}
       />
-
-      <p className="app__caption">
-        Rendered: {(meta?.segment_count ?? 0).toLocaleString()} of {scopeCount.toLocaleString()}{" "}
-        segments in {scopeLabel}
-      </p>
     </div>
   );
 }
