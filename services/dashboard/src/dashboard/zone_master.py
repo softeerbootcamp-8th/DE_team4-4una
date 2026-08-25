@@ -20,6 +20,13 @@ from dashboard.road_geometry import parse_s3_uri
 
 ZONE_MASTER_COLUMNS = ("location_id", "borough", "geometry")
 
+# TLC는 Newark Airport(location_id 1)를 "EWR" borough로 둔다. 뉴저지라 NYC
+# borough가 아니고 zone도 하나뿐인데, 그대로 두면 polygon이 있어 outline이
+# 만들어지고 selector에 여섯 번째 borough처럼 끼어든다. 여기 속한 segment는
+# borough가 없는 것으로 취급해, location_id가 비어 있는 segment와 같은 길을
+# 타게 한다.
+EXCLUDED_BOROUGHS = frozenset({"EWR"})
+
 # Degrees, roughly 22m. Dissolving the zones keeps every coastline vertex, which
 # is ~2.9MB of GeoJSON inlined into the page; simplifying at this tolerance cuts
 # that to ~350KB without a visible difference at borough scale.
@@ -72,7 +79,7 @@ def zone_boroughs(parquet_bytes: bytes) -> dict[int, str]:
         location_id = row["location_id"]
         borough = row["borough"]
         # A zone with no borough label cannot be offered as a filter choice.
-        if location_id is None or borough is None:
+        if location_id is None or borough is None or borough in EXCLUDED_BOROUGHS:
             continue
         boroughs[int(location_id)] = str(borough)
     return boroughs
@@ -89,7 +96,7 @@ def borough_outlines(parquet_bytes: bytes) -> list[Borough]:
     for row in _read_table(parquet_bytes).to_pylist():
         borough = row["borough"]
         geometry_wkb = row["geometry"]
-        if borough is None or geometry_wkb is None:
+        if borough is None or geometry_wkb is None or borough in EXCLUDED_BOROUGHS:
             continue
         geometries_by_borough.setdefault(str(borough), []).append(
             shapely.from_wkb(bytes(geometry_wkb))

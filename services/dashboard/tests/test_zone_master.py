@@ -80,6 +80,22 @@ def test_borough_outlines_skips_zones_without_geometry() -> None:
     assert [borough.name for borough in borough_outlines(payload)] == ["Manhattan"]
 
 
+def test_newark_airport_is_not_a_borough() -> None:
+    """TLC의 EWR(location_id 1)은 뉴저지라 NYC borough가 아니다.
+
+    polygon이 있어 걸러내지 않으면 outline이 만들어지고 selector에 끼어든다.
+    """
+    payload = _zone_master_bytes(
+        [
+            {"location_id": 1, "borough": "EWR", "geometry": _square(9, 9)},
+            {"location_id": 4, "borough": "Manhattan", "geometry": _square(0, 0)},
+        ]
+    )
+
+    assert zone_boroughs(payload) == {4: "Manhattan"}
+    assert [borough.name for borough in borough_outlines(payload)] == ["Manhattan"]
+
+
 def test_reading_rejects_a_file_missing_required_columns() -> None:
     buffer = BytesIO()
     pq.write_table(pa.table({"location_id": pa.array([1], pa.int64())}), buffer)
