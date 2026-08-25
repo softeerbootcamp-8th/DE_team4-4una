@@ -13,6 +13,14 @@ standard_score_pipeline(#292)과 같은 공용 헬퍼(`emr_serverless.
 submit_batch_jobs_command`)로, host의 docker socket을 마운트해 `docker run`으로
 batch-jobs 컨테이너를 직접 띄우던(docker-outside-of-docker) 방식에서 미리
 만들어진 EMR Serverless Application에 Job Run을 제출하는 방식으로 바뀌었다.
+## 동시 제출 (#508)
+
+두 audit task는 `emr_serverless` pool(slot 1)을 거쳐 순차로 제출된다. 이전에는
+의존관계 없이 병렬 제출돼 이 DAG 혼자 동시 job run 2건을 만들었고, 그 상태에서
+`audit_standard_segment_comfort_score`가 exit 137로 반복 실패했다. driver 크기도
+`audit` 프로파일로 따로 잡는다 — 이 job은 executor를 거의 쓰지 않고 Great
+Expectations가 테이블 전량을 driver의 pandas에 올린다.
+
 `audit-gold` CLI는 `--table` 외 옵션이 없어, Postgres 자격증명과
 `GOLD_AUDIT_S3_BUCKET`은 driver_env로 넘긴다(standard_score_pipeline의 임시
 방편과 동일한 이유 — GetJobRun API로 평문 조회 가능, #292 논의). AWS
@@ -69,7 +77,7 @@ def _report_audit_counts() -> dict:
 with DAG(
     dag_id="data_quality_audit",
     description="Gold(standard/current_segment_comfort_score) at-rest 품질 감시 — 매일 1회, soft fail",
-    schedule="0 3 * * *",
+    schedule="40 8 * * *",
     start_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),
     catchup=False,
     default_args={
@@ -80,10 +88,13 @@ with DAG(
     on_success_callback=on_success_callback,
     tags=["data-quality-audit", "comfort-score"],
 ) as dag:
-    # 두 task는 서로 독립이라(의존관계 없음) 병렬로 실행된다. outlet이 없어
-    # 이 DAG의 성공/실패는 어떤 다른 DAG도 깨우거나 막지 않는다.
+    # 두 task를 직렬로 잇는다(#508). 병렬로 두면 이 DAG 혼자 동시 job run 2건을
+    # 만들어 Application 용량을 초과한다 — 실제로 08-25 03시에 audit_standard가
+    # exit 137로 두 번 연속 실패했다. 감사 결과는 서로 독립이라 순서는 상관없다.
+    # outlet이 없어 이 DAG의 성공/실패는 어떤 다른 DAG도 깨우거나 막지 않는다.
     audit_standard_segment_comfort_score = submit_batch_jobs_command(
         task_id="audit_standard_segment_comfort_score",
+        profile="audit",
         entry_point_arguments=[
             "audit-gold",
             "--table=standard_segment_comfort_score",
@@ -92,6 +103,7 @@ with DAG(
     )
     audit_current_segment_comfort_score = submit_batch_jobs_command(
         task_id="audit_current_segment_comfort_score",
+        profile="audit",
         entry_point_arguments=[
             "audit-gold",
             "--table=current_segment_comfort_score",
@@ -103,7 +115,8 @@ with DAG(
         task_id="report_audit_counts",
         python_callable=_report_audit_counts,
     )
-    [
-        audit_standard_segment_comfort_score,
-        audit_current_segment_comfort_score,
-    ] >> report_audit_counts
+    (
+        audit_standard_segment_comfort_score
+        >> audit_current_segment_comfort_score
+        >> report_audit_counts
+    )
