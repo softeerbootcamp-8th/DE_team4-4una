@@ -1,5 +1,13 @@
 apiVersion: 1
 
+# 기존에 이미 떠 있던 Grafana는 이 datasource를 uid 없이(자동생성값으로) 가지고 있어서,
+# uid를 나중에 못박으면 "data source not found"로 provisioning이 죽는다(실제로 겪음).
+# 이 delete는 1회성 마이그레이션용이다 — 정상 전환 확인되면 지워도 된다(매 기동마다
+# 삭제→재생성하는 부담을 없애기 위함, #447).
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
 datasources:
   - name: Prometheus
     type: prometheus
