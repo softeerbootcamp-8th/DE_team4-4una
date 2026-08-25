@@ -15,6 +15,7 @@
 | [06](06-row-quarantine-and-circuit-breaker.md) | 품질 검증 실패를 어떻게 처리할까 | 행 단위 격리 + 실패율 서킷브레이커 | 가용성 / 정확성 |
 | [07](07-in-memory-intermediate.md) | 중간 산출물을 저장해야 할까 | 같은 Spark 세션에서 인메모리 전달 | 트레이드오프 명시 |
 | [08](08-latest-zone-weather.md) | 날씨를 이력으로 쌓아야 할까 | 존별 최신 1건으로 재설계 | 스키마 재설계 |
+| [09](09-kafka-message-compression.md) | Kafka가 디스크를 너무 먹는다 | batch가 아니라 압축 codec을 zstd로 교체 | 측정으로 가설 기각 |
 
 ---
 

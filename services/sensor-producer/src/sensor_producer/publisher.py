@@ -58,7 +58,12 @@ class KafkaPublisher:
                 "enable.idempotence": True,
                 "linger.ms": 20,
                 "batch.size": 131_072,
-                "compression.type": "lz4",
+                # Kafka는 개별 레코드가 아니라 record batch 단위로 압축한다. 실측
+                # payload 10만 건 기준 lz4는 2.53배에서 멈추지만 zstd는 4.33배까지
+                # 짜내, broker 저장량이 226 -> 132 B/record가 된다(#476).
+                # linger.ms는 그대로 둔다 -- zstd는 batch가 33건뿐일 때도 상한 근처까지
+                # 압축하므로, 20ms를 500ms로 늘려도 3pp만 더 줄어든다.
+                "compression.type": "zstd",
                 "queue.buffering.max.messages": 1_000_000,
             }
         )

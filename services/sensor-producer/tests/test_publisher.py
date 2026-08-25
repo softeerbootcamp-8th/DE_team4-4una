@@ -83,4 +83,4 @@ def test_kafka_publisher_keys_records_by_trip(monkeypatch) -> None:
     assert json.loads(calls[0][1]["value"])["trip_seq"] == 0
     assert "timestamp_ms" not in calls[0][1]
     assert configurations[0]["enable.idempotence"] is True
-    assert configurations[0]["compression.type"] == "lz4"
+    assert configurations[0]["compression.type"] == "zstd"
