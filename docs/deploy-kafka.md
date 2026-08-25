@@ -92,6 +92,29 @@ docker compose -p de4-kafka -f infra/compose/kafka.yaml \
 offset을 삭제하므로 사용하지 않는다. 단일 broker와 replication factor 1 구성이라
 broker 장애 중 무중단 처리는 보장하지 않으며 현재 PoC 범위의 제약이다.
 
+## 보존 정책
+
+`kafka.yaml`이 `log.retention.hours=12`, `log.retention.bytes`를 partition당 6.4 GiB(topic 19.2 GiB), `log.segment.bytes=256 MiB`로 고정한다. 근거는 같은 파일의 주석과 #481에 있다.
+
+상한을 넘으면 broker는 produce를 거부하지 않고 **가장 오래된 segment를 삭제**한다. consumer가 읽었는지는 확인하지 않으므로, 이 상한은 stream-processor가 멈춰 있어도 데이터를 잃지 않는 시간(약 12시간)과 같다.
+
+이 값은 broker 설정이라 반영에 컨테이너 recreate가 필요하고, 이 워크플로는 `main` push에서만 돈다. `develop`에 병합한 값을 즉시 적용해야 하면 topic 레벨 override로 재시작 없이 선반영할 수 있다.
+
+```bash
+docker compose -p de4-kafka -f infra/compose/kafka.yaml exec kafka \
+  /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --alter --entity-type topics --entity-name sensor-events \
+  --add-config retention.ms=43200000,retention.bytes=6871947674,segment.bytes=268435456
+```
+
+적용값 확인은 아래와 같다. topic override가 있으면 broker 기본값보다 우선한다.
+
+```bash
+docker compose -p de4-kafka -f infra/compose/kafka.yaml exec kafka \
+  /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --all --entity-type topics --entity-name sensor-events
+```
+
 ## 수동 확인
 
 EC2에서 내부 listener와 topic을 확인한다.
