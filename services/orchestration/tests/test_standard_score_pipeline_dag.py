@@ -324,16 +324,27 @@ def test_run_standard_score_invokes_the_standard_load_with_templated_as_of():
     assert "POSTGRES_PASSWORD" in driver_env
 
 
-def test_validate_standard_score_invokes_gx_validation_with_templated_as_of():
+def test_validate_standard_score_runs_without_a_job_run():
+    """Gold snapshot parquet 하나만 읽으므로 Spark가 필요 없다(#495, ADR-0012)."""
     module = _load_dag_module()
 
     task = module.dag.get_task("standard_score.validate_standard_score")
-    args = _entry_point_arguments(task)
 
-    assert args[0] == "validate-standard-score"
-    assert "--as-of" in args
-    assert "{{ data_interval_end.isoformat() }}" in args
-    assert "POSTGRES_PASSWORD" in _driver_env(task)
+    assert isinstance(task, PythonOperator)
+    assert task.op_kwargs["as_of"] == "{{ data_interval_end.isoformat() }}"
+
+
+def test_validate_standard_score_points_at_the_gold_root_run_wrote():
+    """두 task가 다른 경로를 보면 검증이 엉뚱한 데이터를 통과시킨다."""
+    module = _load_dag_module()
+
+    run_parameters = _driver_env(
+        module.dag.get_task("standard_score.run_standard_score")
+    )
+    validate = module.dag.get_task("standard_score.validate_standard_score")
+
+    for key in ("data_lake_uri", "gold_output_uri"):
+        assert validate.op_kwargs[key] in run_parameters
 
 
 def test_run_standard_score_does_not_emit_standard_score_asset():

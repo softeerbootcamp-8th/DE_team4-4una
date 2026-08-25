@@ -253,27 +253,3 @@ def test_load_standard_score_logs_session_connect_and_job(
         "standard_score.postgres_connect",
         "standard_score.job",
     }
-
-
-def test_validate_standard_score_logs_connect_and_job_without_spark(
-    caplog, capsys, monkeypatch, _postgres_env
-):
-    """이 커맨드는 Spark를 쓰지 않는다 — spark_session 구간이 없어야 한다."""
-    import psycopg2
-    from batch_jobs import standard_score_validation
-
-    monkeypatch.setattr(
-        standard_score_validation,
-        "run_standard_score_validation",
-        lambda *args: FakeSummary(),
-    )
-    monkeypatch.setattr(psycopg2, "connect", lambda **kwargs: FakeConnection())
-
-    with caplog.at_level(logging.INFO):
-        main(["validate-standard-score", "--as-of", "2026-08-25T03:00:00+00:00"])
-
-    capsys.readouterr()
-    assert set(_perf_payloads(caplog)) == {
-        "validate_standard_score.postgres_connect",
-        "validate_standard_score.job",
-    }

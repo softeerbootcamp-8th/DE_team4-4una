@@ -183,8 +183,8 @@ def run_gold_audit(
 
     성공/실패와 무관하게 Data Docs를 항상 렌더링 후 S3에 업로드한 다음에야
     실패 여부를 판정한다(spec §6) — 단, 테이블이 아예 비어 있으면 GX를
-    실행할 대상 자체가 없으므로 그 전에 바로 실패시킨다(#249의
-    `run_standard_score_validation`과 동일한 선례).
+    실행할 대상 자체가 없으므로 그 전에 바로 실패시킨다(orchestration의
+    `jobs.standard_score_validation`과 동일한 선례).
     """
     _validate_table(table)
     row_count = count_rows(connection, table)

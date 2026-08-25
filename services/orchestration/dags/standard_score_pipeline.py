@@ -96,6 +96,14 @@ _HOURLY_COMFORT_REJECTED_OUTPUT_PATH = (
     "{{ var.value.get('HOURLY_COMFORT_REJECTED_OUTPUT_PATH', "
     "'data/local-lake/quarantine/hourly_comfort_score') }}"
 )
+# run_standard_score가 쓴 Gold snapshot을 validate_standard_score가 그대로 읽어야
+# 하므로(#495, ADR-0012) 위 경로 상수들과 같은 이유로 한 곳에서 정의해 공유한다.
+_STANDARD_COMFORT_SCORE_DATA_LAKE_URI = (
+    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', 'data/local-lake') }}"
+)
+_STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI = (
+    "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
+)
 
 
 def _resolve_road_snapshot_date() -> str:
@@ -136,6 +144,29 @@ def _resolve_road_snapshot_date() -> str:
         }
     )
     return fallback
+
+
+def _validate_standard_score(data_lake_uri: str, gold_output_uri: str, as_of: str) -> dict:
+    """run_standard_score가 쓴 Gold snapshot을 검증한다 (#495, ADR-0012).
+
+    Spark가 필요 없어 EMR Serverless Job Run 대신 여기서 직접 돈다. de4_core와
+    jobs는 dag-processor에 없으므로(airflow.yaml 참고) 이 함수 안에서만 import한다.
+    """
+    import datetime as dt
+
+    from de4_core import join_uri
+    from jobs.standard_score_validation import validate_standard_score
+
+    # 폴백은 StandardComfortScoreJobConfig와 같아야 한다 — 어긋나면 쓴 곳과 읽는 곳이
+    # 달라진다(comfort_score/standard_job.py).
+    root_uri = gold_output_uri or join_uri(
+        data_lake_uri, "gold", "standard_segment_comfort_score"
+    )
+    summary = validate_standard_score(root_uri, dt.datetime.fromisoformat(as_of))
+
+    result = {"row_count": summary.row_count, "success": summary.success}
+    print(result)
+    return result
 
 
 def _report_processing_counts(
@@ -302,10 +333,7 @@ with DAG(
             ],
             driver_env={
                 **_POSTGRES_DRIVER_ENV,
-                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": (
-                    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', "
-                    "'data/local-lake') }}"
-                ),
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
                 # road-environment(active pointer/manifest)는 gold/silver와 다른
                 # reference 버킷에 있다(#389) — build-road-environment/run-monthly가
                 # 이미 이 이름을 쓰고 있어 그대로 재사용한다. 비어 있으면 job이
@@ -316,24 +344,22 @@ with DAG(
                 "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
                     "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
                 ),
-                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": (
-                    "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
-                ),
+                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
             },
         )
-        # validate_standard_score는 run_standard_score가 이번 실행에 UPSERT한
-        # 행만(score_as_of=as_of) Postgres에서 직접 조회해 검증한다(#249,
-        # ADR-0004: Gold/Postgres는 Spark가 아니라 SqlAlchemy 경로). 검증을
-        # 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
+        # validate_standard_score는 run_standard_score가 이번 실행에 쓴 Gold
+        # snapshot(기준 데이터셋)을 검증한다 — 서빙 테이블을 조회하던 방식은
+        # ADR-0012에서 바뀌었다(#495). Spark가 필요 없어 Job Run을 내지 않는다.
+        # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
         # run_standard_score가 아니라 여기 둔다(#249).
-        validate_standard_score = submit_batch_jobs_command(
+        validate_standard_score = PythonOperator(
             task_id="validate_standard_score",
-            entry_point_arguments=[
-                "validate-standard-score",
-                "--as-of",
-                "{{ data_interval_end.isoformat() }}",
-            ],
-            driver_env=_POSTGRES_DRIVER_ENV,
+            python_callable=_validate_standard_score,
+            op_kwargs={
+                "data_lake_uri": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
+                "gold_output_uri": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
+                "as_of": "{{ data_interval_end.isoformat() }}",
+            },
             outlets=[STANDARD_SCORE_ASSET],
         )
         run_standard_score >> validate_standard_score
