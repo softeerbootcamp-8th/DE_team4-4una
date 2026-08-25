@@ -12,7 +12,24 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8501
 
 DEFAULT_SERVING_API_URL = "http://localhost:8000"
+# 요청에 프로필이 없을 때 쓰는 값이다. 고정값이 아니라 기본값이다.
 DEFAULT_VEHICLE_PROFILE_ID = 0
+
+# 0005_define_vehicle_profiles.sql의 vehicle_profile 행을 사람이 읽을 이름으로
+# 옮긴 것. Serving API는 id만 주고받고 프로필 목록을 노출하지 않아 이름을 받아올
+# 곳이 없다 -- 프로필이 추가되면 이 목록도 함께 고쳐야 한다.
+#
+# 목록이 뒤처져도 조용히 틀리지는 않는다. 없거나 비활성인 id를 보내면 Serving
+# API가 프로필 0으로 내려주고 vehicle_profile_fallback으로 알려주므로, 화면에
+# 대체됐다는 경고가 뜬다.
+VEHICLE_PROFILES: tuple[tuple[int, str], ...] = (
+    (0, "All vehicles"),
+    (1, "Sedan, compact"),
+    (2, "Sedan, large"),
+    (3, "SUV, compact"),
+    (4, "SUV, large"),
+    (5, "MPV, large"),
+)
 
 # serving API의 MAX_COMFORT_SCORE_BATCH_ITEMS를 그대로 따른다(서비스 간 import는
 # 안 하므로 값만 맞춰둔다).
@@ -30,6 +47,11 @@ ROAD_SEGMENT_CACHE_TTL_SECONDS = 24 * 60 * 60
 # 주기로 갱신된다. 이보다 짧게 잡으면 아직 없는 새 값을 찾아 헛조회를 한다.
 # 대시보드 안에서만 쓰는 값이라 파이프라인 주기와는 무관하게 조정할 수 있다.
 SCORE_CACHE_TTL_SECONDS = 15 * 60
+
+# 응답 캐시에 남겨둘 (프로필, borough) 조합 수. borough 하나가 gzip 후 4MB대라
+# 이 값이 곧 메모리 상한이 된다(약 50MB). 상한이 없으면 프로필 6개 x borough
+# 5개를 전부 들고 있게 되어 130MB까지 늘어난다.
+PAYLOAD_CACHE_MAX_ENTRIES = 12
 
 NYC_MAP_CENTER = (40.7128, -74.0060)
 NYC_MAP_ZOOM = 11

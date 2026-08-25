@@ -16,7 +16,7 @@ from typing import Annotated, Any
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -104,6 +104,11 @@ def bootstrap(service: ServiceDep) -> dict[str, Any]:
     payload = service.bootstrap()
     return {
         "total_segment_count": payload.total_segment_count,
+        "default_vehicle_profile_id": payload.default_vehicle_profile_id,
+        "vehicle_profiles": [
+            {"vehicle_profile_id": profile.vehicle_profile_id, "name": profile.name}
+            for profile in payload.vehicle_profiles
+        ],
         "boroughs": [
             {
                 "name": borough.name,
@@ -118,14 +123,19 @@ def bootstrap(service: ServiceDep) -> dict[str, Any]:
 
 
 @app.get("/api/segments")
-def segments(service: ServiceDep, request: Request, borough: str | None = None) -> Response:
+def segments(
+    service: ServiceDep,
+    request: Request,
+    borough: str | None = None,
+    vehicle_profile_id: Annotated[int | None, Query(ge=0)] = None,
+) -> Response:
     """borough 안의 segment 전부를 score까지 붙여 GeoJSON으로 돌려준다.
 
     서비스가 이미 gzip으로 눌러 캐시해둔 바이트를 그대로 흘려보낸다. 요청마다
     다시 압축하면 borough 하나에 수백 ms가 든다 -- GZipMiddleware는 응답에
     Content-Encoding이 이미 붙어 있으면 건드리지 않는다.
     """
-    payload = service.get_segments(borough)
+    payload = service.get_segments(borough, vehicle_profile_id)
     if "gzip" in request.headers.get("accept-encoding", ""):
         return Response(
             content=payload.body,

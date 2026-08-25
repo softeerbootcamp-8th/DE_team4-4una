@@ -12,10 +12,13 @@ export function fetchBootstrap(signal) {
   return getJson("/api/bootstrap", signal);
 }
 
-export function fetchSegments({ borough, signal }) {
+export function fetchSegments({ borough, vehicleProfileId, signal }) {
   const params = new URLSearchParams();
   if (borough) {
     params.set("borough", borough);
+  }
+  if (vehicleProfileId != null) {
+    params.set("vehicle_profile_id", vehicleProfileId);
   }
   return getJson(`/api/segments?${params}`, signal);
 }

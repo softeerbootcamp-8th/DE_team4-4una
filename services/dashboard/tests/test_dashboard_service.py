@@ -8,8 +8,10 @@ import json
 import pytest
 from dashboard import dashboard_service as service_module
 from dashboard.config import (
+    PAYLOAD_CACHE_MAX_ENTRIES,
     SCORE_CACHE_TTL_SECONDS,
     SNAPSHOT_FALLBACK_MAX_SEGMENTS,
+    VEHICLE_PROFILES,
     DashboardConfig,
 )
 from dashboard.dashboard_service import (
@@ -77,18 +79,32 @@ def clock():
     return {"now": 1000.0}
 
 
+class _Fetches:
+    """Serving API 호출 기록. 어떤 segment를 어떤 프로필로 물었는지 남긴다."""
+
+    def __init__(self) -> None:
+        self.segment_ids: list[list[str]] = []
+        self.profiles: list[int] = []
+
+    def __len__(self) -> int:
+        return len(self.segment_ids)
+
+    def __eq__(self, other) -> bool:
+        return self.segment_ids == other
+
+
 @pytest.fixture
 def fetches(monkeypatch):
-    """Serving API 호출을 가로채 요청된 segment_id를 기록한다."""
-    calls: list[list[str]] = []
+    recorded = _Fetches()
 
     def _fetch(**kwargs):
         ids = list(kwargs["segment_ids"])
-        calls.append(ids)
+        recorded.segment_ids.append(ids)
+        recorded.profiles.append(kwargs["vehicle_profile_id"])
         return _batch_result(ids)
 
     monkeypatch.setattr(service_module, "fetch_comfort_scores", _fetch)
-    return calls
+    return recorded
 
 
 @pytest.fixture
@@ -102,6 +118,16 @@ def service(monkeypatch, clock):
 
 
 class TestBootstrap:
+    def test_exposes_the_vehicle_profile_catalog(self, service):
+        """Serving API가 프로필 목록을 노출하지 않아 대시보드가 들고 있다."""
+        bootstrap = service.bootstrap()
+
+        assert [
+            (profile.vehicle_profile_id, profile.name)
+            for profile in bootstrap.vehicle_profiles
+        ] == list(VEHICLE_PROFILES)
+        assert bootstrap.default_vehicle_profile_id == 0
+
     def test_reports_snapshot_and_borough_counts(self, service):
         bootstrap = service.bootstrap()
 
@@ -189,6 +215,31 @@ class TestGetSegments:
         assert body["requested_vehicle_profile_id"] == 0
 
 
+class TestVehicleProfile:
+    def test_the_requested_profile_reaches_the_serving_api(self, service, fetches):
+        service.get_segments("Manhattan", 3)
+
+        assert fetches.profiles == [3]
+
+    def test_omitting_the_profile_falls_back_to_the_deployment_default(self, service, fetches):
+        service.get_segments("Manhattan")
+
+        assert fetches.profiles == [0]
+
+    def test_each_profile_is_cached_separately(self, service, fetches):
+        service.get_segments("Manhattan", 3)
+        service.get_segments("Manhattan", 4)
+        service.get_segments("Manhattan", 3)
+
+        # 3은 두 번째 요청에서 캐시 히트, 4는 따로 만들어진다.
+        assert fetches.profiles == [3, 4]
+
+    def test_the_requested_profile_is_echoed_in_the_body(self, service, fetches):
+        body = _decode(service.get_segments("Manhattan", 3))
+
+        assert body["requested_vehicle_profile_id"] == 3
+
+
 class TestPayloadCache:
     def test_a_second_request_reuses_the_built_payload(self, service, fetches):
         service.get_segments("Manhattan")
@@ -211,6 +262,23 @@ class TestPayloadCache:
         service.get_segments("Manhattan")
 
         assert len(fetches) == 2
+
+    def test_the_cache_is_bounded(self, service, fetches):
+        """프로필까지 곱해지면 조합이 30개까지 늘어난다. 하나가 4MB대라 상한이 없으면
+        캐시만으로 100MB를 넘긴다."""
+        for profile_id in range(PAYLOAD_CACHE_MAX_ENTRIES + 3):
+            service.get_segments("Manhattan", profile_id)
+
+        assert len(service._payloads) == PAYLOAD_CACHE_MAX_ENTRIES
+
+    def test_the_least_recently_used_entry_is_dropped_first(self, service, fetches):
+        for profile_id in range(PAYLOAD_CACHE_MAX_ENTRIES):
+            service.get_segments("Manhattan", profile_id)
+        service.get_segments("Manhattan", 0)  # 0을 최근 사용으로 올린다
+        service.get_segments("Manhattan", 99)  # 상한을 넘겨 하나를 밀어낸다
+
+        assert (0, "Manhattan") in service._payloads
+        assert (1, "Manhattan") not in service._payloads
 
     def test_the_body_is_gzipped(self, service, fetches):
         payload = service.get_segments("Manhattan")
@@ -247,17 +315,44 @@ class TestSnapshotFallback:
         assert payload.truncated is True
 
 
-def test_prewarm_builds_every_borough_before_anyone_asks(monkeypatch, clock, fetches):
-    """백그라운드 스레드 없이 한 tick만 직접 돌려 확인한다."""
-    monkeypatch.setattr(service_module, "load_road_segments", lambda *_a, **_k: [_segment("0")])
-    monkeypatch.setattr(service_module, "load_zone_master", lambda *_a, **_k: b"zone")
-    monkeypatch.setattr(service_module, "borough_outlines", lambda _raw: [BOROUGH])
-    monkeypatch.setattr(service_module, "zone_boroughs", lambda _raw: {100: "Manhattan"})
-    service = DashboardService(CONFIG, now=lambda: clock["now"])
+class TestPrewarm:
+    """백그라운드 스레드를 띄우지 않고 tick 하나씩 직접 돌려 확인한다."""
 
-    for borough in service.bootstrap().boroughs:
-        service.get_segments(borough.name)
-    service.get_segments("Manhattan")
+    @pytest.fixture
+    def service(self, monkeypatch, clock):
+        other = Borough(name="Queens", geometry=BOROUGH.geometry, bounds=BOROUGH.bounds)
+        monkeypatch.setattr(
+            service_module, "load_road_segments", lambda *_a, **_k: [_segment("0")]
+        )
+        monkeypatch.setattr(service_module, "load_zone_master", lambda *_a, **_k: b"zone")
+        monkeypatch.setattr(
+            service_module, "borough_outlines", lambda _raw: [BOROUGH, other]
+        )
+        monkeypatch.setattr(service_module, "zone_boroughs", lambda _raw: {100: "Manhattan"})
+        return DashboardService(CONFIG, now=lambda: clock["now"])
 
-    # 프리워밍이 만들어둔 것을 사용자 요청이 그대로 받는다.
-    assert len(fetches) == 1
+    def test_the_first_tick_covers_every_borough_on_the_default_profile(self, service):
+        """프로필까지 곱해 미리 만들면 아무도 요청하기 전에 30개를 만들게 된다."""
+        assert service._prewarm_targets() == [(0, "Manhattan"), (0, "Queens")]
+
+    def test_later_ticks_only_cover_combinations_someone_opened(self, service, fetches):
+        service._prewarm_targets()  # 기동 직후 한 바퀴
+        service.get_segments("Manhattan", 3)
+
+        # Queens도, 열지 않은 프로필도 15분마다 다시 만들지 않는다.
+        assert service._prewarm_targets() == [(3, "Manhattan")]
+
+    def test_a_new_snapshot_triggers_a_full_pass_again(self, service, clock):
+        from dashboard.config import ROAD_SEGMENT_CACHE_TTL_SECONDS
+
+        service._prewarm_targets()
+        clock["now"] += ROAD_SEGMENT_CACHE_TTL_SECONDS + 1
+
+        assert service._prewarm_targets() == [(0, "Manhattan"), (0, "Queens")]
+
+    def test_a_prewarmed_borough_is_served_from_cache(self, service, fetches):
+        service._payload("Manhattan", 0)
+        service.get_segments("Manhattan")
+
+        # 프리워밍이 만들어둔 것을 사용자 요청이 그대로 받는다.
+        assert len(fetches) == 1
