@@ -21,6 +21,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol
 
+from pipeline_perf.plan import summarize_physical_plan
 from pipeline_perf.quantiles import DurationSummary, skew_ratio
 
 # S3 range 리더를 8KB 기본 버퍼로 줄 단위 순회하면 16MB 파일 하나에 GET이 2천 번
@@ -144,6 +145,7 @@ class SqlExecutionAccumulator:
     execution_id: int
     description: str = ""
     details: str = ""
+    plan: dict[str, Any] = field(default_factory=lambda: {"datasets": [], "operators": [], "head": ""})
     start_time_ms: int | None = None
     end_time_ms: int | None = None
     error_message: str | None = None
@@ -162,6 +164,7 @@ class SqlExecutionAccumulator:
             "end_time_ms": self.end_time_ms,
             "duration_ms": self.duration_ms(),
             "error_message": self.error_message,
+            "plan": self.plan,
         }
 
 
@@ -305,6 +308,8 @@ class EventLogAggregator:
         )
         execution.description = event.get("description") or ""
         execution.details = event.get("details") or ""
+        # 플랜 원문은 실행 하나가 1MB를 넘는다. 요약만 남기고 즉시 버린다.
+        execution.plan = summarize_physical_plan(event.get("physicalPlanDescription"))
         execution.start_time_ms = event.get("time")
 
     def _on_sql_end(self, event: dict[str, Any]) -> None:

@@ -15,6 +15,8 @@ _GC_RATIO_THRESHOLD = 0.1
 # GC 비율을 논할 가치가 있는 최소 executor 실행시간.
 _MIN_RUN_TIME_MS = 1_000
 _TOP_N = 10
+# 표 한 칸에 보여줄 연산 개수. 나머지는 부록의 실행 계획에서 확인한다.
+_MAX_OPERATORS = 6
 
 
 def render(payloads: list[dict[str, Any]], title: str | None = None) -> str:
@@ -22,11 +24,12 @@ def render(payloads: list[dict[str, Any]], title: str | None = None) -> str:
     lines = [
         f"# {title or '승차감 점수 파이프라인 성능 베이스라인'}",
         "",
-        "`pipeline-perf collect`가 모은 원시 JSON을 `pipeline-perf render`가 옮긴 것이다.",
-        "숫자는 모두 실제 실행에서 측정한 값이고, 8절은 관찰된 사실만 담는다 —",
-        "최적화 방안은 이 리포트의 범위가 아니다(#460, #462).",
+        "> `pipeline-perf collect`가 모은 원시 JSON을 `pipeline-perf render`가 옮긴 것이다.",
+        "> 숫자는 모두 실제 실행에서 측정한 값이고, 8절은 관찰된 사실만 담는다 —",
+        "> 최적화 방안은 이 리포트의 범위가 아니다(#460, #462).",
         "",
     ]
+    lines += _summary_block(runs)
     lines += _header_block(payloads, runs)
     lines += _section_runs(runs)
     lines += _section_timeline(runs)
@@ -36,10 +39,58 @@ def render(payloads: list[dict[str, Any]], title: str | None = None) -> str:
     lines += _section_perf_log(runs)
     lines += _section_normalized(runs)
     lines += _section_observations(runs)
+    lines += _appendix_plans(runs)
     return "\n".join(lines).rstrip() + "\n"
 
 
 # --- 절 ------------------------------------------------------------------
+
+
+def _summary_block(runs: list[dict[str, Any]]) -> list[str]:
+    """리포트를 열자마자 보이는 몇 줄. 아래 절들이 근거다."""
+    measured = [run for run in runs if run["overhead"].get("compute_ratio") is not None]
+    if not measured:
+        return []
+    total = sum(run["overhead"].get("dag_run_duration_s") or 0 for run in measured)
+    compute = sum(run["overhead"].get("spark_app_s") or 0 for run in measured)
+    provisioning = sum(run["overhead"].get("provisioning_s") or 0 for run in measured)
+    gap = sum(run["overhead"].get("airflow_gap_s") or 0 for run in measured)
+    dag_ids = sorted({run["dag_id"] for run in measured})
+    longest = max(
+        (
+            phase
+            for run in measured
+            for task in run["tasks"]
+            for phase in _phases(task)
+            # `*.job`은 job 전체를 감싸는 래퍼라 항상 1등이 된다. 구간이 아니다.
+            if not str(phase.get("phase", "")).endswith(".job")
+        ),
+        key=lambda phase: phase.get("elapsed_s") or 0,
+        default=None,
+    )
+    lines = [
+        "## 한눈에 보기",
+        "",
+        f"Spark를 쓰는 {', '.join(dag_ids)} {len(measured)}건 기준이다.",
+        "",
+        "| | |",
+        "| --- | --- |",
+        f"| DAG run 총시간 합 | {fmt.duration(total)} (평균 {fmt.duration(total / len(measured))}) |",
+        f"| 그중 Spark 계산 | {fmt.duration(compute)} ({fmt.percent(compute / total)}) |",
+        f"| Job Run 프로비저닝 대기 | {fmt.duration(provisioning)} ({fmt.percent(provisioning / total)}) |",
+        f"| task 사이 Airflow gap | {fmt.duration(gap)} ({fmt.percent(gap / total)}) |",
+    ]
+    if longest is not None:
+        lines.append(
+            f"| 가장 긴 Spark 밖 구간 | `{longest['phase']}` "
+            f"{fmt.duration(longest.get('elapsed_s'))} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _phases(task: dict[str, Any]) -> list[dict[str, Any]]:
+    return (task.get("perf_phases") or {}).get("phases", [])
 
 
 def _header_block(payloads: list[dict[str, Any]], runs: list[dict[str, Any]]) -> list[str]:
@@ -47,6 +98,8 @@ def _header_block(payloads: list[dict[str, Any]], runs: list[dict[str, Any]]) ->
     applications = sorted({payload.get("application_id") or "-" for payload in payloads})
     notes = [note for payload in payloads for note in payload.get("notes", [])]
     lines = [
+        "## 수집 범위",
+        "",
         "| 항목 | 값 |",
         "| --- | --- |",
         f"| 수집 시각 | {', '.join(collected) or '-'} |",
@@ -193,6 +246,11 @@ def _section_stages(runs: list[dict[str, Any]]) -> list[str]:
     lines = [
         f"## 4. 느린 스테이지 top {_TOP_N}",
         "",
+        "`작업`은 그 스테이지가 속한 SQL execution의 실행 계획에서 뽑은 주요 연산이다.",
+        "스테이지 이름(`$anonfun$withThreadLocalCaptured$2 at ...`)은 Spark 내부 호출",
+        "지점이라 그대로는 뜻이 없어 이렇게 바꿔 적는다. 어느 execution에도 안 붙는",
+        "스테이지는 원래 이름을 그대로 둔다.",
+        "",
         "`GC 비율`은 `jvmGcTime / executorRunTime`이다. JVM GC 시간에는 같은 executor를",
         "쓰는 다른 태스크가 유발한 GC도 잡히므로 100%를 넘을 수 있다 — 짧은 태스크에서",
         "특히 그렇다.",
@@ -201,7 +259,7 @@ def _section_stages(runs: list[dict[str, Any]]) -> list[str]:
         "task duration의 총합으로, `wall`과 크게 벌어지면 그 차이는 계산이 아니라",
         "슬롯을 기다린 시간이다.",
         "",
-        "| run/task | stage | 이름 | wall | tasks | task 합 | p50 | p95 | max | skew | shuffle R/W | spill(mem/disk) | GC 비율 |",
+        "| run/task | stage | 작업 (exec) | wall | tasks | task 합 | p50 | p95 | max | skew | shuffle R/W | spill(mem/disk) | GC 비율 |",
         "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |",
     ]
     for entry in stages[:_TOP_N]:
@@ -211,7 +269,7 @@ def _section_stages(runs: list[dict[str, Any]]) -> list[str]:
             "| {origin} | {stage_id} | {name} | {wall} | {tasks} | {total} | {p50} | {p95} | {max} | {skew} | {shuffle} | {spill} | {gc} |".format(
                 origin=entry["origin"],
                 stage_id=stage["stage_id"],
-                name=fmt.truncate(stage.get("name"), 46),
+                name=_stage_work(entry),
                 wall=fmt.milliseconds(stage.get("wall_time_ms")),
                 tasks=fmt.number(stage.get("task_count")),
                 total=fmt.milliseconds(durations.get("sum_ms")),
@@ -229,35 +287,58 @@ def _section_stages(runs: list[dict[str, Any]]) -> list[str]:
 
 
 def _section_sql(runs: list[dict[str, Any]]) -> list[str]:
-    executions = []
-    for run in runs:
-        for task in run["tasks"]:
-            spark = task.get("spark") or {}
-            for execution in spark.get("sql_executions", []):
-                executions.append(
-                    {"origin": _origin(run, task), "execution": execution}
-                )
+    executions = _all_executions(runs)
     executions.sort(key=lambda item: item["execution"].get("duration_ms") or 0, reverse=True)
     lines = [
         f"## 5. 느린 SQL execution top {_TOP_N}",
         "",
-        "| run/task | execution | 소요 | description |",
-        "| --- | ---: | ---: | --- |",
+        "Spark가 붙이는 `description`은 `count at NativeMethodAccessorImpl.java:0`처럼",
+        "py4j 경계에서 끊긴 JVM 호출 지점이라 무슨 작업인지 알려주지 않는다. 그래서",
+        "실행 계획에서 뽑은 **읽은 데이터**와 **주요 연산**을 앞에 둔다. 각 실행의 계획",
+        "앞부분은 [부록 A](#부록-a-느린-sql-execution의-실행-계획)에 있다.",
+        "",
+        "캐시된 DataFrame(`InMemoryTableScan`)을 읽는 실행은 그 캐시를 만든 계보의",
+        "연산까지 계획에 함께 담기므로, 연산 목록이 파이프라인 전체처럼 보일 수 있다.",
+        "그 실행이 그 순간 모두 계산했다는 뜻은 아니다.",
+        "",
+        "| run/task | exec | 소요 | 주요 연산 | 읽고 쓴 데이터 | Spark 호출 지점 |",
+        "| --- | ---: | ---: | --- | --- | --- |",
     ]
     for entry in executions[:_TOP_N]:
         execution = entry["execution"]
+        plan = execution.get("plan") or {}
         lines.append(
-            "| {origin} | {execution_id} | {duration} | {description} |".format(
+            "| {origin} | {execution_id} | {duration} | {operators} | {datasets} | {description} |".format(
                 origin=entry["origin"],
                 execution_id=execution["execution_id"],
                 duration=fmt.milliseconds(execution.get("duration_ms")),
-                description=fmt.truncate(execution.get("description"), 60),
+                operators=_operator_cell(plan.get("operators")),
+                datasets=_dataset_cell(plan.get("datasets")),
+                description=fmt.truncate(execution.get("description"), 44),
             )
         )
     if not executions:
-        lines.append("| - | - | - | SQL execution 이벤트가 수집되지 않았다 |")
+        lines.append("| - | - | - | - | - | SQL execution 이벤트가 수집되지 않았다 |")
     lines.append("")
     return lines
+
+
+def _operator_cell(operators: list[str] | None) -> str:
+    """표 폭을 지키려고 앞쪽 몇 개만 보여준다. 전체는 부록의 계획에 있다."""
+    if not operators:
+        return "-"
+    shown = " → ".join(operators[:_MAX_OPERATORS])
+    return f"{shown} 외 {len(operators) - _MAX_OPERATORS}개" if len(operators) > _MAX_OPERATORS else shown
+
+
+def _dataset_cell(datasets: list[str] | None) -> str:
+    """표 한 칸에 들어갈 만큼만 데이터 경로를 보여준다."""
+    if not datasets:
+        return "-"
+    shown = [fmt.truncate(path, 46) for path in datasets[:2]]
+    if len(datasets) > 2:
+        shown.append(f"외 {len(datasets) - 2}개")
+    return "<br>".join(shown)
 
 
 def _section_perf_log(runs: list[dict[str, Any]]) -> list[str]:
@@ -453,6 +534,49 @@ def _observations(runs: list[dict[str, Any]]) -> list[str]:
     return observations
 
 
+def _appendix_plans(runs: list[dict[str, Any]]) -> list[str]:
+    """느린 SQL execution의 실행 계획 앞부분을 코드 블록으로 싣는다.
+
+    5절 표의 "주요 연산"이 요약이라면 여기는 그 근거다. 플랜 원문은 1MB를 넘으므로
+    수집 단계에서 앞부분만 남겨 둔 것을 그대로 보여준다.
+    """
+    executions = _all_executions(runs)
+    executions.sort(key=lambda item: item["execution"].get("duration_ms") or 0, reverse=True)
+    shown = [entry for entry in executions[:_TOP_N] if (entry["execution"].get("plan") or {}).get("head")]
+    if not shown:
+        return []
+    lines = [
+        "## 부록 A. 느린 SQL execution의 실행 계획",
+        "",
+        "5절 표의 각 행이 실제로 무엇을 실행했는지 보여주는 계획 앞부분이다. 긴 줄과",
+        "뒷부분은 잘려 있다 — 전체 계획은 실행 하나가 1MB를 넘어 리포트에 실을 수 없다.",
+        "",
+    ]
+    for entry in shown:
+        execution = entry["execution"]
+        plan = execution["plan"]
+        heading = (
+            f"### {entry['origin']} · exec {execution['execution_id']}"
+            f" ({fmt.milliseconds(execution.get('duration_ms'))})"
+        )
+        lines += [heading, ""]
+        if plan.get("datasets"):
+            lines += ["읽고 쓴 데이터:", ""]
+            lines += [f"- `{path}`" for path in plan["datasets"]]
+            lines.append("")
+        lines += ["```text", plan["head"], "```", ""]
+    return lines
+
+
+def _all_executions(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"origin": _origin(run, task), "execution": execution}
+        for run in runs
+        for task in run["tasks"]
+        for execution in (task.get("spark") or {}).get("sql_executions", [])
+    ]
+
+
 # --- 공통 도우미 ----------------------------------------------------------
 
 
@@ -467,12 +591,34 @@ def flatten_runs(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _all_stages(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {"origin": _origin(run, task), "stage": stage}
-        for run in runs
-        for task in run["tasks"]
-        for stage in (task.get("spark") or {}).get("stages", [])
-    ]
+    entries = []
+    for run in runs:
+        for task in run["tasks"]:
+            spark = task.get("spark") or {}
+            mapping = spark.get("stage_to_sql_execution") or {}
+            executions = {
+                execution["execution_id"]: execution
+                for execution in spark.get("sql_executions", [])
+            }
+            for stage in spark.get("stages", []):
+                execution_id = mapping.get(str(stage["stage_id"]))
+                entries.append(
+                    {
+                        "origin": _origin(run, task),
+                        "stage": stage,
+                        "execution": executions.get(execution_id),
+                    }
+                )
+    return entries
+
+
+def _stage_work(entry: dict[str, Any]) -> str:
+    """스테이지가 한 일. 소속 execution의 연산 목록이 있으면 그것을 쓴다."""
+    execution = entry.get("execution") or {}
+    operators = (execution.get("plan") or {}).get("operators") or []
+    if operators:
+        return f"{' → '.join(operators)} (exec {execution['execution_id']})"
+    return fmt.truncate(entry["stage"].get("name"), 46)
 
 
 def run_label(run: dict[str, Any]) -> str:

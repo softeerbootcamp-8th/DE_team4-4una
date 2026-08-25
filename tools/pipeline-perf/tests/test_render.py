@@ -36,9 +36,17 @@ def test_timeline_section_shows_the_overhead_split(document):
 def test_slow_stage_section_reports_distribution_and_skew(document):
     stages = document.split("## 4.")[1].split("## 5.")[0]
 
-    assert "count at NativeMethodAccessorImpl.java:0" in stages
     assert "4.00" in stages  # max/p50 skew
     assert "256.0 MiB / 128.0 MiB" in stages  # memory/disk spill
+
+
+def test_slow_stage_section_says_what_the_stage_did(document):
+    """Spark 내부 호출 지점 대신 실행 계획에서 뽑은 연산을 보여준다."""
+    stages = document.split("## 4.")[1].split("## 5.")[0]
+
+    assert "파일 읽기 → 윈도우 → 정렬 → 셔플 → 집계 (exec 0)" in stages
+    # 어느 execution에도 안 붙는 스테이지는 원래 이름을 유지한다.
+    assert "parquet at NativeMethodAccessorImpl.java:0" in stages
 
 
 def test_perf_log_section_lists_the_postgres_phase(document):
