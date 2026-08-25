@@ -31,7 +31,10 @@ from batch_jobs.map_matching.config import (
 from batch_jobs.map_matching.scoring import score_segment_candidates
 from batch_jobs.map_matching.selection import select_best_segment
 from batch_jobs.schemas import RAW_RECORD_COLUMN
-from batch_jobs.sensor_features.aggregation import build_hourly_segment_features
+from batch_jobs.sensor_features.aggregation import (
+    build_hourly_segment_features,
+    validate_hourly_segment_features,
+)
 from batch_jobs.sensor_features.config import (
     DEFAULT_EVENT_FEATURE_CONFIG_PATH,
     DEFAULT_STEERING_FEATURE_CONFIG_PATH,
@@ -117,6 +120,7 @@ def run_hourly_segment_feature_job(
     quarantine_output_path: str,
 ) -> HourlySegmentFeatureJobSummary:
     _validate_job_arguments(target_hour, feature_version, run_id, processed_at)
+    job_started = time.monotonic()
 
     event_config = load_event_feature_config(config.event_feature_config_path)
     steering_config = load_steering_feature_config(config.steering_feature_config_path)
@@ -145,93 +149,153 @@ def run_hourly_segment_feature_job(
     )
     selected = select_best_segment(scored)
 
-    matched_df = sensor_df.join(selected, on="event_id", how="left")
-
-    steering_df = add_steering_reversal(
-        add_steering_rate(matched_df, steering_config.max_gap_seconds.value),
-        steering_config.steering_rate_deadband_deg_per_sec.value,
+    # Map Matching/Steering-Event 단계 elapsed를 따로 재려고 여기서 먼저 materialize한다(#474).
+    matched_df = sensor_df.join(selected, on="event_id", how="left").persist(
+        StorageLevel.MEMORY_AND_DISK
     )
-    event_df = add_hard_acceleration_event(
-        steering_df,
-        event_config.hard_accel_threshold_mps2.value,
-        event_config.min_event_duration_seconds.value,
-        event_config.max_gap_seconds.value,
-    )
-    event_df = add_hard_braking_event(
-        event_df,
-        event_config.hard_brake_threshold_mps2.value,
-        event_config.min_event_duration_seconds.value,
-        event_config.max_gap_seconds.value,
-    )
-    event_df = add_sharp_steering_event(
-        event_df,
-        event_config.sharp_steer_threshold_deg_per_sec.value,
-        event_config.sharp_steer_min_duration_seconds.value,
-        event_config.max_gap_seconds.value,
-    )
-
-    # 입력이 이미 대상 시간뿐이라 이 필터는 안전장치다. 재계산 방지를 위해 persist한다.
-    target_df = event_df.filter(
-        (F.col("event_time") >= target_hour) & (F.col("event_time") < target_hour_end)
-    ).persist(StorageLevel.MEMORY_AND_DISK)
-    # persist는 lazy라 여기서 즉시 materialize하지 않으면, Map Matching을 포함한
-    # 전체 상류 lineage가 뒤쪽의 첫 action(validate_hourly_segment_features 내부)에서야
-    # 실행돼 실패 스택트레이스가 엉뚱하게 aggregation.py를 가리킨다(#386). count()로
-    # 여기서 먼저 materialize해 실패 지점을 Map Matching 단계로 정확히 드러낸다.
-    target_count = target_df.count()
-
     try:
-        map_matching_quarantine = _build_map_matching_quarantine(
-            target_df, run_id, processed_at
-        ).persist(StorageLevel.MEMORY_AND_DISK)
-        try:
-            map_matching_quarantined_count = map_matching_quarantine.count()
-            combined_quarantine = cleansing_quarantine.unionByName(
-                map_matching_quarantine
-            )
-            quarantine_write = write_hourly_quarantine(
-                spark,
-                combined_quarantine,
-                quarantine_output_path,
-                target_hour,
-                run_id,
-            )
-        finally:
-            map_matching_quarantine.unpersist()
+        matched_count = matched_df.count()
+        map_matching_elapsed = time.monotonic() - job_started
+        logger.info(
+            "hourly segment feature job map matching finished run_id=%s target_hour=%s "
+            "matched=%d elapsed=%.1fs",
+            run_id,
+            target_hour.isoformat(),
+            matched_count,
+            map_matching_elapsed,
+        )
 
-        accepted_count = target_count - map_matching_quarantined_count
-        result = build_hourly_segment_features(
-            target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
+        steering_event_started = time.monotonic()
+        steering_df = add_steering_reversal(
+            add_steering_rate(matched_df, steering_config.max_gap_seconds.value),
+            steering_config.steering_rate_deadband_deg_per_sec.value,
+        )
+        event_df = add_hard_acceleration_event(
+            steering_df,
+            event_config.hard_accel_threshold_mps2.value,
+            event_config.min_event_duration_seconds.value,
+            event_config.max_gap_seconds.value,
+        )
+        event_df = add_hard_braking_event(
+            event_df,
+            event_config.hard_brake_threshold_mps2.value,
+            event_config.min_event_duration_seconds.value,
+            event_config.max_gap_seconds.value,
+        )
+        event_df = add_sharp_steering_event(
+            event_df,
+            event_config.sharp_steer_threshold_deg_per_sec.value,
+            event_config.sharp_steer_min_duration_seconds.value,
+            event_config.max_gap_seconds.value,
+        )
+
+        # 입력이 이미 대상 시간뿐이라 이 필터는 안전장치다. 재계산 방지를 위해 persist한다.
+        target_df = event_df.filter(
+            (F.col("event_time") >= target_hour) & (F.col("event_time") < target_hour_end)
         ).persist(StorageLevel.MEMORY_AND_DISK)
+        # 즉시 materialize 안 하면 실패 스택트레이스가 엉뚱한 곳(aggregation.py)을 가리킨다(#386).
         try:
-            write_result = write_hourly_segment_features(
-                spark, result, config.output_path, target_hour, run_id
-            )
-            _log_summary(
+            target_count = target_df.count()
+            steering_event_elapsed = time.monotonic() - steering_event_started
+            logger.info(
+                "hourly segment feature job steering/event feature processing finished "
+                "run_id=%s target_hour=%s target=%d elapsed=%.1fs",
                 run_id,
-                target_hour,
-                sensor_df,
+                target_hour.isoformat(),
                 target_count,
-                accepted_count,
-                map_matching_quarantined_count,
-                quarantine_write.row_count,
-                write_result,
-                config.road_segment_path,
+                steering_event_elapsed,
             )
-            return HourlySegmentFeatureJobSummary(
-                result_count=write_result.row_count,
-                accepted_count=accepted_count,
-                map_matching_quarantined_count=map_matching_quarantined_count,
-                quarantined_count=quarantine_write.row_count,
-                quarantine_output_path=quarantine_write.output_path,
-                output_path=write_result.output_path,
-                target_hour=target_hour,
-                run_id=run_id,
-            )
+
+            # quarantine write + feature write를 "storage" 시간으로 보되 사이에 낀 aggregation은 빼려고 따로 잰다(#474).
+            quarantine_write_started = time.monotonic()
+            map_matching_quarantine = _build_map_matching_quarantine(
+                target_df, run_id, processed_at
+            ).persist(StorageLevel.MEMORY_AND_DISK)
+            try:
+                map_matching_quarantined_count = map_matching_quarantine.count()
+                combined_quarantine = cleansing_quarantine.unionByName(
+                    map_matching_quarantine
+                )
+                quarantine_write = write_hourly_quarantine(
+                    spark,
+                    combined_quarantine,
+                    quarantine_output_path,
+                    target_hour,
+                    run_id,
+                )
+            finally:
+                map_matching_quarantine.unpersist()
+            quarantine_write_elapsed = time.monotonic() - quarantine_write_started
+
+            accepted_count = target_count - map_matching_quarantined_count
+            aggregation_started = time.monotonic()
+            result = build_hourly_segment_features(
+                target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
+            ).persist(StorageLevel.MEMORY_AND_DISK)
+            try:
+                # 한 번에 materialize해 validate/write가 이 캐시를 재사용하게 한다(#474).
+                result_count = result.count()
+                # 이미 persist된 DataFrame이면 validate가 캐시를 건드리지 않아 여기서 재계산 안 한다.
+                validate_hourly_segment_features(result)
+                aggregation_elapsed = time.monotonic() - aggregation_started
+                logger.info(
+                    "hourly segment feature job hourly aggregation finished run_id=%s "
+                    "target_hour=%s result=%d elapsed=%.1fs",
+                    run_id,
+                    target_hour.isoformat(),
+                    result_count,
+                    aggregation_elapsed,
+                )
+
+                feature_write_started = time.monotonic()
+                write_result = write_hourly_segment_features(
+                    spark,
+                    result,
+                    config.output_path,
+                    target_hour,
+                    run_id,
+                    result_count=result_count,
+                )
+                feature_write_elapsed = time.monotonic() - feature_write_started
+                storage_elapsed = quarantine_write_elapsed + feature_write_elapsed
+                logger.info(
+                    "hourly segment feature job storage finished run_id=%s target_hour=%s "
+                    "output_path=%s elapsed=%.1fs",
+                    run_id,
+                    target_hour.isoformat(),
+                    write_result.output_path,
+                    storage_elapsed,
+                )
+
+                total_elapsed = time.monotonic() - job_started
+                _log_summary(
+                    run_id,
+                    target_hour,
+                    matched_count,
+                    target_count,
+                    accepted_count,
+                    map_matching_quarantined_count,
+                    quarantine_write.row_count,
+                    write_result,
+                    config.road_segment_path,
+                    total_elapsed,
+                )
+                return HourlySegmentFeatureJobSummary(
+                    result_count=write_result.row_count,
+                    accepted_count=accepted_count,
+                    map_matching_quarantined_count=map_matching_quarantined_count,
+                    quarantined_count=quarantine_write.row_count,
+                    quarantine_output_path=quarantine_write.output_path,
+                    output_path=write_result.output_path,
+                    target_hour=target_hour,
+                    run_id=run_id,
+                )
+            finally:
+                result.unpersist()
         finally:
-            result.unpersist()
+            target_df.unpersist()
     finally:
-        target_df.unpersist()
+        matched_df.unpersist()
 
 
 def _build_map_matching_quarantine(
@@ -311,16 +375,16 @@ def _require_matching_road_snapshot_date(
 def _log_summary(
     run_id: str,
     target_hour: datetime,
-    sensor_df: DataFrame,
+    read_count: int,
     target_count: int,
     accepted_count: int,
     map_matching_quarantined_count: int,
     quarantined_count: int,
     write_result: HourlySegmentFeatureWriteResult,
     road_segment_path: str,
+    total_elapsed: float,
 ) -> None:
-    started = time.monotonic()
-    sensor_count = sensor_df.count()
+    # read_count는 matched_count 재사용(sensor_df와 행 수가 항상 같음, #474). elapsed도 호출부가 잰 총 시간을 그대로 받는다(예전엔 여기서 새로 재는 버그가 있었음).
     logger.info(
         # road_segment_path(map matching 입력)가 빠져 있어 어떤 도로망 스냅샷으로
         # 매칭했는지 로그만 보고는 알 수 없었다(#406).
@@ -330,12 +394,12 @@ def _log_summary(
         run_id,
         target_hour.isoformat(),
         road_segment_path,
-        sensor_count,
+        read_count,
         target_count,
         accepted_count,
         map_matching_quarantined_count,
         quarantined_count,
         write_result.row_count,
         write_result.output_path,
-        time.monotonic() - started,
+        total_elapsed,
     )

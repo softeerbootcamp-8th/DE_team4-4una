@@ -149,6 +149,33 @@ def aggregate_hourly_event_counts(df: DataFrame) -> DataFrame:
     return keyed.groupBy(*EVENT_GROUP_KEYS).agg(*count_expressions)
 
 
+_COMBINED_REQUIRED_COLUMNS = _KEY_REQUIRED_COLUMNS | _STATISTICS_REQUIRED_COLUMNS | _EVENT_REQUIRED_COLUMNS
+
+
+def _aggregate_hourly_segment_features(df: DataFrame) -> DataFrame:
+    """통계와 이벤트 횟수를 한 번의 groupBy로 계산한다 — 기존 두 aggregation+join의 중복 스캔을 없앤다(#474)."""
+    _require_columns(df, _COMBINED_REQUIRED_COLUMNS)
+    keyed = add_hourly_aggregation_keys(df)
+
+    expressions = [F.avg(F.col("speed_mps").cast("double")).alias("avg_speed_mps")]
+    for column_name in RMS_COLUMNS:
+        expressions.append(_rms(column_name).alias(f"rms_{column_name}"))
+    for column_name in P95_ABS_COLUMNS:
+        expressions.append(_p95_abs(column_name).alias(f"p95_abs_{column_name}"))
+    expressions.extend(
+        _count_true(flag_column, output_column)
+        for output_column, flag_column in EVENT_FLAG_COLUMNS.items()
+    )
+    expressions.extend(
+        [
+            F.count(F.lit(1)).cast("long").alias("sample_count"),
+            F.countDistinct("trip_id").cast("long").alias("trip_count"),
+        ]
+    )
+
+    return keyed.groupBy(*EVENT_GROUP_KEYS).agg(*expressions)
+
+
 def build_hourly_segment_features(
     df: DataFrame,
     *,
@@ -156,7 +183,10 @@ def build_hourly_segment_features(
     run_id: str,
     processed_at: datetime | None = None,
 ) -> DataFrame:
-    """센서 통계와 이벤트 집계를 합쳐 HOURLY_SEGMENT_FEATURE_SCHEMA 형태의 결과를 만든다."""
+    """센서 통계와 이벤트 집계를 합쳐 HOURLY_SEGMENT_FEATURE_SCHEMA 형태의 결과를 만든다.
+
+    validate_hourly_segment_features()는 호출하지 않는다 — 호출부가 persist 후 별도로 검증해야 중복 계산을 피한다(#474).
+    """
     if not feature_version.strip():
         raise ValueError("feature_version must not be blank")
     if not run_id.strip():
@@ -166,24 +196,19 @@ def build_hourly_segment_features(
     if processed_at_value.utcoffset() != timedelta(0):
         raise ValueError("processed_at must be UTC timezone-aware")
 
-    statistics = aggregate_hourly_sensor_statistics(df)
-    counts = aggregate_hourly_event_counts(df)
-
     combined = (
-        statistics.join(counts, on=list(HOURLY_GROUP_KEYS), how="inner")
+        _aggregate_hourly_segment_features(df)
         .withColumn("feature_version", F.lit(feature_version))
         .withColumn("_processed_at", F.lit(processed_at_value).cast("timestamp"))
         .withColumn("_run_id", F.lit(run_id))
     )
 
-    result = combined.select(
+    return combined.select(
         *(
             F.col(field.name).cast(field.dataType).alias(field.name)
             for field in HOURLY_SEGMENT_FEATURE_SCHEMA.fields
         )
     )
-    validate_hourly_segment_features(result)
-    return result
 
 
 def validate_hourly_segment_features(df: DataFrame) -> None:
@@ -229,9 +254,10 @@ def validate_hourly_segment_features(df: DataFrame) -> None:
     for column_name in EVENT_FLAG_COLUMNS:
         invalid_count = invalid_count | (F.col(column_name) > F.col("sample_count"))
 
-    # 이후 두 액션(아래 조건 체크 + PK 중복 체크)이 상류 lineage를 다시 계산하지 않도록 캐시한다.
-    # 검증 도중 예외가 나도 캐시가 남지 않도록 반드시 finally에서 해제한다.
-    df = df.cache()
+    # 아래 두 액션이 상류 lineage를 다시 계산하지 않도록 캐시하되, 호출부가 이미 persist해 뒀으면 그대로 두고 건드리지 않는다(#474).
+    already_persisted = df.storageLevel.useMemory or df.storageLevel.useDisk
+    if not already_persisted:
+        df = df.cache()
     try:
         # 행 단위 위반 3종을 개별 count() 대신 하나의 스캔으로 같이 계산한다.
         violations = df.select(
@@ -254,4 +280,5 @@ def validate_hourly_segment_features(df: DataFrame) -> None:
             key = {column: duplicate[0][column] for column in HOURLY_PRIMARY_KEY}
             raise ValueError(f"duplicate hourly feature primary key: {key}")
     finally:
-        df.unpersist()
+        if not already_persisted:
+            df.unpersist()

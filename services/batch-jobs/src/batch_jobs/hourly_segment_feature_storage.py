@@ -36,6 +36,8 @@ def write_hourly_segment_features(
     output_root: str,
     target_hour: datetime,
     run_id: str,
+    *,
+    result_count: int | None = None,
 ) -> HourlySegmentFeatureWriteResult:
     # 검증된 result를 staging에 쓰고, read-back 확인 후에만 대상 Hour 경로에 반영한다
     if not _SAFE_RUN_ID.match(run_id):
@@ -57,7 +59,9 @@ def write_hourly_segment_features(
         row_count = staged.count()
         if row_count == 0:
             raise ValueError("refusing to write an empty result over an existing hour")
-        if row_count != result.count():
+        # 호출부가 이미 count를 알고 있으면 재사용한다 — 여기서 또 count()하면 상류 lineage가 재계산될 수 있다(#474).
+        computed_count = result_count if result_count is not None else result.count()
+        if row_count != computed_count:
             raise ValueError("staged row count does not match the computed result")
 
         _replace_hour_path(spark, final_path, staging_path)
