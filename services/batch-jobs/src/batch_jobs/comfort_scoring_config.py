@@ -51,6 +51,12 @@ class HourlyScoringConfig:
         ):
             raise ValueError("comfortable anchors must be below uncomfortable anchors")
         for component in self.components:
+            # 합이 1이어도 음수가 섞이면 점수가 0~100을 벗어난다(ADR-0012).
+            # 예: 가중치 (-0.5, 1.5)에 penalty (1.0, 0.0)이면 점수가 150이 된다.
+            if any(weight < 0 for _, weight in component.weights):
+                raise ValueError(
+                    f"{component.output_column} weights must not be negative"
+                )
             if abs(sum(weight for _, weight in component.weights) - 1.0) > 1e-9:
                 raise ValueError(f"{component.output_column} weights must sum to 1")
             if missing := {name for name, _ in component.weights} - normalizer_names:

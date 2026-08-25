@@ -154,8 +154,12 @@ fail 정책, at-rest `data_quality_audit` DAG 분리. 이 ADR은 ADR-0004의 "Ai
 설정 실수 — 음수 가중치, 합이 1이 아닌 가중치, 비-SemVer 버전 문자열 — 를 배치가
 시작되기 전에 막게 된다.
 
-suite 정리와 레벨 0-C·1의 전제 검증 추가는 #495에서 함께 수행한다 — 검증 호출부를
-어차피 다시 쓰는 자리라 같은 변경으로 묶는 편이 낫다.
+레벨 1의 전제 검증(가중치 비음수, 방향 가중치 합 = 1, `shrinkage_k` 비음수)은
+#495에서 함께 넣는다 — 지금 어느 층에도 없는 검사라 미룰 이유가 없다.
+
+레벨 0-A/0-B/0-C 항목을 suite에서 걷어내는 일은 후속 이슈로 미룬다. 이번 성능
+문제의 원인은 Job Run 오버헤드였고 그것은 위 실행 위치 변경으로 해결되므로, suite
+정리는 급하지 않은 정합성 작업이다. 레벨 기준 자체는 이 ADR로 확정된 상태로 남는다.
 
 ## 대안
 
@@ -191,9 +195,10 @@ suite 정리와 레벨 0-C·1의 전제 검증 추가는 #495에서 함께 수�
 - 검증이 Airflow 워커에서 도는 경로가 하나 늘어난다. 새 의존성은 없다 —
   `great-expectations`/`pandas`/`pyarrow`가 이미 설치돼 있고
   `jobs/current_score_quarantine.py`(#251)가 같은 GX pandas 경로를 쓴다.
-- **검증 통과가 의미를 갖게 된다.** 지금은 in-flight 25개 항목 중 실패 가능한
-  것이 1개뿐이라 통과 사실이 거의 아무것도 보증하지 않는다. GX 항목은 37개에서
-  13개로 줄지만, 남는 것은 모두 실제로 실패할 수 있다.
+- **suite를 정리하고 나면 검증 통과가 의미를 갖게 된다.** 지금은 in-flight 25개
+  항목 중 실패 가능한 것이 1개뿐이라 통과 사실이 거의 아무것도 보증하지 않는다.
+  레벨 기준을 적용하면 GX 항목이 37개에서 13개로 줄고, 남는 것은 모두 실제로
+  실패할 수 있다. 이 정리는 후속 이슈에서 한다.
 - **전제 검증을 새로 만들면서 지금보다 안전해지는 구간이 생긴다.** 음수 가중치,
   합이 1이 아닌 방향 가중치, 비-SemVer 버전 문자열은 현재 어느 층에서도 막히지
   않는다. 설정 로드 시점 검증은 그 실수를 배치가 시작되기도 전에 막는다.
@@ -222,16 +227,17 @@ suite 정리와 레벨 0-C·1의 전제 검증 추가는 #495에서 함께 수�
 - `services/orchestration` — `jobs/standard_score_validation.py`를 새로 만든다
   (`jobs/road_environment.py`와 같은 패턴: 계약은 de4-core에서 가져오고 읽는
   로직은 서비스 안에 둔다). `standard_score_pipeline`에서 검증 task 2개를
-  제거하고 `validate_standard_score`를 `PythonOperator`로 바꾼다. 남은 TaskGroup
-  구조를 재편한다.
-- `services/batch-jobs/src/batch_jobs/resources/expectations/` — 레벨 0-A/0-B/0-C
-  항목을 suite에서 제거한다. `hourly_segment_features_suite`는 15개가 모두 빠져
-  파일 자체가 사라지고, `current_segment_comfort_score_audit_range_suite`도
-  마찬가지다. 방향 점수 범위(레벨 1)는 남긴다.
-- 전제 검증을 새로 넣을 자리 — `comfort_scoring_config.py`(컴포넌트 가중치 비음수),
-  `comfort_score/config.py`(방향 가중치 비음수 및 합 = 1, `shrinkage_k` 비음수),
-  `cleansing/rules.py`(`speed_mps` 하한 존재), `comfort_score/formula.py`
-  (`SCORE_VERSION` 형식은 단위 테스트로).
+  제거하고 `validate_standard_score`를 `PythonOperator`로 바꾼다.
+- `comfort_scoring_config.py`(컴포넌트 가중치 비음수), `comfort_score/config.py`
+  (방향 가중치 비음수 및 합 = 1, `shrinkage_k` 비음수) — 레벨 1 항목이 기대는
+  전제를 로드 시점에 강제한다.
+- `services/batch-jobs/src/batch_jobs/resources/expectations/`(후속 이슈) — 레벨
+  0-A/0-B/0-C 항목을 suite에서 제거한다. `hourly_segment_features_suite`는 15개가
+  모두 빠져 파일 자체가 사라지고,
+  `current_segment_comfort_score_audit_range_suite`도 마찬가지다. 방향 점수
+  범위(레벨 1)는 남긴다. `cleansing/rules.py`의 `speed_mps` 하한 존재 확인과
+  `SCORE_VERSION` 형식 단위 테스트도 그때 함께 넣는다 — 둘 다 지금은 대응하는 GX
+  항목이 남아 있어 중복이다.
 - `docs/adr/0004-data-quality-validation-with-great-expectations.md` — 개정되는
   두 대목에서 이 ADR을 참조한다.
 - `context/data/quality-rules.md` — 레벨 체계와, 각 규칙이 어느 레벨인지 반영한다.
