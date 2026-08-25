@@ -97,7 +97,13 @@ def test_main_returns_after_validate_sensor_processing_without_falling_through(
 
 def test_validate_hourly_scoring_command_accepts_path_override() -> None:
     arguments = cli.build_parser().parse_args(
-        ["validate-hourly-scoring", "--output-path", "/scores"]
+        [
+            "validate-hourly-scoring",
+            "--target-hour",
+            "2026-08-25T02:00:00+00:00",
+            "--output-path",
+            "/scores",
+        ]
     )
 
     assert arguments.output_path == "/scores"
@@ -109,7 +115,7 @@ def test_main_returns_after_validate_hourly_scoring_without_falling_through(
     calls: list[argparse.Namespace] = []
     monkeypatch.setattr(cli, "run_hourly_scoring_validation_cli", calls.append)
 
-    cli.main(["validate-hourly-scoring"])
+    cli.main(["validate-hourly-scoring", "--target-hour", "2026-08-25T02:00:00+00:00"])
 
     assert len(calls) == 1
 
