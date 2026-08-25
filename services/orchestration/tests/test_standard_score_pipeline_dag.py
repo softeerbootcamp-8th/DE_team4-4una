@@ -441,3 +441,48 @@ def test_stop_task_is_not_counted_as_a_batch_job_submission():
     stop = module.dag.get_task("stop_emr_serverless_application")
 
     assert not isinstance(stop, EmrServerlessStartJobOperator)
+
+
+# --- #508: 동시 제출 직렬화와 job별 자원 프로파일 ---
+
+
+def _spark_params(task) -> str:
+    return task.job_driver["sparkSubmit"]["sparkSubmitParameters"]
+
+
+def test_only_one_dag_run_is_active_at_a_time():
+    # 시간당 스케줄인데 DAG run이 1시간을 넘기면 다음 run이 겹쳐 job run 2건이
+    # 동시에 뜬다 — 베이스라인에 1:09:46, 1:11:47 두 건이 있었다(#508).
+    module = _load_dag_module()
+
+    assert module.dag.max_active_runs == 1
+
+
+def test_every_emr_task_uses_the_serialising_pool():
+    from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+    from emr_serverless import EMR_SERVERLESS_POOL
+
+    module = _load_dag_module()
+
+    emr_tasks = [
+        task
+        for task in module.dag.tasks
+        if isinstance(task, EmrServerlessStartJobOperator)
+    ]
+    assert len(emr_tasks) == 3
+    for task in emr_tasks:
+        assert task.pool == EMR_SERVERLESS_POOL, task.task_id
+
+
+def test_sensor_processing_uses_the_heavy_profile_and_the_others_default():
+    # run_sensor_processing이 가장 무겁다(실측 0.783 vCPU-h, 2,953 tasks). 반면
+    # run_hourly_scoring은 0.073 vCPU-h로 10배 차이가 난다(#508).
+    module = _load_dag_module()
+
+    sensor = module.dag.get_task("sensor_processing.run_sensor_processing")
+    hourly = module.dag.get_task("hourly_scoring.run_hourly_scoring")
+    standard = module.dag.get_task("standard_score.run_standard_score")
+
+    assert "spark.executor.instances=4" in _spark_params(sensor)
+    assert "spark.executor.instances=2" in _spark_params(hourly)
+    assert "spark.executor.instances=2" in _spark_params(standard)

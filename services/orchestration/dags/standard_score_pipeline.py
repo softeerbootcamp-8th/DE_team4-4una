@@ -227,6 +227,10 @@ with DAG(
     ),
     start_date=datetime.datetime(2026, 8, 17, tzinfo=datetime.UTC),
     catchup=False,
+    # DAG run이 1시간을 넘기면 다음 시각 run과 겹쳐 EMR Serverless job run이 동시에
+    # 뜨고, 뒤에 온 쪽이 executor를 못 받아 굶는다(#508 — 실측으로 10분 12초).
+    # emr_serverless pool이 제출 자체는 직렬화하지만 DAG run이 쌓이는 것은 별개다.
+    max_active_runs=1,
     default_args={
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
@@ -249,6 +253,9 @@ with DAG(
         # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
         run_sensor_processing = submit_batch_jobs_command(
             task_id="run_sensor_processing",
+            # 파이프라인에서 가장 무거운 job이다 — 실측 0.783 vCPU-h로
+            # run_hourly_scoring(0.073 vCPU-h)의 10배다(#508).
+            profile="heavy",
             entry_point_arguments=[
                 "cleanse-sensor-events",
                 "--run-id",
