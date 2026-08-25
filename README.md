@@ -12,7 +12,7 @@
 </p>
 
 <p>
-  <a href="./context/data/contracts.md#route-evaluation-request-and-response"><strong>대시보드 </strong></a>
+  <a href="http://43.203.192.129:8501/"><strong>대시보드 </strong></a>
   
 </p>
 
