@@ -386,3 +386,19 @@ def test_unknown_profile_name_fails_loudly():
         _build_operator(
             task_id="run_thing", entry_point_arguments=["cmd"], profile="nope"
         )
+
+
+def test_job_run_submission_is_serialised_through_a_single_slot_pool():
+    # 두 DAG(standard_score_pipeline, data_quality_audit)가 같은 Application을
+    # 공유하는데, 겹치면 executor를 못 받고 ApplicationMaxCapacityExceededException을
+    # 반복하다 job run이 FAILED가 된다(#508: 06:00 run이 10분 12초 동안 굶었고
+    # driver 로그에 같은 예외가 48회 찍혔다).
+    # EmrServerlessStartJobOperator는 deferrable 설정이 없어 기본값 False로 동작하므로
+    # job run이 끝날 때까지 pool slot을 점유한다 — pool 하나로 DAG 간 직렬화가 성립한다.
+    from emr_serverless import EMR_SERVERLESS_POOL
+
+    operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
+
+    assert EMR_SERVERLESS_POOL == "emr_serverless"
+    assert operator.pool == EMR_SERVERLESS_POOL
+    assert operator.deferrable is False

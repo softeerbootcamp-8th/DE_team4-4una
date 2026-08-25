@@ -103,7 +103,15 @@ x-airflow-common: &airflow-common
 services:
   airflow-init:
     <<: *airflow-common
-    entrypoint: ["airflow", "db", "migrate"]
+    # db migrate 뒤에 EMR Serverless 제출 직렬화용 pool을 만든다(#508). 나머지 세
+    # 컨테이너가 이 서비스에 service_completed_successfully로 의존하므로 DAG가
+    # 돌기 전에 pool이 반드시 존재한다. `pools set`은 이미 있으면 갱신하는 멱등
+    # 명령이라 매 배포마다 다시 돌아도 안전하다.
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      airflow db migrate &&
+      airflow pools set emr_serverless 1
+      'EMR Serverless job run submission is serialised to one at a time (#508)'
 
   airflow-dag-processor:
     <<: *airflow-common

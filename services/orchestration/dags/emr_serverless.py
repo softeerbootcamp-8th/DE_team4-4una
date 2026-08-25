@@ -51,6 +51,17 @@ _EMR_SERVERLESS_LOG_S3_URI_TEMPLATE = (
 # batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
 _PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
 
+# standard_score_pipeline과 data_quality_audit이 같은 Application을 공유하므로 job run
+# 제출을 pool로 직렬화한다(#508). 겹치면 뒤에 온 job run이 executor를 못 받고
+# ApplicationMaxCapacityExceededException을 반복하다 FAILED가 된다 — 실측으로 한
+# job run이 10분 12초를 굶었다. EmrServerlessStartJobOperator는 deferrable이 아니라
+# job run이 끝날 때까지 slot을 쥐고 있어, pool 하나로 DAG 간 직렬화가 성립한다.
+#
+# pool은 Airflow DB 객체라 DAG 코드로 선언할 수 없다 — infra/compose/airflow.yaml의
+# airflow-init이 만들고, 나머지 컨테이너가 그 서비스에 의존하므로 DAG가 돌기 전에
+# 반드시 존재한다.
+EMR_SERVERLESS_POOL = "emr_serverless"
+
 
 @dataclass(frozen=True)
 class SparkResourceProfile:
@@ -221,6 +232,7 @@ def submit_batch_jobs_command(
         },
         name=task_id,
         outlets=outlets or [],
+        pool=EMR_SERVERLESS_POOL,
     )
 
 
