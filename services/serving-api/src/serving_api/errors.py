@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,39 @@ DATABASE_UNAVAILABLE = "database_unavailable"
 INTERNAL_ERROR = "internal_error"
 
 _STATUS_CODES = {404: NOT_FOUND, 422: INVALID_REQUEST}
+
+
+# 응답 모델을 schemas가 아니라 여기에 둔다 — 이 형식을 실제로 만들어내는 핸들러가
+# 바로 아래에 있어서, 한쪽만 고치고 다른 쪽이 뒤처지는 일을 막는다.
+class ErrorDetail(BaseModel):
+    code: str = Field(
+        description=(
+            "오류 종류를 나타내는 식별자. 상태 코드별로 "
+            f"404는 `{NOT_FOUND}`, 422는 `{INVALID_REQUEST}`, "
+            f"503은 `{DATABASE_UNAVAILABLE}`, 그 밖은 `{INTERNAL_ERROR}`다."
+        ),
+        examples=[NOT_FOUND],
+    )
+    message: str = Field(
+        description=(
+            "사람이 읽을 설명. 형식이 고정되어 있지 않으므로 분기 조건으로 쓰지 않는다 "
+            "— 분기는 `code`로 한다."
+        ),
+        examples=["no comfort score for segment_id=0012345 vehicle_profile_id=0"],
+    )
+    details: list[dict] | None = Field(
+        default=None,
+        description="422에만 실리는 검증 오류 목록. 어느 필드가 왜 거절됐는지 담는다.",
+    )
+
+
+# 검증 오류와 그 밖의 오류가 같은 모양이라, 클라이언트가 `error.code` 하나만 보고
+# 분기할 수 있다. 예외가 하나 있다 -- `GET /health`는 장애를 오류가 아니라 상태
+# 보고로 다루므로 503에서도 이 형식을 쓰지 않는다.
+class ErrorResponse(BaseModel):
+    """모든 오류의 공통 응답 형식."""
+
+    error: ErrorDetail
 
 
 def error_response(status_code: int, code: str, message: str, **extra: object) -> JSONResponse:

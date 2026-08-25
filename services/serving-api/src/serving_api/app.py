@@ -16,6 +16,31 @@ from serving_api.metrics import RequestMetrics, install_request_metrics
 
 PoolFactory = Callable[[ServingApiConfig], ConnectionPool]
 
+# Swagger UI 최상단에 표시된다. 개별 정책은 각 endpoint와 필드 설명에 적는다.
+API_DESCRIPTION = (
+    "NYC 도로 구간의 승차감 점수를 조회하고, 후보 경로를 승차감 기준으로 비교한다."
+)
+
+TAGS_METADATA = [
+    {
+        "name": "health",
+        "description": "앱과 DB 연결 상태 확인. 배포 스크립트와 모니터링이 사용한다.",
+    },
+    {
+        "name": "comfort-scores",
+        "description": (
+            "도로 구간의 최신 승차감 점수를 조회한다. 단건과 다건을 모두 지원한다."
+        ),
+    },
+    {
+        "name": "routes",
+        "description": (
+            "후보 경로를 승차감 기준으로 비교한다. "
+            "경로에 포함되는 도로 구간을 리스트로 받아 점수를 산출한다."
+        ),
+    },
+]
+
 
 def create_app(
     config: ServingApiConfig | None = None,
@@ -44,8 +69,11 @@ def create_app(
             pool.close()
 
     app = FastAPI(
-        title="DE4 ride-comfort serving API",
+        title="Road Comfort Score API",
+        summary="내비게이션이 승차감을 고려한 경로를 추천할 수 있도록 경로별 승차감 점수를 제공하는 API",
+        description=API_DESCRIPTION,
         version="0.1.0",
+        openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
     )
     # 경로 평가 정책값을 핸들러에서 읽어야 한다. 풀과 달리 기동 전에도 값이
