@@ -388,7 +388,7 @@ def _replace_partition(
 
     **S3(EMRFS) 주의**: EMRFS의 `FileSystem.rename()`은 디렉터리의 각 객체를 copy 후
     delete하는 방식이라 원자적이지 않다. `cleansing/hourly_storage.py::_replace_partition`과
-    동일한 위험을 그대로 감수한다(#290).
+    동일한 위험을 그대로 감수한다(ADR-0011).
     """
     backup_path = _backup_path(final_path)
     had_existing = False
