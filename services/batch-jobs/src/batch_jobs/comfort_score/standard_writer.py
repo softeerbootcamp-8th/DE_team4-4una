@@ -4,11 +4,14 @@ gold_writer.py와 같은 구조다 — Spark JDBC에 네이티브 UPSERT가 없�
 테이블에 overwrite로 쓴 뒤 같은 커넥션에서 SQL MERGE(INSERT ... ON CONFLICT)를 한 번
 실행하고, staging 보호를 위해 advisory lock을 Spark write보다 먼저 잡는다.
 
-Gold와 다른 점은 두 가지다.
-  - 충돌 키가 (segment_id, vehicle_profile_id, score_as_of) 세 컬럼이다. 같은
-    score_as_of를 다시 돌리면 그 행이 갱신되고, 다른 score_as_of는 누적된다.
-  - advisory lock 키를 따로 쓴다(STANDARD_JOB_STAGING_LOCK_KEY) — 두 job이 서로를
-    막을 이유가 없다.
+Gold와 다른 점은 advisory lock 키를 따로 쓴다는 것뿐이다
+(STANDARD_JOB_STAGING_LOCK_KEY) — 두 job이 서로를 막을 이유가 없다.
+
+충돌 키는 (segment_id, vehicle_profile_id)다. 대상 테이블은 (구간, 프로필)별 최신
+세대 1행만 담는 서빙 스토어라(#503, migration 0012) 실행마다 같은 행을 제자리에서
+갱신하고 행 수는 늘지 않는다. score_as_of는 키가 아니라 갱신 대상 컬럼이며, 어느
+세대인지는 그 값으로 식별한다. 세대별 이력은 S3 Gold snapshot에 남는다
+(comfort_score/standard_storage.py).
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ _UPDATE_ASSIGNMENTS = ",\n      ".join(
     f"{column} = EXCLUDED.{column}"
     for column in EXPECTED_STAGING_COLUMNS
     # 충돌 키는 갱신 대상이 아니다.
-    if column not in {"segment_id", "vehicle_profile_id", "score_as_of"}
+    if column not in {"segment_id", "vehicle_profile_id"}
 )
 
 _MERGE_SQL = f"""
@@ -60,7 +63,7 @@ WITH upserted AS (
       ({_INSERT_COLUMNS})
     SELECT {_INSERT_COLUMNS}
     FROM {STAGING_TABLE}
-    ON CONFLICT (segment_id, vehicle_profile_id, score_as_of) DO UPDATE SET
+    ON CONFLICT (segment_id, vehicle_profile_id) DO UPDATE SET
       {_UPDATE_ASSIGNMENTS}
     RETURNING (xmax = 0) AS inserted
 )
@@ -169,7 +172,7 @@ def _validate_no_duplicates_or_nan(cursor) -> None:
     # 검증 실패로 빠져나가도 그때까지 쓴 시간은 남는다(perf_phase의 ok=False).
     with perf_phase(logger, "standard_score.staging_validate") as fields:
         cursor.execute(
-            f"SELECT count(*), count(DISTINCT (segment_id, vehicle_profile_id, score_as_of)) "
+            f"SELECT count(*), count(DISTINCT (segment_id, vehicle_profile_id)) "
             f"FROM {STAGING_TABLE}"
         )
         total, distinct = cursor.fetchone()
@@ -177,7 +180,7 @@ def _validate_no_duplicates_or_nan(cursor) -> None:
         if total != distinct:
             raise ValueError(
                 f"{STAGING_TABLE} has {total - distinct} duplicate "
-                "(segment_id, vehicle_profile_id, score_as_of) rows — formula.py should "
+                "(segment_id, vehicle_profile_id) rows — formula.py should "
                 "never produce these; refusing to merge"
             )
         cursor.execute(
