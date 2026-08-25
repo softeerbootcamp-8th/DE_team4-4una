@@ -8,7 +8,6 @@ EMR Serverless로 제출되는 task는 원격 Spark job이라 Airflow XCom으로
 
 from __future__ import annotations
 
-import io
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,7 +104,17 @@ def count_audit_gold_tables(*, connection) -> dict[str, int]:
 
 
 def _count_parquet_rows(store: ObjectStore, uri: str) -> int:
-    objects = [obj for obj in store.list_objects(uri) if obj.uri.endswith(".parquet")]
-    if not objects:
-        return 0
-    return sum(pq.read_table(io.BytesIO(store.read_bytes(obj.uri))).num_rows for obj in objects)
+    """Parquet footer의 `num_rows`만 읽어 합산한다 (#470).
+
+    행 수만 필요한데 객체 전량을 내려받으면 Airflow 워커의 메모리와 S3 egress를
+    그대로 쓴다. `ObjectStore.open_reader`는 S3에서 Range GET으로 요청한 구간만
+    가져오므로, pyarrow는 파일 크기와 무관하게 꼬리의 footer만 읽고 끝난다.
+    """
+    total = 0
+    for obj in store.list_objects(uri):
+        # Spark 출력에는 _SUCCESS 같은 비-Parquet 파일이 함께 남는다.
+        if not obj.uri.endswith(".parquet"):
+            continue
+        with store.open_reader(obj.uri) as reader:
+            total += pq.read_metadata(reader).num_rows
+    return total
