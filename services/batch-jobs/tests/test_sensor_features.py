@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import time
@@ -40,6 +41,7 @@ from batch_jobs.sensor_features.events import (
 )
 from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
 from pyproj import Transformer
+from pyspark import StorageLevel
 from pyspark.sql import Row, SparkSession
 from pyspark.sql.types import (
     BooleanType,
@@ -1134,18 +1136,21 @@ class TestHourlySegmentFeatures:
     def test_conflicting_road_snapshot_date_for_same_pk_is_rejected(self, spark) -> None:
         # aggregate_hourly_event_counts는 road_snapshot_date별로도 나뉘어 집계되므로, 같은
         # 시간·Segment·차량 프로필에 서로 다른 snapshot이 섞이면 PK가 중복되어야 한다.
+        # build_hourly_segment_features()는 더 이상 내부에서 검증하지 않아(#474) 여기서 직접 검증을 호출한다.
         rows = [
             self.sensor_row(0, road_snapshot_date=self.SNAPSHOT),
             self.sensor_row(1, road_snapshot_date=date(2026, 8, 12)),
         ]
 
+        result = build_hourly_segment_features(
+            self.sensor_df(spark, rows),
+            feature_version=self.FEATURE_VERSION,
+            run_id=self.RUN_ID,
+            processed_at=self.PROCESSED_AT,
+        )
+
         with pytest.raises(ValueError, match="duplicate"):
-            build_hourly_segment_features(
-                self.sensor_df(spark, rows),
-                feature_version=self.FEATURE_VERSION,
-                run_id=self.RUN_ID,
-                processed_at=self.PROCESSED_AT,
-            )
+            validate_hourly_segment_features(result)
 
     def feature_row(self, **overrides: object) -> dict[str, object]:
         row = {
@@ -1215,6 +1220,18 @@ class TestHourlySegmentFeatures:
             validate_hourly_segment_features(df)
 
         assert df.storageLevel.useMemory is False
+
+    def test_leaves_an_already_persisted_dataframe_cached(self, spark) -> None:
+        # 호출부가 이미 persist해 둔 result면 검증이 그 캐시를 지우면 안 된다(#474).
+        df = self.feature_rows_df(spark, [self.feature_row()]).persist(StorageLevel.MEMORY_AND_DISK)
+        df.count()
+
+        try:
+            validate_hourly_segment_features(df)
+
+            assert df.storageLevel.useMemory is True or df.storageLevel.useDisk is True
+        finally:
+            df.unpersist()
 
     @pytest.mark.parametrize(
         "build_df, match",
@@ -1400,6 +1417,29 @@ class TestHourlySegmentFeatureJob:
             actual_types[field.name] == field.dataType
             for field in HOURLY_SEGMENT_FEATURE_SCHEMA.fields
         )
+
+    def test_stage_elapsed_times_are_logged_separately(self, spark, tmp_path, caplog) -> None:
+        # 단계별(map matching/steering-event/집계/저장) elapsed를 따로 로그로 남긴다(#474).
+        rows = [
+            self.sensor_row(self.TARGET_HOUR + timedelta(seconds=0), "e1", trip_seq=0),
+            self.sensor_row(self.TARGET_HOUR + timedelta(seconds=1), "e2", trip_seq=1),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            self.run_job(spark, tmp_path, rows)
+
+        messages = [record.getMessage() for record in caplog.records]
+        stage_labels = [
+            "map matching finished",
+            "steering/event feature processing finished",
+            "hourly aggregation finished",
+            "storage finished",
+            "hourly segment feature job finished",
+        ]
+        for label in stage_labels:
+            matching = [message for message in messages if label in message]
+            assert len(matching) == 1, f"expected exactly one log line containing {label!r}"
+            assert "elapsed=" in matching[0]
 
     def test_episode_starting_before_target_hour_is_not_recounted(self, spark, tmp_path) -> None:
         rows = [
@@ -1668,6 +1708,16 @@ class TestHourlySegmentFeatureStorage:
         assert result.output_path == hour_output_path(output_root, self.TARGET_HOUR)
         assert result.row_count == 2
         assert len(self.read_back(spark, result.output_path)) == 2
+
+    def test_uses_the_passed_in_result_count_instead_of_recounting(self, spark, tmp_path) -> None:
+        # 일부러 틀린 값을 넘겨서, 내부에서 조용히 다시 세지 않고 그 값을 실제로 쓰는지 확인한다(#474).
+        output_root = str(tmp_path / "hourly_segment_features")
+        df = self.feature_rows_df(spark, [self.feature_row()])
+
+        with pytest.raises(ValueError, match="does not match"):
+            write_hourly_segment_features(
+                spark, df, output_root, self.TARGET_HOUR, self.RUN_ID, result_count=999
+            )
 
     def test_rerunning_same_hour_replaces_data(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
