@@ -85,14 +85,13 @@ FROM {CURRENT_TABLE}
 WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
 """
 
-# standard는 실행마다 행이 쌓이는 시계열이라 (구간, 프로필)별 최신 score_as_of
-# 하나만 골라야 한다. PK가 (segment_id, vehicle_profile_id, score_as_of)라
-# 이 ORDER BY는 인덱스를 그대로 탄다.
+# standard도 (구간, 프로필)당 1행뿐이라(#503, migration 0012) 최신 세대를 고르는
+# DISTINCT ON이 필요 없다. PK가 (segment_id, vehicle_profile_id)이므로 위의
+# CURRENT_BATCH_SQL과 똑같이 인덱스만 타고 끝난다.
 STANDARD_BATCH_SQL = f"""
-SELECT DISTINCT ON (segment_id, vehicle_profile_id) {_STANDARD_PROJECTION}
+SELECT {_STANDARD_PROJECTION}
 FROM {STANDARD_TABLE}
 WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])
-ORDER BY segment_id, vehicle_profile_id, score_as_of DESC
 """
 
 # 점수 테이블이 이 테이블을 FK로 참조하므로 같은 DB에 있다. 프로필 목록을

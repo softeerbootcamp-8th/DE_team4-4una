@@ -175,7 +175,8 @@ class TestFetchMany:
         assert parameters == (0, ["1"])
 
 
-def test_standard_query_takes_the_latest_run_per_segment() -> None:
-    # standard는 실행마다 행이 쌓이므로 최신 하나만 골라야 한다.
-    assert "DISTINCT ON (segment_id, vehicle_profile_id)" in STANDARD_BATCH_SQL
-    assert "ORDER BY segment_id, vehicle_profile_id, score_as_of DESC" in STANDARD_BATCH_SQL
+def test_standard_query_reads_the_single_row_per_segment_directly() -> None:
+    # standard도 (구간, 프로필)당 1행뿐이라(#503) 최신 세대를 고를 일이 없다.
+    assert "DISTINCT" not in STANDARD_BATCH_SQL
+    assert "ORDER BY" not in STANDARD_BATCH_SQL
+    assert "WHERE vehicle_profile_id = %s AND segment_id = ANY(%s::text[])" in STANDARD_BATCH_SQL

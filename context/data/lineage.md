@@ -93,6 +93,12 @@ Silver `hourly_comfort_score`
 Segments with no taxi zone stop at `standard_segment_comfort_score`; the current
 table requires a zone.
 
+Both PostgreSQL Gold tables hold only the current generation — one row per
+(segment, vehicle profile), overwritten by each run (issues #216 and #503). The
+per-run history is the S3 Gold `standard_segment_comfort_score` snapshot above,
+one immutable dataset per `score_as_of` (ADR-0012). Tracing a *past* calculation
+run therefore goes to S3, not to Postgres.
+
 ## Required traceability
 
 Starting with an API record, an agent or contributor should be able to identify:

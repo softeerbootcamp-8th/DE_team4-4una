@@ -54,12 +54,14 @@ in Silver, which are the direct inputs to the Gold formula below.
 
 ## Standard score calculation (Segment x vehicle profile)
 
-Grain: one `(segment_id, vehicle_profile_id, score_as_of)` row, rolled up
-from every qualifying hour of `hourly_comfort_score` inside the scoring
-window (a rolling 168-hour / 1-week window), computed on each scheduled
-standard run and appended to `standard_segment_comfort_score` as that run's
-snapshot (issue #193; see "Column calculation mapping" under
-`standard_segment_comfort_score` in `context/data/schema-catalog.md`).
+Grain: one `(segment_id, vehicle_profile_id)` row, rolled up from every
+qualifying hour of `hourly_comfort_score` inside the scoring window (a rolling
+168-hour / 1-week window), computed on each scheduled standard run and upserted
+into `standard_segment_comfort_score` in place, so that table always holds the
+latest run's snapshot and nothing older (issues #193 and #503; see "Column
+calculation mapping" under `standard_segment_comfort_score` in
+`context/data/schema-catalog.md`). Each run's snapshot is also written to S3
+Gold under its own `score_as_of`, and that is where the history lives.
 `score_as_of` is the run's fixed schedule time; it is stored separately from
 the `data_period_start`/`data_period_end` window actually rolled up into the
 score, so a run with zero qualifying hours (`N = 0`) still gets a real
@@ -196,11 +198,13 @@ for combinations already present in `hourly_comfort_score`.
 
 **Resolved for issue #193:** the standard job materializes a row for every
 `(segment_id, vehicle_profile_id)` combination on every scheduled run,
-regardless of `N`. This is exactly why `standard_segment_comfort_score`'s
-primary key uses `score_as_of` (the run's fixed schedule time) rather than
-`data_period_end` (the rolled-up, `N = 0`-nullable data window) — every
-scheduled run gets a row keyed by when it ran, whether or not it found
-qualifying data (`context/data/schema-catalog.md`).
+regardless of `N`. This is exactly why the row records `score_as_of` (the run's
+fixed schedule time) rather than leaning on `data_period_end` (the rolled-up,
+`N = 0`-nullable data window) — every scheduled run stamps its row with when it
+ran, whether or not it found qualifying data
+(`context/data/schema-catalog.md`). `score_as_of` was also the third
+primary-key column until issue #503 dropped it; the column and its meaning are
+unchanged, only the key is narrower.
 
 ## Weather-adjusted current score (Segment x vehicle profile)
 

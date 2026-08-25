@@ -27,7 +27,7 @@ design and must not be invented silently.
 | `PROCESSED_SENSOR_EVENT_SCHEMA` | — | Execution-local T1→T2 DataFrame | One accepted cleansed Bronze `sensor_event` row |
 | `hourly_segment_features` | `hourly_segment_features` | Silver | One hour x segment x vehicle profile feature row |
 | `hourly_comfort_score` | `hourly_comfort_score` | Silver | One hour x segment x vehicle profile comfort score |
-| `standard_segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile x standard scoring hour |
+| `standard_segment_comfort_score` | TBD | Gold (PostgreSQL) | One segment x vehicle profile's latest standard score |
 | `latest_zone_weather` | TBD | Silver/Serving (PostgreSQL) | One TLC taxi zone's latest weather observation |
 | `zone_weather_snapshot` | `zone_weather_snapshot` | Bronze (local Parquet, `data/local-lake`) | One TLC taxi zone x 15-minute weather observation |
 | `current_segment_comfort_score` | TBD | Gold/Serving (PostgreSQL) | One segment x vehicle profile's current state |
@@ -421,37 +421,53 @@ in the git history of this file.
 migration order in `context/comfort-score.md`. **Layer:** Gold. **Storage:**
 PostgreSQL.
 
-**Grain:** one LION segment x vehicle profile x standard scoring run — the
-weather-unadjusted comfort score for that run's trailing 168-hour window,
-rolled up from `hourly_comfort_score` using the same formula as
-`segment_comfort_score` (`context/comfort-score.md`, "Standard score
-calculation").
+**Grain:** one LION segment x vehicle profile — the weather-unadjusted comfort
+score from the **latest** standard scoring run, covering that run's trailing
+168-hour window, rolled up from `hourly_comfort_score` using the same formula
+as `segment_comfort_score` (`context/comfort-score.md`, "Standard score
+calculation"). Earlier runs are not retained here (issue #503); the per-run
+history lives in the S3 Gold snapshot, one immutable dataset per `score_as_of`
+(`batch_jobs.comfort_score.standard_storage`, ADR-0012).
 
-**Primary key:** `(segment_id, vehicle_profile_id, score_as_of)`.
-`score_as_of` is the standard job's scheduled run time (for example, the top
-of the hour) — a fixed schedule identifier, not derived from the data. This is
-deliberately kept separate from `data_period_start`/`data_period_end`, which
-describe the actual qualifying-hour data rolled up into the score.
-`segment_comfort_score` conflated these two concepts in a single
-`data_period_end` column, so a run that found no qualifying data had no
-distinct identity of its own (see the "Column calculation mapping" note on
-`segment_comfort_score` above); `score_as_of` gives every scheduled run a key
-regardless of how much data it found.
+**Primary key:** `(segment_id, vehicle_profile_id)` (migration `0012`, issue
+#503). `score_as_of` is a `NOT NULL` non-key column holding the standard job's
+scheduled run time (for example, the top of the hour) — a fixed schedule
+identifier, not derived from the data — which records the run that produced the
+row currently stored. It is deliberately kept separate from
+`data_period_start`/`data_period_end`, which describe the actual
+qualifying-hour data rolled up into the score. `segment_comfort_score`
+conflated these two concepts in a single `data_period_end` column, so a run
+that found no qualifying data had no distinct identity of its own (see the
+"Column calculation mapping" note on `segment_comfort_score` above);
+`score_as_of` still identifies the run regardless of how much data it found.
 
-**Storage policy:** append a new row per `(segment_id, vehicle_profile_id,
-score_as_of)` as new scheduled runs occur; a re-run for a `score_as_of` that
-already exists updates that same row in place (idempotent), it does not
-insert a duplicate. A row is written for **every** `(segment_id,
-vehicle_profile_id)` combination on every scheduled run, even when `N = 0`
-(no qualifying hour) — resolved for issue #193, see
-`context/comfort-score.md` ("Handling a vehicle profile that never
+`score_as_of` was the third key column until issue #503. Since every scheduled
+run writes a row for every `(segment_id, vehicle_profile_id)`, keying on it
+made the table grow by ~997,000 rows an hour while no reader wanted anything
+but the newest generation.
+
+**Storage policy:** UPSERT only, keyed by `(segment_id, vehicle_profile_id)`.
+Every scheduled run overwrites the matching row in place — `score_as_of`
+included — so the row count stays fixed at (segments x vehicle profiles) and
+the table always holds exactly one generation. Re-running the same
+`score_as_of` is therefore idempotent, and so is running a newer one. A row is
+written for **every** `(segment_id, vehicle_profile_id)` combination on every
+scheduled run, even when `N = 0` (no qualifying hour) — resolved for issue
+#193, see `context/comfort-score.md` ("Handling a vehicle profile that never
 traversed a segment").
+
+The table carries `fillfactor = 80` and `autovacuum_vacuum_scale_factor = 0.05`
+and is deliberately left with **no index but the primary key** (migration
+`0012`). Both keep the hourly all-rows UPSERT on the HOT-update path: HOT needs
+free space on the row's own heap page, and it applies only when every updated
+column is unindexed — an index on `score_as_of` would break it and churn the
+primary-key index by ~1,000,000 entries an hour.
 
 | Attribute | Column | Type | Nullable | Key | Description |
 | --- | --- | --- | --- | --- | --- |
 | Road segment | `segment_id` | STRING | N | PK, FK | References `road_segment.segment_id` |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile.vehicle_profile_id`; sentinel `0` is the vehicle-agnostic row (OQ-038) |
-| Score as-of | `score_as_of` | TIMESTAMP | N | PK | The standard job's scheduled run time; identifies which run produced this row, independent of how much qualifying data existed for it |
+| Score as-of | `score_as_of` | TIMESTAMP | N |  | The standard job's scheduled run time; identifies which run produced the row currently stored, independent of how much qualifying data existed for it. Dropped from the key by issue #503 — every run overwrites it |
 | Data-period start | `data_period_start` | TIMESTAMP | N |  | Start of the trailing window actually used, `MIN(hourly_comfort_score.data_period_start)` over the qualifying hours in `H_{s,p}`; when `N = 0` there is no qualifying hour to roll up, so the standard job fills the batch run's own window bound `as_of - window_hours` instead (issue #198) |
 | Data-period end | `data_period_end` | TIMESTAMP | N |  | End of the trailing window actually used, `MAX(hourly_comfort_score.data_period_end)` over the qualifying hours in `H_{s,p}`; filled with `as_of` when `N = 0`, for the same reason as `data_period_start` |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-unadjusted vertical directional score for this window |
@@ -599,9 +615,9 @@ PostgreSQL.
 **Grain:** one LION segment x vehicle profile's current (latest) state — the
 standard score with the latest applicable weather adjustment applied.
 
-**Primary key:** `(segment_id, vehicle_profile_id)`. Unlike
-`standard_segment_comfort_score`, there is exactly one row per segment x
-vehicle profile at all times; no period is part of the key.
+**Primary key:** `(segment_id, vehicle_profile_id)`. As in
+`standard_segment_comfort_score` (since issue #503), there is exactly one row
+per segment x vehicle profile at all times; no period is part of the key.
 
 **Storage policy:** UPSERT only, keyed by `(segment_id, vehicle_profile_id)`.
 A segment with no zone (`road_segment.location_id` is null) gets no row, because
@@ -622,7 +638,7 @@ the 15-minute path selects by zone while the primary key is segment-first.
 | Road segment | `segment_id` | STRING | N | PK, FK | References `road_segment.segment_id` and `standard_segment_comfort_score.segment_id` |
 | Vehicle profile | `vehicle_profile_id` | INTEGER | N | PK, FK | References `vehicle_profile.vehicle_profile_id` and `standard_segment_comfort_score.vehicle_profile_id` |
 | Zone | `location_id` | INTEGER | N |  | The segment's TLC zone, cached here to join `latest_zone_weather` without going through `road_segment`. **Logical reference only, no FK** (#209) — see "Relationships" below for why |
-| Standard score as-of | `standard_score_as_of` | TIMESTAMP | N | FK | The `standard_segment_comfort_score.score_as_of` this row was computed from; together with `segment_id`/`vehicle_profile_id` identifies the exact standard snapshot used |
+| Standard score as-of | `standard_score_as_of` | TIMESTAMP | N |  | The `standard_segment_comfort_score.score_as_of` this row was computed from — an audit record of which generation was used. **Logical reference only, no FK** since issue #503: the standard table keeps just its latest generation, and this column normally points at an older one (the current-score job runs *after* the standard load, and quarantined or unchanged-zone rows lag further still). How stale it may get is OQ-042 |
 | Weather time | `weather_time` | TIMESTAMP | Y |  | The `latest_zone_weather.weather_time` this row's weather adjustment was actually computed from, frozen at calculation time. **Logical reference only, no FK** (#209) — `latest_zone_weather` keeps mutating after this row is written, and this column must not follow it; null only before the zone's first weather snapshot has been fetched, in which case the row reflects the standard score unadjusted |
 | Data-period start | `data_period_start` | TIMESTAMP | Y |  | Copied from the referenced `standard_segment_comfort_score.data_period_start`, for display without a join. The referenced standard row is never itself null here (issue #198 made those columns NOT NULL), so in practice this column is always populated; the column stays nullable because tightening it is part of the current-score work, not #198 |
 | Vertical comfort score | `vertical_score` | DOUBLE | N |  | Weather-adjusted vertical directional score |
@@ -638,9 +654,14 @@ the 15-minute path selects by zone while the primary key is segment-first.
 
 ### Relationships
 
-- `current_segment_comfort_score.standard_score_as_of` (together with
-  `segment_id`, `vehicle_profile_id`) -> `standard_segment_comfort_score.score_as_of`
-  (together with `segment_id`, `vehicle_profile_id`).
+- `current_segment_comfort_score.(segment_id, vehicle_profile_id)` ->
+  `standard_segment_comfort_score.(segment_id, vehicle_profile_id)` — a real
+  composite FK (`current_segment_comfort_score_standard_score_fkey`, migration
+  `0012`). It narrowed from the three-column form that also matched
+  `standard_score_as_of` -> `score_as_of` (#196), because
+  `standard_segment_comfort_score` now retains only its latest generation
+  (#503): the referenced generation is routinely already deleted, so the
+  three-column FK would block that deletion outright.
 - `current_segment_comfort_score.(location_id, weather_time)` ->
   `latest_zone_weather.(location_id, weather_time)` — **logical only, no FK**
   (#209, reversing the earlier #196 design where this was a real composite

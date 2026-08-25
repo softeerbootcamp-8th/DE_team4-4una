@@ -252,7 +252,9 @@ against Postgres, ADR-0004):
 
 - **Range**: `comfort_score`/`vertical_score`/`longitudinal_score`/
   `lateral_score` must each be in `[0, 100]`, checked across every row in
-  the table (not just the latest run).
+  the table. Since issue #503 both tables hold exactly one generation, so
+  "every row" is the latest run's full output rather than an ever-growing
+  history.
 - **Freshness**: the newest row (`score_as_of` for
   `standard_segment_comfort_score`, `calculated_at` for
   `current_segment_comfort_score`, since the latter has no `score_as_of`

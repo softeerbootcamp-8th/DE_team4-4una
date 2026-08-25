@@ -72,16 +72,14 @@ ON CONFLICT (segment_id, vehicle_profile_id) DO UPDATE SET
     {_UPDATE_ASSIGNMENTS}
 """
 
-# (segment, 차량 프로필)마다 가장 최근 실행의 행만 쓴다. PK가
-# (segment_id, vehicle_profile_id, score_as_of)라 이 ORDER BY는 인덱스를 그대로 탄다.
+# standard는 (segment, 차량 프로필)당 최신 세대 1행만 담으므로(#503, migration 0012)
+# 그대로 읽으면 된다. WHERE의 segment_id는 PK 선행 컬럼이라 인덱스를 탄다.
 _LATEST_STANDARD_SQL = """
-SELECT DISTINCT ON (segment_id, vehicle_profile_id)
-       segment_id, vehicle_profile_id, score_as_of, data_period_start,
+SELECT segment_id, vehicle_profile_id, score_as_of, data_period_start,
        vertical_score, longitudinal_score, lateral_score,
        sample_count, confidence_score, score_version
 FROM standard_segment_comfort_score
 {where}
-ORDER BY segment_id, vehicle_profile_id, score_as_of DESC
 """
 
 # 한 행이라도 다르면 그 zone은 재계산 대상이다. 부분 실패로 zone 안에 서명이 섞여도
