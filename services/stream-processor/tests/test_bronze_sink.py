@@ -68,7 +68,9 @@ def stream_config(output_path: str, checkpoint_path: str) -> StreamConfig:
         starting_offsets="earliest",
         min_offsets_per_trigger=0,
         max_trigger_delay="5m",
+        max_offsets_per_trigger=0,
         bronze_output_partitions=1,
+        driver_memory="1g",
     )
 
 

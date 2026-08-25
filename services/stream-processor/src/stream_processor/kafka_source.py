@@ -38,6 +38,10 @@ def kafka_read_options(config: StreamConfig) -> dict[str, str]:
         options["minOffsetsPerTrigger"] = str(config.min_offsets_per_trigger)
         # 위 조건만 두면 한산할 때 배치가 아예 안 돈다. 둘은 항상 같이 걸어야 한다.
         options["maxTriggerDelay"] = config.max_trigger_delay
+    if config.max_offsets_per_trigger > 0:
+        # 하한과 달리 단독으로 건다 -- 정상 배치는 minOffsetsPerTrigger가 정하고,
+        # 이 값은 복구 경로에서 한 배치가 무제한으로 커지는 것만 막는다(#482).
+        options["maxOffsetsPerTrigger"] = str(config.max_offsets_per_trigger)
     return options
 
 

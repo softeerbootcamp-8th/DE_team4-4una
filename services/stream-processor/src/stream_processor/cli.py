@@ -50,7 +50,7 @@ HADOOP_AWS_PACKAGE = f"org.apache.hadoop:hadoop-aws:{bundled_hadoop_version()}"
 SPARK_PACKAGES = f"{KAFKA_PACKAGE},{HADOOP_AWS_PACKAGE}"
 
 
-def build_spark_session() -> SparkSession:
+def build_spark_session(config: StreamConfig) -> SparkSession:
     # spark.sql.session.timeZone은 SQL 표현식/포맷팅에만 적용된다 -- StreamingQueryListener가
     # observedMetrics로 받는 Timestamp는 Py4J가 JVM 기본 타임존으로 변환해 돌려주므로
     # (실제로 이 호스트가 UTC가 아니면 값이 그만큼 어긋난다 -- 로컬에서 9시간 어긋남을
@@ -60,6 +60,10 @@ def build_spark_session() -> SparkSession:
     builder = (
         SparkSession.builder.appName("stream-processor")
         .config("spark.sql.session.timeZone", "UTC")
+        # 기본값 1 GiB로는 복구 배치를 못 버틴다(#482). local[*]에서는 driver가 곧
+        # executor라 micro-batch 전체가 이 heap 안에서 파싱된다. 배포 워크플로가 아니라
+        # 여기서 정하는 이유는 로컬 실행과 컨테이너 실행이 같은 값을 쓰게 하기 위해서다.
+        .config("spark.driver.memory", config.driver_memory)
     )
     # spark-submit/클러스터에서는 master를 주입하지 않고, 단독 Docker 실행에서만 지정한다
     if master := os.getenv("STREAM_SPARK_MASTER"):
@@ -99,7 +103,7 @@ def main() -> None:
     metrics_port = int(os.getenv("STREAM_METRICS_PORT", str(DEFAULT_METRICS_PORT)))
     start_http_server(metrics_port, registry=metrics.registry)
 
-    spark = build_spark_session()
+    spark = build_spark_session(config)
     spark.streams.addListener(ProgressLogger(metrics=metrics))
 
     stream_df = read_kafka_stream(spark, config)

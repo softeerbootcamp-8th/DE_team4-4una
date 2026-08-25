@@ -12,7 +12,9 @@ def test_from_env_uses_provided_values() -> None:
             "KAFKA_STARTING_OFFSETS": "latest",
             "STREAM_MIN_OFFSETS_PER_TRIGGER": "600000",
             "STREAM_MAX_TRIGGER_DELAY": "2m",
+            "STREAM_MAX_OFFSETS_PER_TRIGGER": "900000",
             "STREAM_BRONZE_OUTPUT_PARTITIONS": "4",
+            "STREAM_DRIVER_MEMORY": "8g",
         }
     )
 
@@ -24,7 +26,9 @@ def test_from_env_uses_provided_values() -> None:
     assert config.starting_offsets == "latest"
     assert config.min_offsets_per_trigger == 600000
     assert config.max_trigger_delay == "2m"
+    assert config.max_offsets_per_trigger == 900000
     assert config.bronze_output_partitions == 4
+    assert config.driver_memory == "8g"
 
 
 def test_from_env_applies_defaults_when_missing() -> None:
@@ -38,5 +42,9 @@ def test_from_env_applies_defaults_when_missing() -> None:
     assert config.starting_offsets == "earliest"
     # 기본으로 켜 둔다. 600,000건이 parquet 약 128MB다.
     assert config.min_offsets_per_trigger == 600000
+    # 복구 배치 상한도 기본으로 켜 둔다 -- 하한의 2배(#482).
+    assert config.max_offsets_per_trigger == 1200000
+    # Spark 기본값 1 GiB로는 복구 배치를 못 버틴다(#482).
+    assert config.driver_memory == "4g"
     assert config.max_trigger_delay == "5m"
     assert config.bronze_output_partitions == 1
