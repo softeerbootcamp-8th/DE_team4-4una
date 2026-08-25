@@ -25,6 +25,7 @@ from batch_jobs.comfort_score.standard_storage import (
     resolve_active_standard_snapshot_uri,
 )
 from batch_jobs.comfort_score.standard_writer import WriteSummary
+from batch_jobs.hourly_comfort_storage import hour_output_path
 from de4_core import join_uri
 from pyspark.sql import SparkSession
 
@@ -200,11 +201,15 @@ class TestGoldBeforePostgres:
         )
 
     def _write_hourly_comfort_score(self, spark, data_lake_uri: str) -> None:
+        # 시간 파티션에 쓴다(#469). 타임스탬프는 tz-aware로 넣어야 파티션 경로(UTC 기준)와
+        # 행의 data_period_start가 어긋나지 않는다 — naive면 PySpark가 호스트 로컬
+        # 타임존으로 해석한다.
+        period_start = self.AS_OF - timedelta(hours=1)
         row = (
             self.SEGMENT_ID,
             self.VEHICLE_PROFILE_ID,
-            self.AS_OF.replace(tzinfo=None) - timedelta(hours=1),
-            self.AS_OF.replace(tzinfo=None),
+            period_start,
+            self.AS_OF,
             self.AS_OF.date(),
             80.0,
             40.0,
@@ -213,10 +218,12 @@ class TestGoldBeforePostgres:
             10,
             10,
             "run-1",
-            self.AS_OF.replace(tzinfo=None),
+            self.AS_OF,
         )
         uri = join_uri(data_lake_uri, "silver", "hourly_comfort_score")
-        spark.createDataFrame([row], self.HOURLY_SCHEMA).write.mode("overwrite").parquet(uri)
+        spark.createDataFrame([row], self.HOURLY_SCHEMA).write.parquet(
+            hour_output_path(uri, period_start)
+        )
 
     def test_gold_write_failure_prevents_postgres_write(
         self, spark, tmp_path, monkeypatch
