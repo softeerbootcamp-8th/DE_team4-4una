@@ -20,16 +20,12 @@ from batch_jobs.hourly_segment_feature_storage import (
     HourlySegmentFeatureWriteResult,
     write_hourly_segment_features,
 )
-from batch_jobs.map_matching.candidates import (
-    ROAD_SEGMENT_COLUMNS,
-    find_segment_candidates,
-)
+from batch_jobs.map_matching.candidates import ROAD_SEGMENT_COLUMNS
 from batch_jobs.map_matching.config import (
     DEFAULT_MAP_MATCHING_CONFIG_PATH,
     load_map_matching_config,
 )
-from batch_jobs.map_matching.scoring import score_segment_candidates
-from batch_jobs.map_matching.selection import select_best_segment
+from batch_jobs.map_matching.matching import match_segment_candidates
 from batch_jobs.schemas import RAW_RECORD_COLUMN
 from batch_jobs.sensor_features.aggregation import (
     build_hourly_segment_features,
@@ -134,15 +130,14 @@ def run_hourly_segment_feature_job(
     _require_matching_road_snapshot_date(road_segment_df, road_snapshot_date)
 
     search_radius_m = matching_config.candidate_search_radius_m.value
-    candidates = find_segment_candidates(sensor_df, road_segment_df, search_radius_m)
-    scored = score_segment_candidates(
-        candidates,
+    # candidate expansion/Window 없이 mapInPandas 안에서 검색부터 선택까지 끝내 event당 결과 1행만 반환한다(#479).
+    selected = match_segment_candidates(
         sensor_df,
+        road_segment_df,
         search_radius_m,
         matching_config.distance_weight.value,
         matching_config.heading_weight.value,
     )
-    selected = select_best_segment(scored)
 
     # Map Matching/Steering-Event 단계 elapsed를 따로 재려고 여기서 먼저 materialize한다(#474).
     matched_df = sensor_df.join(selected, on="event_id", how="left").persist(
