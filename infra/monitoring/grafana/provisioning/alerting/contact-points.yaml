@@ -1,0 +1,25 @@
+# Grafana alert를 ops-agent(#447)와 Slack에 병렬로 전달하는 contact point.
+# 같은 contact point 안의 receiver 두 개는 alert마다 둘 다 호출된다 — ops-agent가
+# 죽거나 느려도 "장애 발생" 알림 자체는 Grafana가 직접 Slack으로 보내 살아있게 하기
+# 위함이다(Agent의 진단/조치/복구 결과 알림은 별개로 orchestrator.py가 나중에 보낸다).
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: ops-agent
+    receivers:
+      - uid: ops-agent-webhook
+        type: webhook
+        settings:
+          url: http://ops-agent:8080/webhooks/grafana
+          httpMethod: POST
+      - uid: ops-agent-slack-initial
+        type: slack
+        settings:
+          token: $GRAFANA_SLACK_BOT_TOKEN
+          recipient: $GRAFANA_SLACK_ALERT_CHANNEL
+          title: '🚨 {{ .CommonLabels.service }} 알림 감지'
+          text: |
+            Alert: {{ .CommonLabels.alertname }}
+            Severity: {{ .CommonLabels.severity }}
+            Ops Agent가 재검증 후 진단/조치를 진행합니다.
