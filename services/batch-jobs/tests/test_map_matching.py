@@ -1,8 +1,10 @@
+import dataclasses
 import math
 import os
 import time
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import pytest
 import shapely
@@ -12,17 +14,30 @@ from batch_jobs.map_matching.candidates import (
     SOURCE_CRS,
     TARGET_CRS,
     RoadSegmentCandidate,
+    collect_road_segment_candidates,
     find_segment_candidates,
     process_batch,
 )
 from batch_jobs.map_matching.config import load_map_matching_config
 from batch_jobs.map_matching.matching import (
+    MatchingRoadSegment,
+    RoadSegmentBroadcastPayload,
+    WorkerMatchingContextCache,
+    build_broadcast_payload,
+    build_worker_matching_context,
+    get_worker_matching_context,
     match_segment_candidates,
     select_best_candidates,
 )
-from batch_jobs.map_matching.scoring import score_segment_candidates
+from batch_jobs.map_matching.scoring import (
+    compute_forward_reverse_bearing,
+    compute_road_bearing,
+    resolve_prematched_road_bearing,
+    score_segment_candidates,
+)
 from batch_jobs.map_matching.selection import select_best_segment
 from pyproj import Transformer
+from pyspark import cloudpickle
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BinaryType,
@@ -1018,3 +1033,292 @@ class TestMatchSegmentCandidatesMatchesLegacy:
         # legacy 경로엔 Window 연산자가 남지만, mapInPandas 안에서 선택까지 끝내는 optimized 경로엔 없어야 한다(#479).
         assert "Window" in legacy_plan
         assert "Window" not in optimized_plan
+
+
+# #479: worker-local cache, road bearing precompute, broadcast payload 최소화에 대한 회귀 테스트.
+
+
+def make_matching_payload(
+    lines: list[tuple[str, LineString, str | None]], snapshot_date_: date = SNAPSHOT
+) -> RoadSegmentBroadcastPayload:
+    """(segment_id, geometry, traffic_direction) 목록으로 RoadSegmentBroadcastPayload를 만든다."""
+    records = [
+        RoadSegmentCandidate(
+            segment_id=segment_id,
+            snapshot_date=snapshot_date_,
+            geometry_wkb=shapely.to_wkb(line),
+            traffic_direction=traffic_direction,
+            from_node_id="N1",
+            to_node_id="N2",
+        )
+        for segment_id, line, traffic_direction in lines
+    ]
+    return build_broadcast_payload(records)
+
+
+class TestBuildWorkerMatchingContext:
+    """worker context 생성 결과의 정렬/개수 정합성을 검증한다(A)."""
+
+    def test_geometry_count_matches_record_count(self) -> None:
+        lines = [
+            ("S1", offset_line(0.0, 0.0), "W"),
+            ("S2", offset_line(5.0, 0.0), "A"),
+            ("S3", offset_line(-5.0, 0.0), "T"),
+        ]
+        payload = make_matching_payload(lines)
+
+        context = build_worker_matching_context(payload)
+
+        assert len(context.geometries) == len(lines)
+        assert len(context.forward_bearing_deg) == len(lines)
+        assert len(context.reverse_bearing_deg) == len(lines)
+        assert len(context.traffic_direction) == len(lines)
+        assert len(context.segment_id) == len(lines)
+
+    def test_record_index_alignment_is_preserved(self) -> None:
+        lines = [
+            ("S1", offset_line(0.0, 0.0), "W"),
+            ("S2", offset_line(5.0, 0.0), "A"),
+            ("S3", offset_line(-5.0, 0.0), "T"),
+        ]
+        payload = make_matching_payload(lines)
+
+        context = build_worker_matching_context(payload)
+
+        for index, (segment_id, _, traffic_direction) in enumerate(lines):
+            assert context.segment_id[index] == segment_id
+            assert context.traffic_direction[index] == traffic_direction
+
+    def test_snapshot_date_is_carried_over(self) -> None:
+        payload = make_matching_payload(
+            [("S1", offset_line(0.0, 0.0), "W")], snapshot_date_=date(2026, 8, 20)
+        )
+
+        context = build_worker_matching_context(payload)
+
+        assert context.snapshot_date == date(2026, 8, 20)
+
+
+class TestComputeForwardReverseBearing:
+    """geometry 첫->끝 좌표 기준 forward/reverse bearing이 나침반 기준(N=0, 시계방향)으로 올바른지 검증한다(B)."""
+
+    @pytest.mark.parametrize(
+        "dx, dy, expected_forward",
+        [
+            (0.0, 100.0, 0.0),  # 북
+            (100.0, 0.0, 90.0),  # 동
+            (0.0, -100.0, 180.0),  # 남
+            (-100.0, 0.0, 270.0),  # 서
+        ],
+    )
+    def test_cardinal_directions(self, dx: float, dy: float, expected_forward: float) -> None:
+        line = LineString([(0.0, 0.0), (dx, dy)])
+        geometries = shapely.from_wkb([shapely.to_wkb(line)])
+
+        forward, reverse = compute_forward_reverse_bearing(geometries)
+
+        assert forward[0] == pytest.approx(expected_forward, abs=1e-6)
+        assert reverse[0] == pytest.approx((expected_forward + 180.0) % 360, abs=1e-6)
+
+    def test_matches_compute_road_bearing_forward_case(self) -> None:
+        # compute_road_bearing()이 이 함수를 내부에서 그대로 쓰므로 traffic_direction="W"이면 forward_bearing과 정확히 같아야 한다.
+        line = bearing_line(37.0)
+        geometries = shapely.from_wkb([shapely.to_wkb(line)])
+        forward, _ = compute_forward_reverse_bearing(geometries)
+
+        legacy = compute_road_bearing(
+            pd.Series([shapely.to_wkb(line)]), pd.Series(["W"]), pd.Series([0.0])
+        )
+
+        assert legacy.iloc[0] == pytest.approx(forward[0], abs=1e-9)
+
+
+class TestResolvePrematchedRoadBearing:
+    """resolve_prematched_road_bearing() 결과가 compute_road_bearing()과 완전히 일치하는지 검증한다(C, D)."""
+
+    @pytest.mark.parametrize(
+        "traffic_direction, heading",
+        [
+            ("W", 10.0),
+            ("A", 10.0),
+            ("T", 10.0),  # heading이 forward(0도)에 더 가까움
+            ("T", 170.0),  # heading이 reverse(180도)에 더 가까움
+            ("W", None),  # heading NULL
+            ("T", None),  # heading NULL + 양방향
+        ],
+    )
+    def test_matches_compute_road_bearing(
+        self, traffic_direction: str, heading: float | None
+    ) -> None:
+        line = bearing_line(0.0)
+        geometry_wkb = shapely.to_wkb(line)
+        geometries = shapely.from_wkb([geometry_wkb])
+        forward, reverse = compute_forward_reverse_bearing(geometries)
+
+        optimized = resolve_prematched_road_bearing(
+            forward,
+            reverse,
+            np.array([traffic_direction], dtype=object),
+            np.array([heading if heading is not None else np.nan], dtype="float64"),
+        )
+        legacy = compute_road_bearing(
+            pd.Series([geometry_wkb]), pd.Series([traffic_direction]), pd.Series([heading])
+        )
+
+        if pd.isna(legacy.iloc[0]):
+            assert np.isnan(optimized[0])
+        else:
+            assert optimized[0] == pytest.approx(legacy.iloc[0], abs=1e-9)
+
+    def test_unknown_traffic_direction_is_nan(self) -> None:
+        forward = np.array([0.0])
+        reverse = np.array([180.0])
+
+        result = resolve_prematched_road_bearing(
+            forward, reverse, np.array([None], dtype=object), np.array([0.0])
+        )
+
+        assert np.isnan(result[0])
+
+
+class TestWorkerMatchingContextCache:
+    """worker-local cache가 cache_key 기준으로 재사용/재생성되고 bounded 크기를 유지하는지 Spark 없이 검증한다(E)."""
+
+    def test_same_cache_key_reuses_context(self) -> None:
+        cache = WorkerMatchingContextCache(max_entries=2)
+        payload_a = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+        # cache_key가 같은 별개의 payload 인스턴스(예: 다른 task에서 역직렬화된 broadcast 값)
+        payload_a_again = RoadSegmentBroadcastPayload(
+            records=payload_a.records,
+            snapshot_date=payload_a.snapshot_date,
+            cache_key=payload_a.cache_key,
+        )
+
+        first = cache.get_or_build(payload_a)
+        second = cache.get_or_build(payload_a_again)
+
+        assert first is second
+        assert len(cache) == 1
+
+    def test_different_cache_key_rebuilds_context(self) -> None:
+        cache = WorkerMatchingContextCache(max_entries=2)
+        payload_a = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+        payload_b = make_matching_payload([("S2", offset_line(5.0, 0.0), "A")])
+
+        assert payload_a.cache_key != payload_b.cache_key
+
+        first = cache.get_or_build(payload_a)
+        second = cache.get_or_build(payload_b)
+
+        assert first is not second
+        assert len(cache) == 2
+
+    def test_cache_is_bounded_and_evicts_least_recently_used(self) -> None:
+        cache = WorkerMatchingContextCache(max_entries=2)
+        payload_a = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+        payload_b = make_matching_payload([("S2", offset_line(5.0, 0.0), "A")])
+        payload_c = make_matching_payload([("S3", offset_line(-5.0, 0.0), "T")])
+
+        first_a = cache.get_or_build(payload_a)
+        cache.get_or_build(payload_b)
+        # payload_a가 evict되지 않도록 참조를 최신으로 갱신
+        cache.get_or_build(payload_a)
+        cache.get_or_build(payload_c)  # bounded(2)를 넘겨 가장 오래된 payload_b가 제거되어야 한다
+
+        assert len(cache) == 2
+        # payload_a는 여전히 캐시에 남아 재사용된다(LRU 최신화됨)
+        assert cache.get_or_build(payload_a) is first_a
+
+    def test_different_snapshot_date_produces_different_cache_key(self) -> None:
+        same_geometry_line = offset_line(0.0, 0.0)
+        payload_v1 = make_matching_payload(
+            [("S1", same_geometry_line, "W")], snapshot_date_=date(2026, 8, 11)
+        )
+        payload_v2 = make_matching_payload(
+            [("S1", same_geometry_line, "W")], snapshot_date_=date(2026, 8, 12)
+        )
+
+        assert payload_v1.cache_key != payload_v2.cache_key
+
+    def test_same_snapshot_date_and_segment_id_but_changed_geometry_produces_different_cache_key(
+        self,
+    ) -> None:
+        # snapshot_date/개수/segment_id가 모두 같아도 geometry가 바뀌면 다른 cache_key여야 한다.
+        payload_v1 = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+        payload_v2 = make_matching_payload([("S1", offset_line(50.0, 0.0), "W")])
+
+        assert payload_v1.cache_key != payload_v2.cache_key
+
+    def test_same_snapshot_date_and_segment_id_but_changed_traffic_direction_produces_different_cache_key(
+        self,
+    ) -> None:
+        line = offset_line(0.0, 0.0)
+        payload_v1 = make_matching_payload([("S1", line, "W")])
+        payload_v2 = make_matching_payload([("S1", line, "A")])
+
+        assert payload_v1.cache_key != payload_v2.cache_key
+
+
+class TestWorkerContextCachePicklingAcrossTasks:
+    """실제 PySpark task 간 cloudpickle 직렬화/역직렬화를 재현해 worker-local cache 재사용을 검증한다."""
+
+    def test_get_worker_matching_context_survives_separate_deserializations(self) -> None:
+        # match_events()와 동일하게 top-level 함수(get_worker_matching_context)만 참조하는 closure를 만든다.
+        payload = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+
+        def task_closure():
+            return get_worker_matching_context(payload)
+
+        serialized = cloudpickle.dumps(task_closure)
+
+        first_task_result = cloudpickle.loads(serialized)()
+        second_task_result = cloudpickle.loads(serialized)()
+
+        # 독립적으로 역직렬화된 두 "task"가 같은 worker process처럼 동일한 캐시 객체를 재사용해야 한다.
+        assert first_task_result is second_task_result
+
+    def test_directly_capturing_the_cache_object_breaks_reuse_across_tasks(self) -> None:
+        # top-level 함수 없이 캐시 객체를 직접 캡처하면 cloudpickle이 값으로 스냅샷 떠서 역직렬화마다 별개 인스턴스가 되는 반례.
+        cache = WorkerMatchingContextCache()
+        payload = make_matching_payload([("S1", offset_line(0.0, 0.0), "W")])
+
+        def bad_task_closure():
+            return cache.get_or_build(payload)
+
+        serialized = cloudpickle.dumps(bad_task_closure)
+
+        first_task_result = cloudpickle.loads(serialized)()
+        second_task_result = cloudpickle.loads(serialized)()
+
+        assert first_task_result is not second_task_result
+
+
+class TestBroadcastPayloadFieldReduction:
+    """optimized hot path가 from_node_id/to_node_id 없는 broadcast payload로도 정상 동작하는지 확인한다(F)."""
+
+    def test_matching_road_segment_has_no_node_id_fields(self) -> None:
+        field_names = {f.name for f in dataclasses.fields(MatchingRoadSegment)}
+
+        assert field_names == {"segment_id", "geometry_wkb", "traffic_direction"}
+
+    def test_road_segment_candidate_still_has_node_id_fields(self) -> None:
+        # legacy/일반 표현은 그대로 유지되어 find_segment_candidates 등 다른 코드가 깨지지 않는다.
+        field_names = {f.name for f in dataclasses.fields(RoadSegmentCandidate)}
+
+        assert {"from_node_id", "to_node_id"} <= field_names
+
+    def test_match_segment_candidates_works_without_broadcasting_node_ids(self, spark) -> None:
+        road_rows = [road_segment_row("S1", offset_line(10.0, 0.0))]
+        sensor_rows = [("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        legacy, _ = run_legacy_pipeline(spark, sensor_rows, road_rows)
+        optimized, _ = run_optimized_pipeline(spark, sensor_rows, road_rows)
+
+        assert_same_match_result(legacy["e1"], optimized["e1"])
+
+        road_df = spark.createDataFrame(road_rows, ROAD_SEGMENT_COLUMNS)
+        road_records = collect_road_segment_candidates(road_df)
+        payload = build_broadcast_payload(road_records)
+
+        assert not hasattr(payload.records[0], "from_node_id")
+        assert not hasattr(payload.records[0], "to_node_id")

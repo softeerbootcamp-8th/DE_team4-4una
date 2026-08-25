@@ -99,27 +99,45 @@ def compute_road_bearing(
         return pd.Series(road_bearing, index=geometry_wkb.index)
 
     lines = shapely.from_wkb(geometry_wkb.to_numpy()[has_geometry])
-    starts = shapely.get_point(lines, 0)
-    ends = shapely.get_point(lines, -1)
-    dx = shapely.get_x(ends) - shapely.get_x(starts)
-    dy = shapely.get_y(ends) - shapely.get_y(starts)
-    forward_bearing = np.degrees(np.arctan2(dx, dy)) % 360
-    reverse_bearing = (forward_bearing + 180.0) % 360
+    forward_bearing, reverse_bearing = compute_forward_reverse_bearing(lines)
 
     directions = traffic_direction.to_numpy()[has_geometry]
     headings = heading.to_numpy(dtype="float64", na_value=np.nan)[has_geometry]
 
-    diff_forward = circular_heading_diff(headings, forward_bearing)
-    diff_reverse = circular_heading_diff(headings, reverse_bearing)
-    two_way_bearing = np.where(diff_forward <= diff_reverse, forward_bearing, reverse_bearing)
-    two_way_bearing = np.where(np.isnan(headings), np.nan, two_way_bearing)
-
-    road_bearing[has_geometry] = np.select(
-        [directions == "W", directions == "A", directions == "T"],
-        [forward_bearing, reverse_bearing, two_way_bearing],
-        default=np.nan,
+    road_bearing[has_geometry] = resolve_prematched_road_bearing(
+        forward_bearing, reverse_bearing, directions, headings
     )
     return pd.Series(road_bearing, index=geometry_wkb.index)
+
+
+def compute_forward_reverse_bearing(geometries: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """geometry(첫->마지막 좌표) 기준 forward/reverse bearing(0~360도)을 geometries와 동일 순서로 구한다."""
+    starts = shapely.get_point(geometries, 0)
+    ends = shapely.get_point(geometries, -1)
+    dx = shapely.get_x(ends) - shapely.get_x(starts)
+    dy = shapely.get_y(ends) - shapely.get_y(starts)
+    forward_bearing = np.degrees(np.arctan2(dx, dy)) % 360
+    reverse_bearing = (forward_bearing + 180.0) % 360
+    return forward_bearing, reverse_bearing
+
+
+def resolve_prematched_road_bearing(
+    forward_bearing_deg: np.ndarray,
+    reverse_bearing_deg: np.ndarray,
+    traffic_direction: np.ndarray,
+    heading: np.ndarray,
+) -> np.ndarray:
+    """precomputed forward/reverse bearing으로 traffic_direction(W/A/T) 규칙에 따라 road_bearing_deg를 구한다(compute_road_bearing()과 동일 계산식)."""
+    diff_forward = circular_heading_diff(heading, forward_bearing_deg)
+    diff_reverse = circular_heading_diff(heading, reverse_bearing_deg)
+    two_way_bearing = np.where(diff_forward <= diff_reverse, forward_bearing_deg, reverse_bearing_deg)
+    two_way_bearing = np.where(np.isnan(heading), np.nan, two_way_bearing)
+
+    return np.select(
+        [traffic_direction == "W", traffic_direction == "A", traffic_direction == "T"],
+        [forward_bearing_deg, reverse_bearing_deg, two_way_bearing],
+        default=np.nan,
+    )
 
 
 def circular_heading_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
