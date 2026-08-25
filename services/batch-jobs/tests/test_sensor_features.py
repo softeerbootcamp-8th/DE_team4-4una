@@ -39,6 +39,7 @@ from batch_jobs.sensor_features.events import (
     add_hard_braking_event,
     add_sharp_steering_event,
 )
+from batch_jobs.sensor_features.feature_pipeline import add_steering_and_event_features
 from batch_jobs.sensor_features.steering import add_steering_rate, add_steering_reversal
 from pyproj import Transformer
 from pyspark import StorageLevel
@@ -652,6 +653,385 @@ class TestSteering:
 
         with pytest.raises(ValueError, match="steering_rate_deadband_deg_per_sec"):
             add_steering_reversal(df, steering_rate_deadband_deg_per_sec=-1.0)
+
+
+# #487: add_steering_and_event_features()가 legacy 5단계 순차 호출과 동일한 결과를 내는지 검증한다.
+
+FULL_FEATURE_COLUMNS = ("event_id", "trip_id", "trip_seq", "event_time", "steering_angle", "accel_x")
+
+DEFAULT_PIPELINE_CONFIG = {
+    "steering_max_gap": 0.5,
+    "steering_deadband": 10.0,
+    "hard_accel_threshold": 3.0,
+    "hard_brake_threshold": -3.0,
+    "sharp_steer_threshold": 100.0,
+    "event_max_gap": 0.5,
+    "min_event_duration": 0.3,
+    "sharp_steer_min_duration": 0.3,
+}
+
+OUTPUT_FIELDS = (
+    "steering_rate",
+    "is_steering_reversal",
+    "hard_accel_event_start",
+    "hard_brake_event_start",
+    "sharp_steer_event_start",
+)
+
+
+def full_row(
+    event_id: str,
+    trip_id: str,
+    trip_seq: int,
+    second: float | None,
+    steering_angle: float | None,
+    accel_x: float | None,
+) -> tuple:
+    return (
+        event_id,
+        trip_id,
+        trip_seq,
+        event_time(second) if second is not None else None,
+        steering_angle,
+        accel_x,
+    )
+
+
+def run_legacy_pipeline(df, config: dict):
+    steering_df = add_steering_reversal(
+        add_steering_rate(df, config["steering_max_gap"]), config["steering_deadband"]
+    )
+    event_df = add_hard_acceleration_event(
+        steering_df, config["hard_accel_threshold"], config["min_event_duration"], config["event_max_gap"]
+    )
+    event_df = add_hard_braking_event(
+        event_df, config["hard_brake_threshold"], config["min_event_duration"], config["event_max_gap"]
+    )
+    return add_sharp_steering_event(
+        event_df,
+        config["sharp_steer_threshold"],
+        config["sharp_steer_min_duration"],
+        config["event_max_gap"],
+    )
+
+
+def run_optimized_pipeline(df, config: dict):
+    return add_steering_and_event_features(
+        df,
+        steering_max_gap_seconds=config["steering_max_gap"],
+        steering_rate_deadband_deg_per_sec=config["steering_deadband"],
+        hard_accel_threshold_mps2=config["hard_accel_threshold"],
+        hard_brake_threshold_mps2=config["hard_brake_threshold"],
+        sharp_steer_threshold_deg_per_sec=config["sharp_steer_threshold"],
+        event_max_gap_seconds=config["event_max_gap"],
+        min_event_duration_seconds=config["min_event_duration"],
+        sharp_steer_min_duration_seconds=config["sharp_steer_min_duration"],
+    )
+
+
+def collect_by_event_id(df) -> dict:
+    return {row["event_id"]: row.asDict() for row in df.select("event_id", *OUTPUT_FIELDS).collect()}
+
+
+def assert_same_pipeline_result(legacy_row: dict, optimized_row: dict) -> None:
+    for field in OUTPUT_FIELDS:
+        legacy_value, optimized_value = legacy_row[field], optimized_row[field]
+        if legacy_value is None or optimized_value is None:
+            assert legacy_value is None and optimized_value is None, field
+        elif isinstance(legacy_value, float):
+            assert legacy_value == pytest.approx(optimized_value, abs=1e-9), field
+        else:
+            assert legacy_value == optimized_value, field
+
+
+_TWO_TRIPS_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.1, 15.0, 3.8),
+    full_row("e3", "A", 3, 0.2, -20.0, 4.1),
+    full_row("e4", "A", 4, 0.3, None, -3.6),
+    full_row("e5", "A", 5, 60.3, 5.0, -3.9),
+    full_row("e6", "B", 1, 0.5, 1.0, 0.0),
+    full_row("e7", "B", 2, 0.6, None, None),
+]
+
+_HARD_ACCEL_SUSTAINED_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.1, 1.0, 3.8),
+    full_row("e3", "A", 3, 0.2, 1.0, 4.1),
+    full_row("e4", "A", 4, 0.3, 1.0, 3.7),
+]
+
+_HARD_ACCEL_GAP_SPLIT_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.1, 1.0, 3.8),
+    full_row("e3", "A", 3, 60.0, 1.0, 3.6),
+    full_row("e4", "A", 4, 60.1, 1.0, 3.9),
+]
+
+_HARD_ACCEL_NULL_SPLIT_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e1b", "A", 2, 0.1, 1.0, 3.6),
+    full_row("e2", "A", 3, 0.2, 1.0, None),
+    full_row("e3", "A", 4, 0.3, 1.0, 3.6),
+    full_row("e4", "A", 5, 0.4, 1.0, 3.9),
+]
+
+_HARD_BRAKE_MIRROR_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, -3.5),
+    full_row("e2", "A", 2, 0.1, 1.0, -3.8),
+    full_row("e3", "A", 3, 0.2, 1.0, -4.1),
+    full_row("e4", "A", 4, 0.3, 1.0, -3.7),
+]
+
+_SHARP_STEER_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, 15.0, 0.0),  # steering_rate = 150 >= 100 threshold
+    full_row("e3", "A", 3, 0.2, 30.0, 0.0),  # steering_rate = 150 >= 100
+    full_row("e4", "A", 4, 0.3, 30.5, 0.0),  # steering_rate = 5 < 100
+]
+
+_REVERSAL_PLUS_TO_MINUS_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, 15.0, 0.0),
+    full_row("e3", "A", 3, 0.2, -15.0, 0.0),
+]
+
+_REVERSAL_MINUS_TO_PLUS_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, -15.0, 0.0),
+    full_row("e3", "A", 3, 0.2, 15.0, 0.0),
+]
+
+_REVERSAL_SAME_DIRECTION_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, 15.0, 0.0),
+    full_row("e3", "A", 3, 0.2, 30.0, 0.0),
+]
+
+_REVERSAL_DEADBAND_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, 15.0, 0.0),  # rate=150, direction=+
+    full_row("e3", "A", 3, 0.2, 15.5, 0.0),  # rate=5 <= deadband(10) -> no direction
+    full_row("e4", "A", 4, 0.3, 0.0, 0.0),  # rate=-155, direction=- -> reversal vs e2's +
+]
+
+_REVERSAL_GAP_BREAKS_CONTINUITY_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 0.0),
+    full_row("e2", "A", 2, 0.1, 15.0, 0.0),
+    full_row("e3", "A", 3, 60.1, -15.0, 0.0),  # gap -> steering_rate NULL -> continuity 끊김
+]
+
+_EPISODE_TRUE_FALSE_TRUE_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.1, 1.0, 3.8),
+    full_row("e3", "A", 3, 0.2, 1.0, 1.0),  # 조건 해제
+    full_row("e4", "A", 4, 0.3, 1.0, 3.6),
+    full_row("e5", "A", 5, 0.4, 1.0, 3.9),
+]
+
+# run_duration이 min_event_duration_seconds(0.3)와 정확히 같은 경계값 케이스(>=는 포함되어야 함).
+_MIN_DURATION_BOUNDARY_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.3, 1.0, 3.8),
+]
+
+# 두 이벤트 간격이 max_gap_seconds(0.5)와 정확히 같은 경계값 케이스(gap이 아니어야 함, 조건은 '>').
+_MAX_GAP_BOUNDARY_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.5, 1.0, 3.8),
+    full_row("e3", "A", 3, 1.0, 1.0, 3.6),
+]
+
+_EVENT_TIME_NULL_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, None, 1.0, 3.8),
+    full_row("e3", "A", 3, 0.2, 1.0, 3.6),
+]
+
+_ALL_SIGNALS_COMBINED_ROWS = [
+    full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+    full_row("e2", "A", 2, 0.1, 15.0, 3.8),
+    full_row("e3", "A", 3, 0.2, -20.0, 4.1),
+    full_row("e4", "A", 4, 0.3, None, -3.6),
+    full_row("e5", "A", 5, 60.3, 5.0, -3.9),
+    full_row("e6", "B", 1, 0.5, 1.0, 0.0),
+    full_row("e7", "B", 2, 0.6, None, None),
+    full_row("e8", "B", 3, 0.7, 200.0, 0.0),
+    full_row("e9", "B", 4, 1.0, 200.0, 0.0),
+]
+
+
+class TestSteeringAndEventFeaturePipeline:
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            pytest.param(_TWO_TRIPS_ROWS, id="steering_angle_null_and_two_trips_isolated"),
+            pytest.param(_HARD_ACCEL_SUSTAINED_ROWS, id="hard_accel_sustained_above_min_duration"),
+            pytest.param(_HARD_ACCEL_GAP_SPLIT_ROWS, id="hard_accel_sampling_gap_splits_run"),
+            pytest.param(_HARD_ACCEL_NULL_SPLIT_ROWS, id="hard_accel_null_accel_x_splits_run"),
+            pytest.param(_HARD_BRAKE_MIRROR_ROWS, id="hard_brake_mirrors_hard_accel"),
+            pytest.param(_SHARP_STEER_ROWS, id="sharp_steer_threshold_crossing"),
+            pytest.param(_REVERSAL_PLUS_TO_MINUS_ROWS, id="reversal_plus_to_minus"),
+            pytest.param(_REVERSAL_MINUS_TO_PLUS_ROWS, id="reversal_minus_to_plus"),
+            pytest.param(_REVERSAL_SAME_DIRECTION_ROWS, id="reversal_same_direction_is_not_reversal"),
+            pytest.param(_REVERSAL_DEADBAND_ROWS, id="reversal_deadband_keeps_continuity"),
+            pytest.param(
+                _REVERSAL_GAP_BREAKS_CONTINUITY_ROWS, id="reversal_gap_breaks_continuity"
+            ),
+            pytest.param(_EPISODE_TRUE_FALSE_TRUE_ROWS, id="episode_true_false_true_pattern"),
+            pytest.param(_MIN_DURATION_BOUNDARY_ROWS, id="run_duration_exactly_at_min_duration"),
+            pytest.param(_MAX_GAP_BOUNDARY_ROWS, id="gap_exactly_at_max_gap_is_not_a_gap"),
+            pytest.param(_EVENT_TIME_NULL_ROWS, id="event_time_null"),
+            pytest.param(_ALL_SIGNALS_COMBINED_ROWS, id="all_signals_combined"),
+        ],
+    )
+    def test_optimized_matches_legacy(self, spark, rows: list[tuple]) -> None:
+        df = spark.createDataFrame(rows, FULL_FEATURE_COLUMNS)
+
+        legacy = collect_by_event_id(run_legacy_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        optimized = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+
+        assert legacy.keys() == optimized.keys()
+        for event_id in legacy:
+            assert_same_pipeline_result(legacy[event_id], optimized[event_id])
+
+    def test_single_row_trip_has_no_prior_context(self, spark) -> None:
+        rows = [full_row("e1", "A", 1, 0.0, 0.0, 3.5)]
+        df = spark.createDataFrame(rows, FULL_FEATURE_COLUMNS)
+
+        legacy = collect_by_event_id(run_legacy_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        optimized = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+
+        assert_same_pipeline_result(legacy["e1"], optimized["e1"])
+        assert optimized["e1"]["steering_rate"] is None
+        assert optimized["e1"]["is_steering_reversal"] is None
+
+    def test_non_positive_time_delta_matches_legacy(self, spark) -> None:
+        rows = [
+            full_row("e1", "A", 1, 0.0, 0.0, 3.5),
+            full_row("e2", "A", 2, 0.0, 5.0, 3.6),
+            full_row("e3", "A", 3, -0.1, 8.0, 3.7),
+        ]
+        df = spark.createDataFrame(rows, FULL_FEATURE_COLUMNS)
+
+        legacy = collect_by_event_id(run_legacy_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        optimized = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+
+        for event_id in legacy:
+            assert_same_pipeline_result(legacy[event_id], optimized[event_id])
+        assert optimized["e2"]["steering_rate"] is None
+        assert optimized["e3"]["steering_rate"] is None
+
+    def test_result_is_independent_of_input_row_order(self, spark) -> None:
+        df = spark.createDataFrame(_ALL_SIGNALS_COMBINED_ROWS, FULL_FEATURE_COLUMNS)
+        shuffled = spark.createDataFrame(
+            list(reversed(_ALL_SIGNALS_COMBINED_ROWS)), FULL_FEATURE_COLUMNS
+        )
+
+        forward = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        backward = collect_by_event_id(run_optimized_pipeline(shuffled, DEFAULT_PIPELINE_CONFIG))
+
+        assert forward.keys() == backward.keys()
+        for event_id in forward:
+            assert_same_pipeline_result(forward[event_id], backward[event_id])
+
+    def test_existing_run_id_lineage_column_is_not_overwritten(self, spark) -> None:
+        rows = [
+            Row(
+                event_id="e1",
+                trip_id="A",
+                trip_seq=1,
+                event_time=event_time(0.0),
+                steering_angle=0.0,
+                accel_x=3.5,
+                _run_id="nyc-actual-20260814-v1",
+            ),
+        ]
+        df = spark.createDataFrame(rows)
+
+        result = run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG)
+
+        assert result.select("_run_id").collect()[0]["_run_id"] == "nyc-actual-20260814-v1"
+
+    def test_existing_columns_are_preserved(self, spark) -> None:
+        rows = [full_row("e1", "A", 1, 0.0, 0.0, 3.5)]
+        df = spark.createDataFrame(rows, FULL_FEATURE_COLUMNS)
+
+        result = run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG)
+
+        assert set(FULL_FEATURE_COLUMNS).issubset(set(result.columns))
+        for column in OUTPUT_FIELDS:
+            assert column in result.columns
+
+    def test_specific_scenarios_produce_expected_flags(self, spark) -> None:
+        # legacy/optimized가 둘 다 False/None으로 vacuous하게 일치하는 게 아닌지 절대값으로도 확인한다.
+        df = spark.createDataFrame(_HARD_ACCEL_SUSTAINED_ROWS, FULL_FEATURE_COLUMNS)
+        result = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        assert result["e1"]["hard_accel_event_start"] is True
+
+        df = spark.createDataFrame(_HARD_BRAKE_MIRROR_ROWS, FULL_FEATURE_COLUMNS)
+        result = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        assert result["e1"]["hard_brake_event_start"] is True
+
+        df = spark.createDataFrame(_SHARP_STEER_ROWS, FULL_FEATURE_COLUMNS)
+        zero_duration_config = {**DEFAULT_PIPELINE_CONFIG, "sharp_steer_min_duration": 0.0}
+        result = collect_by_event_id(run_optimized_pipeline(df, zero_duration_config))
+        assert result["e2"]["sharp_steer_event_start"] is True
+
+        df = spark.createDataFrame(_REVERSAL_PLUS_TO_MINUS_ROWS, FULL_FEATURE_COLUMNS)
+        result = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        assert result["e3"]["is_steering_reversal"] is True
+
+        df = spark.createDataFrame(_MIN_DURATION_BOUNDARY_ROWS, FULL_FEATURE_COLUMNS)
+        result = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        assert result["e1"]["hard_accel_event_start"] is True
+
+        df = spark.createDataFrame(_MAX_GAP_BOUNDARY_ROWS, FULL_FEATURE_COLUMNS)
+        result = collect_by_event_id(run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG))
+        assert result["e2"]["steering_rate"] is not None
+
+    @pytest.mark.parametrize(
+        "invalid_field, invalid_value, match",
+        [
+            ("steering_max_gap", 0.0, "steering_max_gap_seconds"),
+            ("steering_deadband", -1.0, "steering_rate_deadband_deg_per_sec"),
+            ("hard_accel_threshold", 0.0, "hard_accel_threshold_mps2"),
+            ("hard_brake_threshold", 0.0, "hard_brake_threshold_mps2"),
+            ("sharp_steer_threshold", 0.0, "sharp_steer_threshold_deg_per_sec"),
+            ("event_max_gap", 0.0, "event_max_gap_seconds"),
+            ("min_event_duration", -1.0, "min_event_duration_seconds"),
+            ("sharp_steer_min_duration", -1.0, "sharp_steer_min_duration_seconds"),
+        ],
+    )
+    def test_invalid_thresholds_are_rejected(
+        self, spark, invalid_field: str, invalid_value: float, match: str
+    ) -> None:
+        rows = [full_row("e1", "A", 1, 0.0, 0.0, 3.5)]
+        df = spark.createDataFrame(rows, FULL_FEATURE_COLUMNS)
+        config = {**DEFAULT_PIPELINE_CONFIG, invalid_field: invalid_value}
+
+        with pytest.raises(ValueError, match=match):
+            run_optimized_pipeline(df, config)
+
+    def test_window_operator_count_is_reduced_versus_legacy(self, spark) -> None:
+        import contextlib
+        import io
+
+        df = spark.createDataFrame(_ALL_SIGNALS_COMBINED_ROWS, FULL_FEATURE_COLUMNS)
+        legacy_result = run_legacy_pipeline(df, DEFAULT_PIPELINE_CONFIG)
+        optimized_result = run_optimized_pipeline(df, DEFAULT_PIPELINE_CONFIG)
+
+        def window_operator_count(result_df) -> int:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                result_df.explain(mode="extended")
+            return buffer.getvalue().count("Window [")
+
+        legacy_windows = window_operator_count(legacy_result)
+        optimized_windows = window_operator_count(optimized_result)
+
+        # 정확한 개수는 Spark 버전에 따라 달라질 수 있어 부등호로만 확인한다.
+        assert optimized_windows < legacy_windows
 
 
 class TestHourlyAggregationKeys:
