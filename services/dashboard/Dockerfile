@@ -19,7 +19,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
 WORKDIR /app
 COPY . .
 
-RUN uv sync --locked --package dashboard --no-dev --no-editable
+RUN uv sync --locked --package dashboard --no-dev --no-editable \
+    && rm -rf /root/.cache/uv
 
 # 패키지가 site-packages에 설치되므로 소스 트리 기준 경로로는 찾을 수 없다.
 # api.py가 이 환경변수로 정적 파일 위치를 찾는다.
