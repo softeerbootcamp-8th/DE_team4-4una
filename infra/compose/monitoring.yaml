@@ -25,6 +25,9 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      # provisioning/alerting/contact-points.yaml의 slack receiver가 참조한다(#447) — ops-agent와 같은 Slack Bot Token/채널을 재사용한다.
+      GRAFANA_SLACK_BOT_TOKEN: ${OPS_AGENT_SLACK_BOT_TOKEN:?OPS_AGENT_SLACK_BOT_TOKEN is required}
+      GRAFANA_SLACK_ALERT_CHANNEL: ${OPS_AGENT_SLACK_ALERT_CHANNEL:?OPS_AGENT_SLACK_ALERT_CHANNEL is required}
     ports:
       - "3000:3000"
     volumes:
@@ -36,9 +39,38 @@ services:
     depends_on:
       - prometheus
 
+  # Grafana alert 재검증/진단/remediation/Slack 알림(#447). ECR을 거치지 않고 Monitoring EC2에서 저장소 전체를 build context로 직접 빌드한다.
+  ops-agent:
+    build:
+      context: ../..
+      dockerfile: services/ops-agent/Dockerfile
+    container_name: ops-agent
+    restart: unless-stopped
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      SLACK_BOT_TOKEN: ${OPS_AGENT_SLACK_BOT_TOKEN:?OPS_AGENT_SLACK_BOT_TOKEN is required}
+      SLACK_ALERT_CHANNEL: ${OPS_AGENT_SLACK_ALERT_CHANNEL:?OPS_AGENT_SLACK_ALERT_CHANNEL is required}
+      # architecture.md와 배포 워크플로의 EC2 설명이 어긋나 기본값을 두지 않는다(#447) — .env에 실제 값을 채워야 한다.
+      STREAM_PROCESSOR_SSH_HOST: ${STREAM_PROCESSOR_SSH_HOST:?STREAM_PROCESSOR_SSH_HOST is required}
+      STREAM_PROCESSOR_SSH_USER: ${STREAM_PROCESSOR_SSH_USER:-ec2-user}
+      STREAM_PROCESSOR_SSH_KEY_PATH: /run/ops-agent/stream_processor.pem
+      DAG_OWNERS_CONFIG_PATH: /etc/de4/dag_owners.yaml
+      OPS_AGENT_INCIDENT_STORE_PATH: /data/ops_agent_incidents.sqlite3
+    volumes:
+      - ../../config/dag_owners.yaml:/etc/de4/dag_owners.yaml:ro
+      # 커밋되지 않는 파일이다(.gitignore의 *.pem) — Monitoring EC2에 직접 준비해야 한다.
+      - ../monitoring/ops-agent/stream_processor.pem:/run/ops-agent/stream_processor.pem:ro
+      - ops-agent-data:/data
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    # Grafana가 de4-monitoring 네트워크 안에서 http://ops-agent:8080으로 붙으므로 ports를 publish하지 않는다.
+
 volumes:
   prometheus-data:
   grafana-data:
+  ops-agent-data:
 
 networks:
   monitoring:
