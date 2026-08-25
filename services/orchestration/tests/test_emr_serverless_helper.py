@@ -104,14 +104,14 @@ def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
 
 
 def test_driver_and_executor_sizes_fit_within_application_max_capacity():
-    # Application의 maximumCapacity가 8 vCPU / 32 GB로 고정돼 있다(#372, #386).
-    # Spark 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU
-    # 예산을 전부 써버려 executor가 하나도 못 뜬다 — 실제 Job Run에서
-    # ApplicationMaxCapacityExceededException으로 재현됨. driver를 작게 고정해
-    # executor 1개(기본 크기 유지)가 항상 같이 들어가도록 상한을 코드에 못박는다.
+    # Application의 maximumCapacity는 12 vCPU / 48 GB / 200 GB disk이다(#372,
+    # #386, #471에서 현재 값으로 상향). Spark 기본값(driver 4 vCPU/8G, executor
+    # 2 vCPU/8G)은 driver 혼자 vCPU 예산을 전부 써버려 executor가 하나도 못 뜬다 —
+    # 실제 Job Run에서 ApplicationMaxCapacityExceededException으로 재현됨.
+    # driver를 작게 고정해 executor가 안정적으로 뜨도록 상한을 코드에 못박는다.
     # memoryOverhead=6g는 Map Matching mapInPandas의 Python worker(STRtree)
-    # 메모리용이다(#386) — driver(1c/2g) + executor(2c/8g+6g=14g) = 3 vCPU/16GB로
-    # 8 vCPU/32GB 한도 안에 여유 있게 들어간다.
+    # 메모리용이다(#386) — driver(1c/2g) + executor 2개(각 2c/8g+6g=14g) =
+    # 5 vCPU/30GB로 현재 한도 안에 여유 있게 들어간다.
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
@@ -120,24 +120,25 @@ def test_driver_and_executor_sizes_fit_within_application_max_capacity():
     assert "spark.executor.cores=2" in params
     assert "spark.executor.memory=8g" in params
     assert "spark.executor.memoryOverhead=6g" in params
-    assert "spark.executor.instances=1" in params
+    assert "spark.executor.instances=2" in params
 
 
 def test_dynamic_allocation_is_capped_to_match_executor_instances():
     # spark.executor.instances만으로는 부족하다 — EMR Serverless는 dynamic
     # allocation이 기본 켜져 있어서 실제 목표 executor 수를
     # max(dynamicAllocation.initialExecutors, minExecutors, executor.instances)로
-    # 계산한다. EMR 기본값이 1보다 커서 결국 여분 executor를 계속 요청하다
-    # ApplicationMaxCapacityExceededException을 반복적으로 만나고, 그 이력만으로
-    # EMR Serverless가 실제로는 성공한 Job Run을 FAILED로 판정한 것이 실제 Job
-    # Run 재현으로 확인됐다(#372 재발 조사). min/max/initial을 전부 1로 못박아
-    # 애초에 추가 요청이 발생하지 않게 한다.
+    # 계산한다. EMR 기본값이 executor.instances보다 커서 결국 여분 executor를
+    # 계속 요청하다 ApplicationMaxCapacityExceededException을 반복적으로 만나고,
+    # 그 이력만으로 EMR Serverless가 실제로는 성공한 Job Run을 FAILED로 판정한
+    # 것이 실제 Job Run 재현으로 확인됐다(#372 재발 조사). min/max/initial을
+    # 전부 executor.instances(#471에서 2로 상향)와 맞춰 애초에 추가 요청이
+    # 발생하지 않게 한다.
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
-    assert "spark.dynamicAllocation.minExecutors=1" in params
-    assert "spark.dynamicAllocation.maxExecutors=1" in params
-    assert "spark.dynamicAllocation.initialExecutors=1" in params
+    assert "spark.dynamicAllocation.minExecutors=2" in params
+    assert "spark.dynamicAllocation.maxExecutors=2" in params
+    assert "spark.dynamicAllocation.initialExecutors=2" in params
 
 
 def test_all_job_runs_persist_logs_to_s3_monitoring_configuration():

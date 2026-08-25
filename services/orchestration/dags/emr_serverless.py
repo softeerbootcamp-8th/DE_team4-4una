@@ -50,29 +50,34 @@ _EMR_SERVERLESS_LOG_S3_URI_TEMPLATE = (
 # batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
 _PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
 
-# Application의 maximumCapacity가 4 vCPU / 16 GB로 고정돼 있다(#372). Spark
-# 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을 전부
-# 써버려 executor가 하나도 못 뜨고 20분 뒤 ApplicationMaxCapacityExceededException으로
-# 죽는다. driver를 작게 고정해 executor 1개가 항상 같이 들어가도록 상한을 못박는다.
+# Application의 maximumCapacity는 12 vCPU / 48 GB / 200 GB disk이다(#372에서
+# 처음 4 vCPU/16 GB로 시작, #471에서 현재 값으로 상향). Spark 기본값(driver
+# 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을 많이 써버려 executor가
+# 못 뜨고 ApplicationMaxCapacityExceededException으로 죽는 문제가 있었다(#372) —
+# driver를 작게 고정해 executor가 안정적으로 뜨도록 한다.
 _SPARK_DRIVER_CORES = "1"
 _SPARK_DRIVER_MEMORY = "2g"
 _SPARK_EXECUTOR_CORES = "2"
 _SPARK_EXECUTOR_MEMORY = "8g"
-_SPARK_EXECUTOR_INSTANCES = "1"
+# sensor processing을 포함한 batch job 처리 시간 단축을 위해 1 -> 2로 늘렸다(#471).
+# dynamic allocation min/max/initial도 반드시 이 값과 동일하게 맞춘다(아래 참고,
+# 어긋나면 #372처럼 ApplicationMaxCapacityExceededException이 재발한다).
+_SPARK_EXECUTOR_INSTANCES = "2"
 
 # Map Matching(find_segment_candidates의 mapInPandas)은 파티션마다 Python
 # worker 프로세스에서 road_segment broadcast(약 17만 건)로 STRtree를 새로
 # 만든다. cores=2라 이 무거운 작업이 최대 2개 동시에 뜨는데, JVM heap 밖
 # overhead가 이전엔 기본값(~10%, 약 800MB)뿐이라 그 메모리를 못 버티고
-# executor가 exit code 137(SIGKILL)로 반복해서 죽었다(#386, EMR Serverless
-# Application maximumCapacity를 8 vCPU/32 GB로 상향한 뒤 적용). executor
-# 총 사용량은 driver(1c/2g) + executor(2c/8g+6g=14g) = 3 vCPU/16 GB로
-# 여유 있게 들어간다.
+# executor가 exit code 137(SIGKILL)로 반복해서 죽었다(#386, 그 시점 EMR Serverless
+# Application maximumCapacity 8 vCPU/32 GB 기준으로 적용). executor 총 사용량은
+# driver(1c/2g) + executor 2개(각 2c/8g+6g=14g) = 5 vCPU/30 GB로 현재
+# maximumCapacity(12 vCPU/48 GB, #471) 안에 여유 있게 들어간다.
 _SPARK_EXECUTOR_MEMORY_OVERHEAD = "6g"
 _SPARK_DRIVER_MEMORY_OVERHEAD = "6g"
 
 # 기본 disk로 standard_score_pipeline 실행 중 executor의 /tmp가 꽉 차 Job이
-# 실패했다(#443). driver+executor 합이 Application 최대 disk(100GB) 안에 들어오게 잡는다.
+# 실패했다(#443). driver+executor 2개 합(20G + 2*60G = 140G)이 Application 최대
+# disk(200GB, #471에서 상향) 안에 들어오게 잡는다.
 _SPARK_DRIVER_DISK = "20G"
 _SPARK_EXECUTOR_DISK = "60G"
 
@@ -83,9 +88,9 @@ _SPARK_EXECUTOR_DISK = "60G"
 # 반복적으로 만나고, 실제 계산은 성공해도 이 이력만으로 Job Run이 FAILED
 # 처리되는 것이 확인됐다(#372 재발 조사). min/max/initial을 전부 executor.instances와
 # 맞춰 애초에 추가 요청이 발생하지 않게 한다.
-_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS = "1"
-_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS = "1"
-_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS = "1"
+_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS = "2"
+_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS = "2"
+_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS = "2"
 
 
 def submit_batch_jobs_command(
