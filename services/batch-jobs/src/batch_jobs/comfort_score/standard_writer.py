@@ -13,11 +13,15 @@ Gold와 다른 점은 두 가지다.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
+from de4_core import perf_phase
 from pyspark.sql import DataFrame
 
 from batch_jobs.db_lock_keys import STANDARD_JOB_STAGING_LOCK_KEY
+
+logger = logging.getLogger(__name__)
 
 STAGING_TABLE = "standard_segment_comfort_score_staging"
 TARGET_TABLE = "standard_segment_comfort_score"
@@ -109,8 +113,11 @@ def write_standard_comfort_scores(
 
 
 def _acquire_lock(cursor) -> None:
-    cursor.execute("SELECT pg_try_advisory_lock(%s)", (STANDARD_JOB_STAGING_LOCK_KEY,))
-    acquired = cursor.fetchone()
+    with perf_phase(logger, "standard_score.staging_lock"):
+        cursor.execute(
+            "SELECT pg_try_advisory_lock(%s)", (STANDARD_JOB_STAGING_LOCK_KEY,)
+        )
+        acquired = cursor.fetchone()
     if acquired is None or not acquired[0]:
         raise RuntimeError(
             "another standard_segment_comfort_score job run holds the staging lock"
@@ -159,34 +166,41 @@ def _write_staging(
 
 
 def _validate_no_duplicates_or_nan(cursor) -> None:
-    cursor.execute(
-        f"SELECT count(*), count(DISTINCT (segment_id, vehicle_profile_id, score_as_of)) "
-        f"FROM {STAGING_TABLE}"
-    )
-    total, distinct = cursor.fetchone()
-    if total != distinct:
-        raise ValueError(
-            f"{STAGING_TABLE} has {total - distinct} duplicate "
-            "(segment_id, vehicle_profile_id, score_as_of) rows — formula.py should "
-            "never produce these; refusing to merge"
+    # 검증 실패로 빠져나가도 그때까지 쓴 시간은 남는다(perf_phase의 ok=False).
+    with perf_phase(logger, "standard_score.staging_validate") as fields:
+        cursor.execute(
+            f"SELECT count(*), count(DISTINCT (segment_id, vehicle_profile_id, score_as_of)) "
+            f"FROM {STAGING_TABLE}"
         )
-    cursor.execute(
-        f"SELECT count(*) FROM {STAGING_TABLE} "
-        "WHERE comfort_score = 'NaN' OR confidence_score = 'NaN' "
-        "OR comfort_score = 'Infinity' OR confidence_score = 'Infinity'"
-    )
-    (bad_count,) = cursor.fetchone()
-    if bad_count:
-        raise ValueError(
-            f"{STAGING_TABLE} has {bad_count} row(s) with NaN/Infinity scores"
+        total, distinct = cursor.fetchone()
+        fields["rows"] = total
+        if total != distinct:
+            raise ValueError(
+                f"{STAGING_TABLE} has {total - distinct} duplicate "
+                "(segment_id, vehicle_profile_id, score_as_of) rows — formula.py should "
+                "never produce these; refusing to merge"
+            )
+        cursor.execute(
+            f"SELECT count(*) FROM {STAGING_TABLE} "
+            "WHERE comfort_score = 'NaN' OR confidence_score = 'NaN' "
+            "OR comfort_score = 'Infinity' OR confidence_score = 'Infinity'"
         )
+        (bad_count,) = cursor.fetchone()
+        if bad_count:
+            raise ValueError(
+                f"{STAGING_TABLE} has {bad_count} row(s) with NaN/Infinity scores"
+            )
 
 
 def _merge(cursor) -> tuple[int, int]:
-    cursor.execute(_MERGE_SQL)
-    inserted_count, updated_count = cursor.fetchone()
+    # Spark JDBC staging write와 달리 이 MERGE는 event log에 안 잡힌다(#461).
+    with perf_phase(logger, "standard_score.postgres_merge") as fields:
+        cursor.execute(_MERGE_SQL)
+        inserted_count, updated_count = cursor.fetchone()
+        fields["rows"] = inserted_count + updated_count
     return inserted_count, updated_count
 
 
 def _truncate_staging(cursor) -> None:
-    cursor.execute(f"TRUNCATE {STAGING_TABLE}")
+    with perf_phase(logger, "standard_score.staging_truncate"):
+        cursor.execute(f"TRUNCATE {STAGING_TABLE}")
