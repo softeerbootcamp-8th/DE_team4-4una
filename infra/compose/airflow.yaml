@@ -108,10 +108,15 @@ services:
     # 돌기 전에 pool이 반드시 존재한다. `pools set`은 이미 있으면 갱신하는 멱등
     # 명령이라 매 배포마다 다시 돌아도 안전하다.
     entrypoint: ["/bin/bash", "-c"]
-    command: >
-      airflow db migrate &&
-      airflow pools set emr_serverless 1
-      'EMR Serverless job run submission is serialised to one at a time (#508)'
+    # command를 문자열로 두면 Compose가 셸 단어 분리를 하면서 `&&`에서 파싱을 멈춰
+    # 뒤쪽 `pools set`이 통째로 사라진다. 그러면 `bash -c airflow db migrate`가 되어
+    # bash가 첫 인자만 스크립트로 삼아 인자 없는 `airflow`를 실행하고 exit 2로 죽는다.
+    # 리스트의 단일 원소로 넘겨야 문자열 전체가 `bash -c`의 스크립트로 들어간다.
+    command:
+      - >
+        airflow db migrate &&
+        airflow pools set emr_serverless 1
+        'EMR Serverless job run submission is serialised to one at a time (#508)'
 
   airflow-dag-processor:
     <<: *airflow-common
