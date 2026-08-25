@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 # Service Map
@@ -19,6 +19,14 @@ and does not by itself settle those boundaries.
 | `services/serving-api` | Return the latest available segment x vehicle-type score and provenance, and rank caller-supplied candidate routes by the comfort of their segments | Serving store | HTTP API responses |
 | `services/orchestration` | Coordinate monthly reference jobs, replay runs, score jobs, and publication | Schedules and run configuration | Workflow state and run metadata |
 | `services/dashboard` | Visualize road coverage and latest comfort scores on an interactive NYC map | S3 `road_segment` snapshot and Serving API | Human-facing map view |
+| `tools/pipeline-perf` | Collect pipeline performance facts from Airflow, EMR Serverless, Spark event logs, and PERF logs, and render baseline/comparison reports | Airflow REST API v2, EMR Serverless API, S3 observability logs | Raw collection JSON and markdown reports under `docs/perf/` |
+
+## Offline tools
+
+`tools/*` members are workspace members for development convenience only. They
+are never deployed and no runtime service imports them. `tools/pipeline-perf`
+is the first such member; it reads observability data after the fact and writes
+reports for humans.
 
 ## Current `batch-jobs` packaging
 

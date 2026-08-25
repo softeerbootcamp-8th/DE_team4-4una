@@ -1,0 +1,4 @@
+26/08/25 02:31:04 INFO SparkContext: Running Spark version 4.0.2-amzn-0
+26/08/25 02:41:11 INFO FileFormatWriter: Write Job committed. Elapsed time: 174 ms.
+2026-08-25 02:43:52,077 batch_jobs.comfort_score.standard_writer PERF {"phase": "standard_score.postgres_merge", "elapsed_s": 160.193, "ok": true, "rows": 184213}
+26/08/25 02:43:53 INFO ShutdownHookManager: Shutdown hook called

@@ -1,0 +1,4 @@
+2026-08-25 02:41:11,884 batch_jobs.comfort_score.standard_writer PERF {"phase": "standard_score.gold_snapshot_write", "elapsed_s": 41.203, "ok": true, "as_of": "2026-08-25T03:00:00+00:00"}
+2026-08-25 02:43:52,077 batch_jobs.comfort_score.standard_writer PERF {"phase": "standard_score.postgres_merge", "elapsed_s": 160.193, "ok": true, "rows": 184213}
+2026-08-25 02:43:52,090 batch_jobs.comfort_score.standard_writer PERF {"phase": "standard_score.broken", "elapsed_s": }
+{"inserted_count": 184213, "merged_count": 184213}

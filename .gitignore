@@ -62,6 +62,9 @@ data/
 !context/data/
 !context/data/**
 
+# pipeline-perf(#462)가 남기는 원시 수집 결과. 커밋하는 것은 render가 만든 리포트다.
+out/perf/
+
 # --- Terraform / Infra (추후 사용 시) ---
 *.tfstate
 *.tfstate.*
