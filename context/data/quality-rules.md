@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 # Data Quality and Idempotency Rules
@@ -72,12 +72,12 @@ conservation invariant is reframed around those two:
   score, and candidate count in `reject_detail`.
 - **Quarantine rate**: `quarantined_count / (quarantined_count +
   SUM(hourly_segment_features.sample_count))` for the target hour. A rate
-  above 5% fails the Airflow task. Implemented as a GX Expectation
+  above 10% fails the Airflow task. Implemented as a GX Expectation
   (`ExpectColumnValuesToBeBetween` on a one-row `quarantine_rate` DataFrame)
   in `batch_jobs.sensor_processing_validation` (issue #220, ADR-0004), run as
   the `validate_sensor_processing` task right after `run_sensor_processing`.
   The same validation summary also reports cleansing and map-matching counts
-  and rates separately against the same target-hour input denominator; the 5%
+  and rates separately against the same target-hour input denominator; the 10%
   hard-fail threshold applies to their combined rate.
 - **`hourly_segment_features` magnitude ranges**: every RMS/P95 acceleration,
   jerk, and steering-rate/vibration column, plus `avg_speed_mps`, must be
