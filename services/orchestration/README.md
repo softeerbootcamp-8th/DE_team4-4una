@@ -34,7 +34,7 @@ zone만 재계산한다(`jobs/current_score.py`는 이 이슈에서 변경하지
 `current_score`는 segment -> zone 매핑을 `road_segment` Parquet에서 읽는다. 이 매핑은
 PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 직접 읽는다(#400,
 `jobs/weather.py`/`jobs/current_score.py`가 `de4_core.ObjectStore`로 local path/`file://`/
-`s3://` URI를 모두 처리) — 로컬 compose는 `ZONE_MASTER_URI`/`CURRENT_SCORE_ROAD_SEGMENT_URI`
+`s3://` URI를 모두 처리) — 로컬 compose는 `WEATHER_REGION_MASTER_URI`/`ZONE_WEATHER_REGION_MAP_URI`/`CURRENT_SCORE_ROAD_SEGMENT_URI`
 기본값을 볼륨 마운트된 로컬 경로로 채워 주고, 운영은 같은 키를 reference S3 URI로 덮어쓴다.
 `zone`이 없는 segment는 `current_segment_comfort_score.location_id`가 NOT NULL이라
 행이 만들어지지 않는다 — `standard_segment_comfort_score`에만 남는다.
@@ -77,19 +77,27 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
   `POSTGRES_PASSWORD` — `current_score_pipeline`의 PythonOperator
   (`jobs/current_score.py`)가 `airflow-scheduler` 프로세스의 환경변수에서
   직접 읽는 서빙 Postgres 접속 정보다.
-- `ZONE_MASTER_URI`, `CURRENT_SCORE_ROAD_SEGMENT_URI` — `zone_weather_pipeline`
-  (`jobs/weather.py`)과 `current_score_pipeline`(`jobs/current_score.py`)이 각각
-  reference 데이터(`zone_master.parquet`, `road_segment`)를 읽을 URI다(#400).
-  `AIRFLOW_VAR_*`가 아니라 `POSTGRES_*`와 같은 방식으로 `airflow-scheduler`
-  프로세스의 환경변수에서 직접 읽는다. 로컬에서는 비워 두면
-  `infra/compose/airflow.yaml`이 볼륨 마운트된 로컬 경로
-  (`data/reference/tlc_zone/zone_master.parquet`, `data/processed/road_segment`)를
-  기본값으로 채운다. 운영에서는 reference S3 버킷을 가리키는 값을 넣는다.
+- `WEATHER_REGION_MASTER_URI`, `ZONE_WEATHER_REGION_MAP_URI`,
+  `CURRENT_SCORE_ROAD_SEGMENT_URI` — `zone_weather_pipeline`(`jobs/weather.py`)과
+  `current_score_pipeline`(`jobs/current_score.py`)이 각각 reference 데이터를 읽을
+  URI다(#400). `AIRFLOW_VAR_*`가 아니라 `POSTGRES_*`와 같은 방식으로
+  `airflow-scheduler` 프로세스의 환경변수에서 직접 읽는다. 로컬에서는 비워 두면
+  `infra/compose/airflow.yaml`이 볼륨 마운트된 로컬 경로를 기본값으로 채운다.
+  운영에서는 reference S3 버킷을 가리키는 값을 넣는다.
 
   ```env
-  ZONE_MASTER_URI=s3://<reference-bucket>/normalized/zone_master/zone_master.parquet
+  WEATHER_REGION_MASTER_URI=s3://<reference-bucket>/normalized/weather_region/weather_region_master.parquet
+  ZONE_WEATHER_REGION_MAP_URI=s3://<reference-bucket>/normalized/weather_region/zone_weather_region_map.parquet
   CURRENT_SCORE_ROAD_SEGMENT_URI=s3://<reference-bucket>/normalized/road_segment
   ```
+
+  앞의 두 값은 Open-Meteo에 보낼 날씨 권역 20개의 조회 좌표와, 그 결과를 TLC zone
+  263개로 펼칠 매핑이다 — Open-Meteo가 요청 1건을 좌표 수로 가중해 세기 때문에 zone
+  263개를 그대로 조회하면 무료 한도를 넘긴다. 두 파일은
+  `services/sensor-producer/src/zone_profile/build_weather_region.py`로 오프라인
+  1회 생성하며 **항상 같은 생성분**을 가리켜야 한다 — 어긋나면 `jobs/weather.py`가
+  요청을 보내기 전에 실패한다. `ZONE_MASTER_URI`는 이 변경으로 `jobs/weather.py`가
+  더 이상 읽지 않는다(권역 생성 스크립트가 오프라인에서만 읽는다).
 
   `CURRENT_SCORE_ROAD_SEGMENT_URI`는 root를 가리키고, `jobs/current_score.py`가
   `CURRENT_SCORE_ROAD_SNAPSHOT_DATE`로 그 아래 `snapshot_date=<date>/` partition만
@@ -105,8 +113,11 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
   `zone_weather_snapshot` 이력의 root와, `bronze_compaction`(`jobs/bronze_compaction.py`,
   #271)이 그 소파일을 압축할 때 읽는 root다(#400). **두 값은 항상 같은 root를
   가리켜야 한다** — 하나만 바꾸면 compaction이 새 파일을 못 찾는다. 로컬에서는
-  비워 두면 둘 다 같은 로컬 기본값
-  (`data/local-lake/bronze/zone_weather_snapshot`)을 쓴다. 운영에서는 이 project의
+  비워 두면 `infra/compose/airflow.yaml`이 둘 다 같은 로컬 기본값
+  (`data/local-lake/bronze/zone_weather_snapshot`)으로 채운다. 기본값은 compose가
+  주고 `jobs/weather.py`는 갖고 있지 않다 — 상대경로 기본값은 프로세스 CWD에 따라
+  다른 곳을 가리키므로, 환경변수가 비어 있으면 `LatestZoneWeatherJobConfig.from_env()`가
+  `POSTGRES_*`와 같이 즉시 실패한다. 운영에서는 이 project의
   Data Lake bucket(`<data-lake-bucket>`), **Bronze
   계층**(Silver 아님 — raw collection history라서)을 가리키는 값을 넣는다.
 

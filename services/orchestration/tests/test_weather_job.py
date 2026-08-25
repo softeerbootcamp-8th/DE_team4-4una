@@ -20,9 +20,9 @@ from de4_core import ObjectStore
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jobs import weather as weather_module
 from jobs.weather import (
     _SNAPSHOT_SCHEMA,
-    DEFAULT_ZONE_MASTER_URI,
     FOG_WEATHER_CODES,
     HIGH_WIND_GUST_THRESHOLD_MPS,
     HTTP_RETRY_STATUS_FORCELIST,
@@ -31,12 +31,13 @@ from jobs.weather import (
     RAIN_WEATHER_CODES,
     SNOW_WEATHER_CODES,
     LatestZoneWeatherJobConfig,
-    ZoneCoordinate,
+    WeatherRegionCoordinate,
     _build_default_session,
     _validate_target_time,
     classify_weather_state,
     fetch_open_meteo,
-    load_zone_coordinates,
+    load_weather_regions,
+    load_zone_weather_region_map,
     run_latest_zone_weather_job,
     write_zone_weather_snapshot,
 )
@@ -47,16 +48,37 @@ TARGET_TIME = datetime(2026, 8, 19, 10, 15, tzinfo=UTC)
 TARGET_KEY = "2026-08-19T10:15"
 
 
-def write_zone_master(path: Path, *, location_id=181, latitude=40.7, longitude=-73.9) -> Path:
-    table = pa.table(
-        {
-            "location_id": [location_id],
-            "representative_latitude": [latitude],
-            "representative_longitude": [longitude],
-        }
+# jobs.weather가 읽는 reference 파일 2개를 만든다. regions는 {권역 id: (lat, lon)},
+# mapping은 {location_id: 권역 id}. 기본값은 zone 하나가 권역 하나인 최소 구성이다.
+def write_weather_region_files(
+    directory: Path,
+    *,
+    regions: dict[int, tuple[float, float]] | None = None,
+    mapping: dict[int, int] | None = None,
+) -> tuple[Path, Path]:
+    regions = regions if regions is not None else {1: (40.7, -73.9)}
+    mapping = mapping if mapping is not None else {181: 1}
+
+    master_path = directory / "weather_region_master.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "weather_region_id": list(regions),
+                "representative_latitude": [latitude for latitude, _ in regions.values()],
+                "representative_longitude": [longitude for _, longitude in regions.values()],
+            }
+        ),
+        master_path,
     )
-    pq.write_table(table, path)
-    return path
+
+    map_path = directory / "zone_weather_region_map.parquet"
+    pq.write_table(
+        pa.table(
+            {"location_id": list(mapping), "weather_region_id": list(mapping.values())}
+        ),
+        map_path,
+    )
+    return master_path, map_path
 
 
 class FakeResponse:
@@ -237,27 +259,52 @@ class FakeS3Client:
         return {"Body": io.BytesIO(self.objects[key])}
 
 
-class TestLoadZoneCoordinates:
-    def test_drops_zones_with_missing_coordinates(self, tmp_path):
+class TestLoadWeatherRegions:
+    def test_reads_the_region_query_coordinates(self, tmp_path):
+        master_path, _ = write_weather_region_files(
+            tmp_path, regions={1: (40.7, -73.9), 2: (40.8, -74.0)}, mapping={181: 1, 182: 2}
+        )
+
+        regions = load_weather_regions(master_path)
+
+        assert regions == [
+            WeatherRegionCoordinate(1, 40.7, -73.9),
+            WeatherRegionCoordinate(2, 40.8, -74.0),
+        ]
+
+    def test_does_not_read_the_geometry_column(self, tmp_path):
+        # geometry는 시각화/검증용이고 파일 용량의 대부분이다. 런타임은 컬럼 프로젝션으로
+        # 아예 읽지 않으므로, 폴리곤으로 해석할 수 없는 값이 들어 있어도 로딩은 성공한다.
         table = pa.table(
             {
-                "location_id": [181, 264, 265],
-                "representative_latitude": [40.7, None, None],
-                "representative_longitude": [-73.9, None, None],
+                "weather_region_id": [1],
+                "geometry": [b"not-a-polygon"],
+                "representative_latitude": [40.7],
+                "representative_longitude": [-73.9],
             }
         )
-        path = tmp_path / "zone_master.parquet"
+        path = tmp_path / "weather_region_master.parquet"
         pq.write_table(table, path)
 
-        zones = load_zone_coordinates(path)
+        assert load_weather_regions(path) == [WeatherRegionCoordinate(1, 40.7, -73.9)]
 
-        assert [zone.location_id for zone in zones] == [181]
-        assert zones[0] == ZoneCoordinate(181, 40.7, -73.9)
+    def test_drops_a_region_with_missing_coordinates(self, tmp_path):
+        table = pa.table(
+            {
+                "weather_region_id": [1, 2],
+                "representative_latitude": [40.7, None],
+                "representative_longitude": [-73.9, None],
+            }
+        )
+        path = tmp_path / "weather_region_master.parquet"
+        pq.write_table(table, path)
+
+        assert load_weather_regions(path) == [WeatherRegionCoordinate(1, 40.7, -73.9)]
 
     def test_reads_from_an_s3_uri(self):
         table = pa.table(
             {
-                "location_id": [181],
+                "weather_region_id": [1],
                 "representative_latitude": [40.7],
                 "representative_longitude": [-73.9],
             }
@@ -265,26 +312,72 @@ class TestLoadZoneCoordinates:
         buffer = io.BytesIO()
         pq.write_table(table, buffer)
         client = FakeS3Client()
-        client.put_object(Bucket="de4-reference", Key="normalized/zone_master/zone_master.parquet", Body=buffer.getvalue())
+        client.put_object(
+            Bucket="de4-reference",
+            Key="normalized/weather_region/weather_region_master.parquet",
+            Body=buffer.getvalue(),
+        )
         store = ObjectStore(client)  # type: ignore[arg-type]
 
-        zones = load_zone_coordinates(
-            "s3://de4-reference/normalized/zone_master/zone_master.parquet", store=store
+        regions = load_weather_regions(
+            "s3://de4-reference/normalized/weather_region/weather_region_master.parquet",
+            store=store,
         )
 
-        assert zones == [ZoneCoordinate(181, 40.7, -73.9)]
+        assert regions == [WeatherRegionCoordinate(1, 40.7, -73.9)]
 
     def test_raises_when_the_s3_object_is_missing(self):
         store = ObjectStore(FakeS3Client())  # type: ignore[arg-type]
 
         with pytest.raises(ClientError, match="NoSuchKey"):
-            load_zone_coordinates(
-                "s3://de4-reference/normalized/zone_master/zone_master.parquet", store=store
+            load_weather_regions(
+                "s3://de4-reference/normalized/weather_region/weather_region_master.parquet",
+                store=store,
             )
+
+
+class TestLoadZoneWeatherRegionMap:
+    def test_maps_every_zone_to_its_region(self, tmp_path):
+        _, map_path = write_weather_region_files(
+            tmp_path, regions={1: (40.7, -73.9), 2: (40.8, -74.0)},
+            mapping={181: 1, 182: 1, 183: 2},
+        )
+
+        assert load_zone_weather_region_map(map_path) == {181: 1, 182: 1, 183: 2}
+
+    def test_keeps_the_file_order_because_it_decides_snapshot_row_order(self, tmp_path):
+        _, map_path = write_weather_region_files(
+            tmp_path, regions={1: (40.7, -73.9)}, mapping={183: 1, 181: 1, 182: 1}
+        )
+
+        assert list(load_zone_weather_region_map(map_path)) == [183, 181, 182]
+
+    def test_reads_from_an_s3_uri(self):
+        buffer = io.BytesIO()
+        pq.write_table(pa.table({"location_id": [181], "weather_region_id": [1]}), buffer)
+        client = FakeS3Client()
+        client.put_object(
+            Bucket="de4-reference",
+            Key="normalized/weather_region/zone_weather_region_map.parquet",
+            Body=buffer.getvalue(),
+        )
+        store = ObjectStore(client)  # type: ignore[arg-type]
+
+        mapping = load_zone_weather_region_map(
+            "s3://de4-reference/normalized/weather_region/zone_weather_region_map.parquet",
+            store=store,
+        )
+
+        assert mapping == {181: 1}
 
 
 class TestLatestZoneWeatherJobConfigFromEnv:
     BASE_ENV: ClassVar[dict[str, str]] = {
+        "WEATHER_REGION_MASTER_URI": "data/reference/weather_region/weather_region_master.parquet",
+        "ZONE_WEATHER_REGION_MAP_URI": (
+            "data/reference/weather_region/zone_weather_region_map.parquet"
+        ),
+        "ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI": "data/local-lake/bronze/zone_weather_snapshot",
         "POSTGRES_HOST": "localhost",
         "POSTGRES_PORT": "5432",
         "POSTGRES_DB": "de4",
@@ -292,22 +385,57 @@ class TestLatestZoneWeatherJobConfigFromEnv:
         "POSTGRES_PASSWORD": "de4",
     }
 
-    def test_falls_back_to_the_local_default_uri(self):
-        config = LatestZoneWeatherJobConfig.from_env(self.BASE_ENV)
+    # 모듈 기본값을 두지 않으므로 URI는 전부 환경변수로 들어와야 한다 — 빠뜨리면
+    # 엉뚱한 경로를 조용히 읽는 대신 설정 단계에서 바로 실패한다.
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "WEATHER_REGION_MASTER_URI",
+            "ZONE_WEATHER_REGION_MAP_URI",
+            "ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI",
+        ],
+    )
+    def test_raises_when_a_uri_is_missing(self, missing):
+        env = {key: value for key, value in self.BASE_ENV.items() if key != missing}
 
-        assert config.zone_master_uri == DEFAULT_ZONE_MASTER_URI
+        with pytest.raises(ValueError, match=f"{missing} must be set"):
+            LatestZoneWeatherJobConfig.from_env(env)
 
-    def test_reads_an_s3_uri_from_the_environment(self):
+    def test_reads_s3_uris_from_the_environment(self):
+        root = "s3://de4-reference/normalized/weather_region"
         config = LatestZoneWeatherJobConfig.from_env(
-            {**self.BASE_ENV, "ZONE_MASTER_URI": "s3://de4-reference/normalized/zone_master/zone_master.parquet"}
+            {
+                **self.BASE_ENV,
+                "WEATHER_REGION_MASTER_URI": f"{root}/weather_region_master.parquet",
+                "ZONE_WEATHER_REGION_MAP_URI": f"{root}/zone_weather_region_map.parquet",
+            }
         )
 
-        assert config.zone_master_uri == "s3://de4-reference/normalized/zone_master/zone_master.parquet"
+        assert config.weather_region_master_uri == f"{root}/weather_region_master.parquet"
+        assert config.zone_weather_region_map_uri == f"{root}/zone_weather_region_map.parquet"
 
 
 class TestFetchOpenMeteo:
-    def test_maps_readings_back_to_the_requesting_zone(self):
-        zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
+    REGIONS = (
+        WeatherRegionCoordinate(1, 40.7, -73.9),
+        WeatherRegionCoordinate(2, 40.8, -74.0),
+        WeatherRegionCoordinate(3, 40.9, -74.1),
+    )
+
+    def test_sends_only_the_region_coordinates_in_one_request(self):
+        # 호출 좌표가 zone 263개가 아니라 권역 수만큼만 나가는지 — 이 변경의 핵심이다.
+        regions = self.REGIONS[:2]
+        session = FakeSession([[location_payload([TARGET_KEY]), location_payload([TARGET_KEY])]])
+
+        fetch_open_meteo(regions, TARGET_TIME, session=session)
+
+        assert len(session.calls) == 1
+        params = session.calls[0]["params"]
+        assert params["latitude"] == "40.7,40.8"
+        assert params["longitude"] == "-73.9,-74.0"
+
+    def test_maps_readings_back_to_the_requesting_region(self):
+        regions = self.REGIONS[:2]
         session = FakeSession(
             [
                 [
@@ -317,14 +445,14 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session)
+        readings, failures = fetch_open_meteo(regions, TARGET_TIME, session=session)
 
-        assert readings[181]["rain"] == 0.5
-        assert readings[182]["rain"] == 0.0
+        assert readings[1]["rain"] == 0.5
+        assert readings[2]["rain"] == 0.0
         assert failures == {}
 
-    def test_skips_a_zone_whose_response_has_no_matching_target_time(self):
-        zones = [ZoneCoordinate(181, 40.7, -73.9), ZoneCoordinate(182, 40.8, -74.0)]
+    def test_skips_a_region_whose_response_has_no_matching_target_time(self):
+        regions = self.REGIONS[:2]
         session = FakeSession(
             [
                 [
@@ -334,17 +462,12 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session)
+        readings, failures = fetch_open_meteo(regions, TARGET_TIME, session=session)
 
-        assert set(readings) == {181}
-        assert failures == {182: "missing target_time in Open-Meteo response"}
+        assert set(readings) == {1}
+        assert failures == {2: "missing target_time in Open-Meteo response"}
 
     def test_a_failed_batch_does_not_stop_other_batches(self):
-        zones = [
-            ZoneCoordinate(181, 40.7, -73.9),
-            ZoneCoordinate(182, 40.8, -74.0),
-            ZoneCoordinate(183, 40.9, -74.1),
-        ]
         session = SequencedSession(
             [
                 [location_payload([TARGET_KEY], rain=[1.0])],
@@ -353,55 +476,46 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+        readings, failures = fetch_open_meteo(
+            self.REGIONS, TARGET_TIME, session=session, batch_size=1
+        )
 
-        assert set(readings) == {181, 183}
-        assert "boom" in failures[182]
+        assert set(readings) == {1, 3}
+        assert "boom" in failures[2]
 
     def test_a_batch_with_a_mismatched_location_count_fails_only_that_batch(self):
-        zones = [
-            ZoneCoordinate(181, 40.7, -73.9),
-            ZoneCoordinate(182, 40.8, -74.0),
-            ZoneCoordinate(183, 40.9, -74.1),
-        ]
         session = SequencedSession(
             [
-                [location_payload([TARGET_KEY])],  # 2개 zone 요청인데 응답은 1개뿐
+                [location_payload([TARGET_KEY])],  # 권역 2개 요청인데 응답은 1개뿐
                 [location_payload([TARGET_KEY], rain=[3.0])],
             ]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=2)
+        readings, failures = fetch_open_meteo(
+            self.REGIONS, TARGET_TIME, session=session, batch_size=2
+        )
 
-        assert set(readings) == {183}
-        assert 181 in failures
-        assert 182 in failures
+        assert set(readings) == {3}
+        assert 1 in failures
+        assert 2 in failures
 
     def test_a_429_on_the_first_batch_stops_after_a_single_call(self):
         # HTTP 내부 retry가 아니라 fetch_open_meteo가 직접 429를 감지해서, 이후
         # batch 요청 자체를 만들지 않아야 한다(#444).
-        zones = [
-            ZoneCoordinate(181, 40.7, -73.9),
-            ZoneCoordinate(182, 40.8, -74.0),
-            ZoneCoordinate(183, 40.9, -74.1),
-        ]
         session = SequencedSession(
             [FakeResponse(None, status_code=429, headers={"Retry-After": "30"})]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+        readings, failures = fetch_open_meteo(
+            self.REGIONS, TARGET_TIME, session=session, batch_size=1
+        )
 
         assert session.calls == 1
         assert readings == {}
-        assert set(failures) == {181, 182, 183}
+        assert set(failures) == {1, 2, 3}
         assert all("429" in reason for reason in failures.values())
 
     def test_a_429_after_a_successful_batch_keeps_the_earlier_batch_results(self):
-        zones = [
-            ZoneCoordinate(181, 40.7, -73.9),
-            ZoneCoordinate(182, 40.8, -74.0),
-            ZoneCoordinate(183, 40.9, -74.1),
-        ]
         session = SequencedSession(
             [
                 [location_payload([TARGET_KEY], rain=[1.0])],
@@ -409,13 +523,15 @@ class TestFetchOpenMeteo:
             ]
         )
 
-        readings, failures = fetch_open_meteo(zones, TARGET_TIME, session=session, batch_size=1)
+        readings, failures = fetch_open_meteo(
+            self.REGIONS, TARGET_TIME, session=session, batch_size=1
+        )
 
-        # 세 번째 batch(183)는 요청조차 만들어지지 않는다.
+        # 세 번째 batch(권역 3)는 요청조차 만들어지지 않는다.
         assert session.calls == 2
-        assert set(readings) == {181}
-        assert readings[181]["rain"] == 1.0
-        assert set(failures) == {182, 183}
+        assert set(readings) == {1}
+        assert readings[1]["rain"] == 1.0
+        assert set(failures) == {2, 3}
 
 
 def snapshot_row(**overrides) -> dict:
@@ -575,6 +691,116 @@ class TestWriteZoneWeatherSnapshot:
         assert summary.compacted_groups == ()
 
 
+# Postgres 없이 "권역 관측 1건 -> 소속 zone 여러 행" 펼치기만 검증한다. snapshot은
+# UPSERT보다 먼저 쓰이므로 upsert를 스텁으로 바꿔도 행 단위 결과를 그대로 볼 수 있다.
+class TestRegionFanOut:
+    @staticmethod
+    @pytest.fixture(autouse=True)
+    def stub_upsert(monkeypatch):
+        monkeypatch.setattr(
+            weather_module, "upsert_latest_zone_weather", lambda connection, rows: len(rows)
+        )
+
+    @staticmethod
+    def make_config(tmp_path, *, regions=None, mapping=None) -> LatestZoneWeatherJobConfig:
+        master_path, map_path = write_weather_region_files(
+            tmp_path, regions=regions, mapping=mapping
+        )
+        return LatestZoneWeatherJobConfig(
+            weather_region_master_uri=str(master_path),
+            zone_weather_region_map_uri=str(map_path),
+            zone_weather_snapshot_uri=str(tmp_path / "zone_weather_snapshot"),
+            postgres_host="localhost",
+            postgres_port=5432,
+            postgres_db="de4",
+            postgres_user="de4",
+            postgres_password="de4",
+        )
+
+    @staticmethod
+    def read_snapshot(summary) -> dict[int, dict]:
+        table = _read_snapshot_table(ObjectStore(), summary.snapshot_uri)
+        return {row["location_id"]: row for row in table.to_pylist()}
+
+    def test_one_region_reading_is_spread_over_every_zone_in_it(self, tmp_path):
+        config = self.make_config(
+            tmp_path,
+            regions={1: (40.7, -73.9), 2: (40.8, -74.0)},
+            mapping={181: 1, 182: 1, 183: 2},
+        )
+        session = FakeSession(
+            [
+                [
+                    location_payload([TARGET_KEY], rain=[1.5]),
+                    location_payload([TARGET_KEY], rain=[0.0]),
+                ]
+            ]
+        )
+
+        summary = run_latest_zone_weather_job(config, TARGET_TIME, None, session=session)
+        rows = self.read_snapshot(summary)
+
+        # 권역 1의 두 zone은 같은 관측값과 같은 조회 좌표를 갖는다.
+        assert rows[181]["rain_mm"] == 1.5
+        assert rows[182]["rain_mm"] == 1.5
+        assert rows[183]["rain_mm"] == 0.0
+        assert (rows[181]["latitude"], rows[181]["longitude"]) == (40.7, -73.9)
+        assert (rows[182]["latitude"], rows[182]["longitude"]) == (40.7, -73.9)
+        assert (rows[183]["latitude"], rows[183]["longitude"]) == (40.8, -74.0)
+
+    def test_row_count_follows_the_zone_map_not_the_region_count(self, tmp_path):
+        config = self.make_config(
+            tmp_path, regions={1: (40.7, -73.9)}, mapping={181: 1, 182: 1, 183: 1}
+        )
+        session = FakeSession([[location_payload([TARGET_KEY])]])
+
+        summary = run_latest_zone_weather_job(config, TARGET_TIME, None, session=session)
+
+        assert summary.requested_zone_count == 3
+        assert summary.requested_region_count == 1
+        assert summary.collected_count == 3
+        assert len(session.calls) == 1
+
+    def test_a_failed_region_fails_exactly_its_own_zones(self, tmp_path):
+        config = self.make_config(
+            tmp_path,
+            regions={1: (40.7, -73.9), 2: (40.8, -74.0)},
+            mapping={181: 1, 182: 1, 183: 2},
+        )
+        session = FakeSession(
+            [
+                [
+                    location_payload(["2026-08-19T09:00"]),  # 권역 1 실패
+                    location_payload([TARGET_KEY], rain=[2.0]),
+                ]
+            ]
+        )
+
+        summary = run_latest_zone_weather_job(config, TARGET_TIME, None, session=session)
+        rows = self.read_snapshot(summary)
+
+        assert summary.failed_zone_count == 2
+        assert rows[181]["fetch_status"] == "failed"
+        assert rows[182]["fetch_status"] == "failed"
+        assert rows[183]["fetch_status"] == "success"
+        # 실패한 zone도 조회 좌표는 남아서 어느 권역에서 실패했는지 추적할 수 있다.
+        assert (rows[181]["latitude"], rows[181]["longitude"]) == (40.7, -73.9)
+        assert rows[181]["error_reason"] == "missing target_time in Open-Meteo response"
+
+    def test_raises_when_the_map_references_a_region_the_master_does_not_define(self, tmp_path):
+        # 두 reference 파일이 어긋난 채로 진행하면 좌표 없는 행이 조용히 생기므로
+        # 요청을 보내기 전에 멈춰야 한다.
+        config = self.make_config(
+            tmp_path, regions={1: (40.7, -73.9)}, mapping={181: 1, 182: 7}
+        )
+        session = FakeSession([])
+
+        with pytest.raises(ValueError, match=r"weather_region_id \[7\]"):
+            run_latest_zone_weather_job(config, TARGET_TIME, None, session=session)
+
+        assert session.calls == []
+
+
 def _connect():
     return psycopg2.connect(
         host=os.environ["POSTGRES_HOST"],
@@ -605,10 +831,12 @@ class TestWeatherJobIntegration:
         yield
 
     @staticmethod
-    def make_config(zone_master_uri, snapshot_uri) -> LatestZoneWeatherJobConfig:
+    def make_config(region_files, snapshot_uri) -> LatestZoneWeatherJobConfig:
+        master_path, map_path = region_files
         env = os.environ
         return LatestZoneWeatherJobConfig(
-            zone_master_uri=str(zone_master_uri),
+            weather_region_master_uri=str(master_path),
+            zone_weather_region_map_uri=str(map_path),
             zone_weather_snapshot_uri=snapshot_uri,
             postgres_host=env["POSTGRES_HOST"],
             postgres_port=int(env["POSTGRES_PORT"]),
@@ -618,8 +846,8 @@ class TestWeatherJobIntegration:
         )
 
     def test_a_later_target_time_updates_the_same_row_instead_of_inserting(self, tmp_path):
-        zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
-        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
+        region_files = write_weather_region_files(tmp_path)
+        config = self.make_config(region_files, str(tmp_path / "zone_weather_snapshot"))
         connection = _connect()
         try:
             session = FakeSession([[location_payload([TARGET_KEY], rain=[0.0])]])
@@ -645,8 +873,8 @@ class TestWeatherJobIntegration:
 
     def test_an_older_target_time_does_not_overwrite_a_newer_row(self, tmp_path):
         # 10:30이 먼저 끝나고 재시도 등으로 늦게 끝난 10:15가 그 뒤에 와도 10:30 값을 지키는지 확인.
-        zone_master_path = write_zone_master(tmp_path / "zone_master.parquet")
-        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
+        region_files = write_weather_region_files(tmp_path)
+        config = self.make_config(region_files, str(tmp_path / "zone_weather_snapshot"))
         connection = _connect()
         try:
             newer_target_time = TARGET_TIME + timedelta(minutes=15)
@@ -667,22 +895,20 @@ class TestWeatherJobIntegration:
         finally:
             connection.close()
 
+    # zone 하나가 권역 하나인 구성 — 기존 두-zone 시나리오(각 zone이 독립적으로
+    # 성공/실패)를 권역 기반에서도 그대로 재현한다.
     @staticmethod
-    def write_two_zone_master(path) -> Path:
-        table = pa.table(
-            {
-                "location_id": [181, 182],
-                "representative_latitude": [40.7, 40.8],
-                "representative_longitude": [-73.9, -74.0],
-            }
+    def write_two_regions(directory) -> tuple[Path, Path]:
+        return write_weather_region_files(
+            directory,
+            regions={1: (40.7, -73.9), 2: (40.8, -74.0)},
+            mapping={181: 1, 182: 2},
         )
-        pq.write_table(table, path)
-        return path
 
     def test_a_failed_zone_is_snapshotted_but_not_upserted(self, tmp_path):
-        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
+        region_files = self.write_two_regions(tmp_path)
         snapshot_root = tmp_path / "zone_weather_snapshot"
-        config = self.make_config(zone_master_path, str(snapshot_root))
+        config = self.make_config(region_files, str(snapshot_root))
         connection = _connect()
         try:
             session = FakeSession(
@@ -715,8 +941,8 @@ class TestWeatherJobIntegration:
             connection.close()
 
     def test_a_zone_that_fails_this_run_keeps_its_previous_latest_row(self, tmp_path):
-        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
-        config = self.make_config(zone_master_path, str(tmp_path / "zone_weather_snapshot"))
+        region_files = self.write_two_regions(tmp_path)
+        config = self.make_config(region_files, str(tmp_path / "zone_weather_snapshot"))
         connection = _connect()
         try:
             session = FakeSession(
@@ -747,9 +973,9 @@ class TestWeatherJobIntegration:
             connection.close()
 
     def test_all_zones_failing_raises_but_still_writes_the_snapshot(self, tmp_path):
-        zone_master_path = self.write_two_zone_master(tmp_path / "zone_master.parquet")
+        region_files = self.write_two_regions(tmp_path)
         snapshot_root = tmp_path / "zone_weather_snapshot"
-        config = self.make_config(zone_master_path, str(snapshot_root))
+        config = self.make_config(region_files, str(snapshot_root))
         connection = _connect()
         try:
             session = FakeSession(
