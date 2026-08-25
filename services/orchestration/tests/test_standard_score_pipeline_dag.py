@@ -213,6 +213,10 @@ def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path
         module.dag.get_task("hourly_scoring.validate_hourly_scoring")
     )
     assert args[0] == "validate-hourly-scoring"
+    # run_hourly_scoring이 쓴 파티션만 검증한다(#469).
+    assert args[args.index("--target-hour") + 1] == (
+        "{{ data_interval_start.isoformat() }}"
+    )
     run_args = _entry_point_arguments(
         module.dag.get_task("hourly_scoring.run_hourly_scoring")
     )

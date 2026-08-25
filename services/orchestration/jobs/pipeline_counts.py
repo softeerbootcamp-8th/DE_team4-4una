@@ -65,8 +65,8 @@ def count_standard_score_pipeline_outputs(
     active_store = store if store is not None else ObjectStore()
 
     # batch-jobs가 실제로 쓰는 파티션 경로 규칙(#409 조사 기록 참고) — cleansing/
-    # hourly_storage.py의 quarantine_hour_path(), hourly_segment_feature_storage.py의
-    # hour_output_path()와 반드시 같은 형식이어야 한다.
+    # hourly_storage.py의 quarantine_hour_path(), hourly_segment_feature_storage.py와
+    # hourly_comfort_storage.py의 hour_output_path()와 반드시 같은 형식이어야 한다.
     quarantine_partition = join_uri(
         quarantine_output_path,
         f"target_date={target_hour.date().isoformat()}",
@@ -74,6 +74,14 @@ def count_standard_score_pipeline_outputs(
     )
     feature_partition = join_uri(
         feature_output_path,
+        f"data_period_date={target_hour.date().isoformat()}",
+        f"hour={target_hour.hour:02d}",
+    )
+    # hourly_comfort_score도 시간 파티션을 갖는다(#469). 루트를 넘기면
+    # ObjectStore.list_objects가 재귀라 다른 시간대와, 직전 실행이 죽어 남은
+    # _staging 잔여물(#380)까지 세어 건수가 부풀어 오른다.
+    hourly_comfort_partition = join_uri(
+        hourly_comfort_output_path,
         f"data_period_date={target_hour.date().isoformat()}",
         f"hour={target_hour.hour:02d}",
     )
@@ -88,7 +96,9 @@ def count_standard_score_pipeline_outputs(
     return StandardScorePipelineCounts(
         quarantine_count=_count_parquet_rows(active_store, quarantine_partition),
         feature_count=_count_parquet_rows(active_store, feature_partition),
-        hourly_comfort_score_count=_count_parquet_rows(active_store, hourly_comfort_output_path),
+        hourly_comfort_score_count=_count_parquet_rows(
+            active_store, hourly_comfort_partition
+        ),
         standard_segment_comfort_score_count=standard_segment_comfort_score_count,
     )
 

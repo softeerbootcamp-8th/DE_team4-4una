@@ -1,17 +1,16 @@
-"""Tests for batch_jobs/hourly_scoring_validation.py (#249)."""
+"""Tests for batch_jobs/hourly_scoring_validation.py (#249, #469)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from batch_jobs.hourly_comfort_storage import hour_output_path
 from batch_jobs.hourly_scoring_validation import (
     DEFAULT_SCORE_RANGES_SUITE_PATH,
-    DEFAULT_ZERO_SAMPLE_RATE_SUITE_PATH,
     HourlyScoringValidationConfig,
     HourlyScoringValidationFailed,
-    compute_zero_sample_rate,
     load_expectation_suite,
     run_hourly_scoring_validation,
 )
@@ -41,31 +40,17 @@ class TestHourlyScoringValidationConfig:
 
         assert config.score_output_path == "data/local-lake/silver/hourly_comfort_score"
         assert config.score_ranges_suite_path == DEFAULT_SCORE_RANGES_SUITE_PATH
-        assert config.zero_sample_rate_suite_path == DEFAULT_ZERO_SAMPLE_RATE_SUITE_PATH
 
     def test_from_env_reads_overrides(self) -> None:
         config = HourlyScoringValidationConfig.from_env(
             {
                 "HOURLY_COMFORT_OUTPUT_PATH": "custom/hourly_comfort_score",
                 "HOURLY_SCORING_SCORE_RANGES_SUITE_PATH": "custom/ranges.json",
-                "HOURLY_SCORING_ZERO_SAMPLE_RATE_SUITE_PATH": "custom/rate.json",
             }
         )
 
         assert config.score_output_path == "custom/hourly_comfort_score"
         assert config.score_ranges_suite_path == Path("custom/ranges.json")
-        assert config.zero_sample_rate_suite_path == Path("custom/rate.json")
-
-
-class TestComputeZeroSampleRate:
-    def test_zero_when_nothing_has_zero_samples(self) -> None:
-        assert compute_zero_sample_rate(zero_sample_count=0, total_count=100) == 0.0
-
-    def test_ratio_of_zero_sample_rows_over_total(self) -> None:
-        assert compute_zero_sample_rate(zero_sample_count=5, total_count=100) == pytest.approx(0.05)
-
-    def test_zero_when_total_is_zero(self) -> None:
-        assert compute_zero_sample_rate(zero_sample_count=0, total_count=0) == 0.0
 
 
 class TestLoadExpectationSuite:
@@ -75,23 +60,20 @@ class TestLoadExpectationSuite:
         assert suite.name == "hourly_comfort_score_suite"
         assert len(suite.expectations) == 4
 
-    def test_loads_the_committed_zero_sample_rate_suite(self) -> None:
-        suite = load_expectation_suite(DEFAULT_ZERO_SAMPLE_RATE_SUITE_PATH)
-
-        assert suite.name == "hourly_comfort_score_zero_sample_rate_suite"
-        assert len(suite.expectations) == 1
-
 
 class TestRunHourlyScoringValidation:
-    """`write.mode("overwrite")`로 쓴 `hourly_comfort_score` 전체를 매번 다시 검증한다(풀 리컴퓨트)."""
+    """`run_hourly_scoring`이 방금 쓴 target_hour 파티션만 검증한다(#469)."""
+
+    TARGET_HOUR = PROCESSED_AT
 
     def score_row(self, **overrides: object) -> dict[str, object]:
+        period_start = overrides.pop("period_start", self.TARGET_HOUR)
         row = {
             "segment_id": "S1",
             "vehicle_profile_id": 1,
-            "data_period_start": PROCESSED_AT,
-            "data_period_end": PROCESSED_AT.replace(hour=PROCESSED_AT.hour + 1),
-            "road_snapshot_date": PROCESSED_AT.date(),
+            "data_period_start": period_start,
+            "data_period_end": period_start + timedelta(hours=1),
+            "road_snapshot_date": period_start.date(),
             "vertical_score": 50.0,
             "longitudinal_score": 50.0,
             "lateral_score": 50.0,
@@ -110,63 +92,81 @@ class TestRunHourlyScoringValidation:
         ]
         return spark.createDataFrame(ordered, HOURLY_COMFORT_SCORE_SCHEMA)
 
+    def write_partition(self, spark, config, target_hour, rows) -> None:
+        self.score_rows_df(spark, rows).write.mode("overwrite").parquet(
+            hour_output_path(config.score_output_path, target_hour)
+        )
+
     def config(self, tmp_path: Path) -> HourlyScoringValidationConfig:
         return HourlyScoringValidationConfig(
             score_output_path=str(tmp_path / "hourly_comfort_score"),
             score_ranges_suite_path=DEFAULT_SCORE_RANGES_SUITE_PATH,
-            zero_sample_rate_suite_path=DEFAULT_ZERO_SAMPLE_RATE_SUITE_PATH,
         )
 
-    def test_succeeds_when_scores_and_zero_sample_rate_are_healthy(self, spark, tmp_path) -> None:
+    def test_succeeds_when_scores_are_in_range(self, spark, tmp_path) -> None:
         config = self.config(tmp_path)
-        rows = [self.score_row() for _ in range(19)] + [self.score_row(sample_count=0)]
-        self.score_rows_df(spark, rows).write.mode("overwrite").parquet(config.score_output_path)
+        self.write_partition(
+            spark, config, self.TARGET_HOUR, [self.score_row() for _ in range(20)]
+        )
 
-        summary = run_hourly_scoring_validation(spark, config)
+        summary = run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)
 
         assert summary.success
+        assert summary.target_hour == self.TARGET_HOUR
         assert summary.row_count == 20
-        assert summary.zero_sample_count == 1
-        assert summary.zero_sample_rate == pytest.approx(0.05)
+
+    def test_ignores_other_hours(self, spark, tmp_path) -> None:
+        """다른 시간대의 잘못된 값에 영향받지 않는다 — 전체를 읽던 시절과의 차이다."""
+        config = self.config(tmp_path)
+        other_hour = self.TARGET_HOUR + timedelta(hours=1)
+        self.write_partition(spark, config, self.TARGET_HOUR, [self.score_row()])
+        self.write_partition(
+            spark,
+            config,
+            other_hour,
+            [self.score_row(period_start=other_hour, vertical_score=150.0)],
+        )
+
+        summary = run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)
+
+        assert summary.success
+        assert summary.row_count == 1
 
     def test_raises_when_a_score_is_out_of_range(self, spark, tmp_path) -> None:
         config = self.config(tmp_path)
-        rows = [self.score_row(vertical_score=150.0)]
-        self.score_rows_df(spark, rows).write.mode("overwrite").parquet(config.score_output_path)
+        self.write_partition(
+            spark, config, self.TARGET_HOUR, [self.score_row(vertical_score=150.0)]
+        )
 
         with pytest.raises(HourlyScoringValidationFailed):
-            run_hourly_scoring_validation(spark, config)
+            run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)
 
     def test_raises_when_scoring_version_is_not_semver(self, spark, tmp_path) -> None:
         config = self.config(tmp_path)
-        rows = [self.score_row(scoring_version="v1")]
-        self.score_rows_df(spark, rows).write.mode("overwrite").parquet(config.score_output_path)
+        self.write_partition(
+            spark, config, self.TARGET_HOUR, [self.score_row(scoring_version="v1")]
+        )
 
         with pytest.raises(HourlyScoringValidationFailed):
-            run_hourly_scoring_validation(spark, config)
+            run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)
 
-    def test_raises_when_zero_sample_rate_exceeds_threshold(self, spark, tmp_path) -> None:
+    def test_raises_when_the_target_hour_partition_is_missing(self, spark, tmp_path) -> None:
         config = self.config(tmp_path)
-        # 4/19 ≈ 0.21, suite의 max_value(0.05)를 넘는다.
-        rows = [self.score_row() for _ in range(15)] + [
-            self.score_row(sample_count=0) for _ in range(4)
-        ]
-        self.score_rows_df(spark, rows).write.mode("overwrite").parquet(config.score_output_path)
+        # 다른 시간대만 있는 상태 — 루트는 존재하지만 대상 파티션은 없다.
+        self.write_partition(
+            spark,
+            config,
+            self.TARGET_HOUR + timedelta(hours=1),
+            [self.score_row(period_start=self.TARGET_HOUR + timedelta(hours=1))],
+        )
 
-        with pytest.raises(HourlyScoringValidationFailed):
-            run_hourly_scoring_validation(spark, config)
+        with pytest.raises(HourlyScoringValidationFailed, match="no hourly_comfort_score"):
+            run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)
 
-    def test_raises_when_no_output_path_exists(self, spark, tmp_path) -> None:
+    def test_raises_when_the_partition_has_zero_rows(self, spark, tmp_path) -> None:
+        # 파티션 writer가 빈 결과를 막지만(#469), 검증도 자체적으로 확인한다.
         config = self.config(tmp_path)
+        self.write_partition(spark, config, self.TARGET_HOUR, [])
 
-        with pytest.raises(HourlyScoringValidationFailed):
-            run_hourly_scoring_validation(spark, config)
-
-    def test_raises_when_output_has_zero_rows(self, spark, tmp_path) -> None:
-        # 경로는 존재하지만 row가 0개면 zero_sample_rate가 0.0(정상 범위)으로 계산되어
-        # 검증이 vacuously 통과할 수 있었던 케이스(#252 리뷰).
-        config = self.config(tmp_path)
-        self.score_rows_df(spark, []).write.mode("overwrite").parquet(config.score_output_path)
-
-        with pytest.raises(HourlyScoringValidationFailed):
-            run_hourly_scoring_validation(spark, config)
+        with pytest.raises(HourlyScoringValidationFailed, match="zero rows"):
+            run_hourly_scoring_validation(spark, config, self.TARGET_HOUR)

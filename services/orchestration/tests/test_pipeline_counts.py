@@ -118,7 +118,7 @@ def test_counts_quarantine_feature_and_hourly_comfort_partitions():
         {
             "file:///lake/quarantine/target_date=2026-08-18/target_hour=09/part-0.parquet": 3,
             "file:///lake/features/data_period_date=2026-08-18/hour=09/part-0.parquet": 80,
-            "file:///lake/hourly_comfort_score/part-0.parquet": 80,
+            "file:///lake/hourly_comfort_score/data_period_date=2026-08-18/hour=09/part-0.parquet": 80,
         }
     )
     connection = _FakeConnection(result=100)
@@ -309,3 +309,30 @@ def test_real_object_store_counts_rows_without_downloading_the_object():
     # bytes_served가 payload 크기와 같아진다.
     assert len(payload) > 500_000
     assert client.bytes_served < len(payload) // 4
+
+
+def test_hourly_comfort_count_uses_the_target_hour_partition():
+    """루트를 재귀 나열하면 다른 시간대와 _staging 잔여물까지 세어버린다 (#469).
+
+    ObjectStore.list_objects는 재귀이고, 파티션 writer는 루트 아래 _staging/<run_id>를
+    만든다. 직전 실행이 죽어 남은 잔여물(#380)이 건수에 섞이면 안 된다.
+    """
+    store = _FakeObjectStore(
+        {
+            "file:///lake/hourly_comfort_score/data_period_date=2026-08-18/hour=09/part-0.parquet": 7,
+            "file:///lake/hourly_comfort_score/data_period_date=2026-08-18/hour=10/part-0.parquet": 99,
+            "file:///lake/hourly_comfort_score/_staging/run-dead/part-0.parquet": 500,
+        }
+    )
+
+    counts = count_standard_score_pipeline_outputs(
+        target_hour=datetime(2026, 8, 18, 9, tzinfo=UTC),
+        as_of=datetime(2026, 8, 18, 10, tzinfo=UTC),
+        quarantine_output_path="file:///lake/quarantine",
+        feature_output_path="file:///lake/features",
+        hourly_comfort_output_path="file:///lake/hourly_comfort_score",
+        connection=_FakeConnection(result=0),
+        store=store,
+    )
+
+    assert counts.hourly_comfort_score_count == 7

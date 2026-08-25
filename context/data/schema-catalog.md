@@ -376,6 +376,12 @@ profile.
 **Primary key:** `(segment_id, vehicle_profile_id, data_period_start)`.
 Whether `scoring_version` also belongs in the primary key is an open question.
 
+**Partitioning:** `data_period_date=YYYY-MM-DD/hour=HH`, derived from
+`data_period_start` — the same layout as `hourly_segment_features`. Each
+`run_hourly_scoring` execution replaces exactly one hour partition (issue #469,
+ADR-0011). The rejected output under `quarantine/hourly_comfort_score` uses the
+same layout.
+
 This table carries only the three directional scores, not a combined
 per-hour `comfort_score`. The Gold job derives the combined hourly score
 `c_h` itself from `vertical_score` / `longitudinal_score` / `lateral_score`
