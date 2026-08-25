@@ -72,6 +72,9 @@ jobs:
             dashboard:
               - *shared
               - 'services/dashboard/**'
+            pipeline-perf:
+              - *shared
+              - 'tools/pipeline-perf/**'
             batch-jobs-sensor-features: *batchjobs
             batch-jobs-cleansing: *batchjobs
             batch-jobs-rest: *batchjobs
@@ -120,6 +123,7 @@ jobs:
             "orchestration":              {pkg: "orchestration",    paths: "services/orchestration/tests"},
             "stream-processor":           {pkg: "stream-processor", paths: "services/stream-processor/tests"},
             "dashboard":                  {pkg: "dashboard",        paths: "services/dashboard/tests"},
+            "pipeline-perf":              {pkg: "pipeline-perf",    paths: "tools/pipeline-perf/tests"},
             "batch-jobs-sensor-features": {pkg: "batch-jobs",       paths: ($bj + "/test_sensor_features.py")},
             "batch-jobs-cleansing":       {pkg: "batch-jobs",       paths: ($bj + "/cleansing")},
             "batch-jobs-rest":            {pkg: "batch-jobs",       paths: ($bj + " --ignore=" + $bj + "/test_sensor_features.py --ignore=" + $bj + "/cleansing")}
@@ -134,7 +138,8 @@ jobs:
               libs/de4-core/* | tests/* | \
               services/batch-jobs/* | services/dashboard/* | services/gold-loader/* | \
               services/orchestration/* | services/sensor-producer/* | \
-              services/serving-api/* | services/stream-processor/*) ;;
+              services/serving-api/* | services/stream-processor/* | \
+              tools/pipeline-perf/*) ;;
               *) unmapped="$unmapped $path" ;;
             esac
           done
