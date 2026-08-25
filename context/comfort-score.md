@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-25
 ---
 
 # Comfort Score Design
@@ -448,9 +448,13 @@ the new path is proven end to end:
    `standard_segment_comfort_score`. **Done** (issue #198):
    `batch_jobs.comfort_score.standard_job`, run through the
    `load-standard-segment-comfort-score` command.
-3. Implement Open-Meteo weather collection into `latest_zone_weather`,
-   reading each zone's query point from `zone_master.representative_latitude`/
-   `.representative_longitude` (schema-catalog.md).
+3. Implement Open-Meteo weather collection into `latest_zone_weather`.
+   Open-Meteo is queried at 20 weather-region points, not at all 263 zone
+   points, and each region's observation is spread over its member zones, so
+   the table still holds one row per zone. Query points come from
+   `weather_region_master.representative_latitude`/`.representative_longitude`
+   (schema-catalog.md), which is built offline from
+   `zone_master.representative_latitude`/`.representative_longitude`.
 4. Implement current score calculation ("Weather-adjusted current score"
    above) and UPSERT into `current_segment_comfort_score`. The rules
    themselves (bucket classification, `impact_signature`, per-direction

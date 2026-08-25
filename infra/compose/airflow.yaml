@@ -146,6 +146,14 @@ services:
       # (여기 access key를 넣지 않는다) — reference 버킷에 s3:GetObject/s3:ListBucket 권한이
       # 미리 부여돼 있어야 한다.
       ZONE_MASTER_URI: ${ZONE_MASTER_URI:-${AIRFLOW_HOME}/data/reference/tlc_zone/zone_master.parquet}
+      # zone_weather_pipeline은 Open-Meteo를 zone 263개가 아니라 날씨 권역 20개
+      # 좌표로만 호출하고 그 결과를 zone으로 펼친다 — Open-Meteo가 요청을 좌표 수로
+      # 가중해 세기 때문에 263좌표로는 무료 한도를 넘긴다. 권역 대표좌표와 263 -> 20
+      # 매핑은 zone_profile/build_weather_region.py로 오프라인 1회 생성한 reference
+      # 데이터이고, 위 ZONE_MASTER_URI와 같은 이유로 로컬 기본값과 운영 S3 URI를
+      # ${VAR:-default}로 나눈다. 두 값은 항상 같은 생성분을 가리켜야 한다.
+      WEATHER_REGION_MASTER_URI: ${WEATHER_REGION_MASTER_URI:-${AIRFLOW_HOME}/data/reference/weather_region/weather_region_master.parquet}
+      ZONE_WEATHER_REGION_MAP_URI: ${ZONE_WEATHER_REGION_MAP_URI:-${AIRFLOW_HOME}/data/reference/weather_region/zone_weather_region_map.parquet}
       # weather_pipeline(#222)이 15분마다 zone_weather_snapshot Parquet 이력을 쓰는 경로 —
       # 운영 Data Lake 계약상 zone_weather_snapshot은 Silver가 아니라 Bronze다(#400):
       # bronze/weather-snapshots/weather_date=D/weather_time=T.parquet. 로컬은 이 기본값

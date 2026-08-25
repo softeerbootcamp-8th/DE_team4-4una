@@ -33,6 +33,8 @@ design and must not be invented silently.
 | `current_segment_comfort_score` | TBD | Gold/Serving (PostgreSQL) | One segment x vehicle profile's current state |
 | `current_segment_comfort_score_quarantine` | `current_segment_comfort_score_quarantine` | Gold/Serving reject log (PostgreSQL) | One row-level GX validation rejection from a `current_score` run |
 | `zone_master` | `zone_master` | Reference dimension (zone-profile pipeline) | One TLC taxi zone |
+| `weather_region_master` | `weather_region_master` | Reference dimension (local Parquet, `data/reference`) | One weather region — a group of adjacent zones sharing one Open-Meteo observation |
+| `zone_weather_region_map` | `zone_weather_region_map` | Reference dimension (local Parquet, `data/reference`) | One TLC taxi zone, with the weather region it belongs to |
 | `zone_profile_features` | `zone_profile_features` | Silver (zone-profile pipeline) | One TLC taxi zone |
 | `zone_scores` | `zone_scores` | Gold (zone-profile pipeline) | One TLC taxi zone |
 | `od_priority` | `od_priority` | Gold (zone-profile pipeline) | One selected pickup/dropoff zone pair (top 1000 by `priority_score`) |
@@ -508,7 +510,7 @@ be invisible. Two columns beyond `latest_zone_weather`'s set:
 | Attribute | Column | Type | Nullable | Description |
 | --- | --- | --- | --- | --- |
 | Fetch status | `fetch_status` | STRING | N | `success` or `failed` for this zone this run |
-| Error reason | `error_reason` | STRING | Y | Set only when `fetch_status = 'failed'`: "missing target_time in Open-Meteo response" (this zone's batch succeeded but had no matching timestamp) or "Open-Meteo request failed: ..." (the whole batch this zone was in failed — HTTP error or a location-count mismatch) |
+| Error reason | `error_reason` | STRING | Y | Set only when `fetch_status = 'failed'`: "missing target_time in Open-Meteo response" (this zone's weather region was returned but had no matching timestamp) or "Open-Meteo request failed: ..." (the request carrying this zone's region failed — HTTP error or a location-count mismatch). Failures are region-scoped, so every zone in a failed region fails together |
 
 ## `latest_zone_weather`
 
@@ -561,8 +563,8 @@ means Open-Meteo itself is down rather than N unrelated per-zone misses.
 | --- | --- | --- | --- | --- | --- |
 | Zone ID | `location_id` | INTEGER | N | PK | TLC zone code; logical reference to `zone_master.location_id` (not a DB FK — see above) |
 | Weather time | `weather_time` | TIMESTAMP | N |  | Observation time of the currently-stored reading (15-minute-aligned); overwritten on every UPSERT, so it always reflects only the latest run, never a history |
-| Latitude | `latitude` | DOUBLE | N |  | Zone query-point latitude actually sent to Open-Meteo; copied from `zone_master.representative_latitude` at fetch time, not queried ad hoc |
-| Longitude | `longitude` | DOUBLE | N |  | Zone query-point longitude actually sent to Open-Meteo; copied from `zone_master.representative_longitude` at fetch time |
+| Latitude | `latitude` | DOUBLE | N |  | Query-point latitude actually sent to Open-Meteo for this zone; copied from `weather_region_master.representative_latitude` at fetch time, not queried ad hoc. This is the **weather region's** query point, not the zone's own centre — zones sharing a region share this value, and each zone's own point stays in `zone_master.representative_latitude` |
+| Longitude | `longitude` | DOUBLE | N |  | Query-point longitude actually sent to Open-Meteo, from `weather_region_master.representative_longitude`; same region-level meaning as `latitude` |
 | Temperature | `temperature_2m_c` | DOUBLE | Y |  | 2m air temperature, degrees Celsius |
 | Precipitation | `precipitation_mm` | DOUBLE | Y |  | Total precipitation, mm |
 | Rain | `rain_mm` | DOUBLE | Y |  | Liquid rain portion, mm |
@@ -708,13 +710,80 @@ name/borough lookup; unifying the two physical tables is a separate,
 still-unplanned implementation question.
 
 `representative_latitude`/`representative_longitude` were added for issue
-#193's weather collection: the Open-Meteo collector job (a `batch-jobs`
-component, cross-service from `zone_master`'s owning `sensor-producer`
-zone-profile pipeline — flagged and confirmed with the project owner) reads
-`zone_master.parquet` directly to get each zone's query point, then writes
-the coordinates it actually used into
-`latest_zone_weather.latitude`/`.longitude` (see below) rather than
-querying `zone_master` at read time.
+#193's weather collection. The collector no longer reads them per request:
+Open-Meteo is queried at 20 weather-region points instead of 263 zone points,
+so `zone_master.parquet` is now consumed offline by
+`services/sensor-producer/src/zone_profile/build_weather_region.py`, which
+averages the member zones' representative points into each region's query
+point (`weather_region_master`, below). The collector reads that reference
+instead and still writes the coordinates it actually used into
+`latest_zone_weather.latitude`/`.longitude` rather than querying any zone
+reference at read time. The cross-service direction is unchanged — the
+grouping is produced by `zone_master`'s owning `sensor-producer` pipeline and
+consumed by `orchestration` (ADR-0005's consequence note describes the
+superseded per-zone read).
+
+## `weather_region_master`
+
+**Status:** implemented (zone -> weather-region grouping). **Layer:**
+Reference dimension. **Storage:** local Parquet /
+`data/reference/weather_region/weather_region_master.parquet`, uploaded to the
+reference S3 bucket for deployment. **Built by:**
+`services/sensor-producer/src/zone_profile/build_weather_region.py`, offline
+and on demand — not on a schedule.
+
+**Grain:** one weather region — a group of adjacent TLC taxi zones that share
+a single Open-Meteo observation.
+
+Open-Meteo weights one request by the number of coordinates in it, so querying
+all 263 zones every 15 minutes exceeds the free daily allowance. Zones are
+merged into 20 regions and each region is queried at one point. Regions are
+built by repeatedly absorbing the smallest-area region into its smallest
+adjacent region — or into the nearest region when a waterway leaves it with no
+adjacent one, since TLC zone polygons are land-only and do not touch across
+water. A region is therefore always a partition of whole zones, and region
+areas stay within roughly a 2x spread (26-57 km2). Merging by zone count
+instead lets region area vary about 14x, which matters because a region's
+sampling error is set by how far its query point is from the zones it stands
+for, not by how many zones it holds.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Region ID | `weather_region_id` | INTEGER | N | PK | 1..N, assigned in ascending order of each region's smallest member `location_id` so a rebuild from the same input keeps stable IDs |
+| Geometry | `geometry` | BINARY (WKB, EPSG:4326) | N |  | Union of the member zone polygons. For visualization and validation only — the collector reads this file with column projection and never loads it, which matters because the polygons are almost all of the file's size |
+| Query latitude | `representative_latitude` | DOUBLE | N |  | Latitude sent to Open-Meteo for this region: the mean of its member zones' `zone_master.representative_latitude`, snapped onto the region polygon when the mean falls in open water |
+| Query longitude | `representative_longitude` | DOUBLE | N |  | Longitude sent to Open-Meteo, computed the same way |
+
+The query point is the mean of the member zones' representative points rather
+than the region polygon's `representative_point()`. The latter is a
+label-placement point with no centrality guarantee; the mean shortens the
+distance from the query point to the zones it represents (mean 3.4 -> 3.1 km,
+worst region 14.5 -> 9.9 km). It is snapped back onto the polygon when a
+water-split region puts the mean over open water, where land and sea
+temperature diverge; the snap costs about 0.1 km.
+
+## `zone_weather_region_map`
+
+**Status:** implemented (zone -> weather-region grouping). **Layer:**
+Reference dimension. **Storage:** local Parquet /
+`data/reference/weather_region/zone_weather_region_map.parquet`, uploaded
+alongside `weather_region_master`. **Built by:** the same script in the same
+run.
+
+**Grain:** one TLC taxi zone. Every zone with a representative point is
+mapped exactly once; the non-spatial placeholder zones (264, 265) are absent,
+as they are from weather collection generally. Row order decides
+`zone_weather_snapshot` row order.
+
+The two files must always come from one build. `jobs.weather` compares them
+before making any request and raises if the map names a `weather_region_id`
+that `weather_region_master` does not define, rather than emitting rows with
+no query point.
+
+| Attribute | Column | Type | Nullable | Key | Description |
+| --- | --- | --- | --- | --- | --- |
+| Zone ID | `location_id` | INTEGER | N | PK | Logical reference to `zone_master.location_id` |
+| Region ID | `weather_region_id` | INTEGER | N | FK | Logical reference to `weather_region_master.weather_region_id` |
 
 ## `zone_profile_features`
 

@@ -39,6 +39,7 @@ def _collect_latest_zone_weather(data_interval_end) -> dict:
         connection.close()
     result = {
         "requested_zone_count": summary.requested_zone_count,
+        "requested_region_count": summary.requested_region_count,
         "collected_count": summary.collected_count,
         "failed_zone_count": summary.failed_zone_count,
         "snapshot_uri": summary.snapshot_uri,

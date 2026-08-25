@@ -85,7 +85,8 @@ segments whose zone changed:
 ```text
 Silver `hourly_comfort_score`
   -> 168-hour rollup -> Gold `standard_segment_comfort_score`
-     + `latest_zone_weather` (Open-Meteo, every 15 minutes)
+     + `latest_zone_weather` (Open-Meteo every 15 minutes, queried at 20
+       weather regions and spread over 263 zones)
      -> weather adjustment -> Gold `current_segment_comfort_score`
 ```
 

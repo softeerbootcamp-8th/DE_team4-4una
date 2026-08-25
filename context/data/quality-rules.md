@@ -140,7 +140,10 @@ therefore checks the current output in full rather than a single-hour slice.
 `latest_zone_weather` holds one row per TLC taxi zone — `run_weather_collection`
 UPSERTs it every 15 minutes from Open-Meteo (`jobs.weather`), and a failed
 zone's row is left untouched rather than overwritten with bad data (see
-`zone_weather_pipeline` in `services/orchestration/README.md`). Validation
+`zone_weather_pipeline` in `services/orchestration/README.md`). Open-Meteo is
+queried per weather region, not per zone, so a fetch failure takes out every
+zone in that region at once — a plausible failure size is a whole region's
+zones, not one. Validation
 therefore scopes to `weather_time = target_time` — exactly the rows this
 run's UPSERT actually wrote or refreshed, excluding both failed zones (never
 UPSERTed) and stale-skipped zones (blocked by the anti-regression `WHERE
