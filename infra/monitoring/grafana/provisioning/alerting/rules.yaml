@@ -90,3 +90,52 @@ groups:
           severity: medium
         annotations:
           summary: "stream-processor Component Status가 EVENT DATA STALE 또는 PROGRESS STALE 상태로 2분 이상 지속됨 (자동 조치 없음, 확인 필요)"
+
+  # Project EC2 루트 볼륨은 Kafka·Airflow·serving-api·dashboard·Docker 이미지가 공유한다.
+  # 가득 차면 broker만 죽는 게 아니라 scheduler와 API까지 함께 멈춘다(실제로 두 번 발생).
+  # 자동 조치는 붙이지 않는다 -- 디스크 정리는 삭제 동작이라 사람이 판단해야 한다.
+  - orgId: 1
+    name: infrastructure
+    folder: Ops Agent
+    interval: 1m
+    rules:
+      - uid: project-disk-pressure
+        title: ProjectDiskPressure
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              # node_exporter는 --path.rootfs=/rootfs로 뜨지만 mountpoint 라벨은 "/"로
+              # 그대로 노출된다(실측 확인). device/fstype은 인스턴스 교체 시 바뀔 수
+              # 있어 매칭에 쓰지 않는다.
+              expr: >-
+                100 * (1 - node_filesystem_avail_bytes{job="project-node",mountpoint="/"}
+                         / node_filesystem_size_bytes{job="project-node",mountpoint="/"})
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [80]
+        noDataState: NoData
+        execErrState: Error
+        # 대량 segment 삭제나 이미지 pull 중 순간적으로 튀는 것에 반응하지 않게 한다.
+        for: 10m
+        labels:
+          service: infrastructure
+          severity: high
+        annotations:
+          summary: "Project EC2 루트 디스크 사용률 80% 초과 (Kafka·Airflow·serving-api 공유 볼륨)"
+
