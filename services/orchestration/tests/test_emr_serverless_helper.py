@@ -104,8 +104,8 @@ def test_pyspark_python_confs_are_always_set_regardless_of_driver_env():
 
 
 def test_driver_and_executor_sizes_fit_within_application_max_capacity():
-    # Application의 maximumCapacity는 12 vCPU / 48 GB / 200 GB disk이다(#372,
-    # #386, #471에서 현재 값으로 상향). Spark 기본값(driver 4 vCPU/8G, executor
+    # Application의 maximumCapacity는 12 vCPU / 80 GB / 300 GB disk이다(#372,
+    # #386, #471, #508에서 현재 값으로 상향). Spark 기본값(driver 4 vCPU/8G, executor
     # 2 vCPU/8G)은 driver 혼자 vCPU 예산을 전부 써버려 executor가 하나도 못 뜬다 —
     # 실제 Job Run에서 ApplicationMaxCapacityExceededException으로 재현됨.
     # driver를 작게 고정해 executor가 안정적으로 뜨도록 상한을 코드에 못박는다.
@@ -132,7 +132,8 @@ def test_dynamic_allocation_is_capped_to_match_executor_instances():
     # 그 이력만으로 EMR Serverless가 실제로는 성공한 Job Run을 FAILED로 판정한
     # 것이 실제 Job Run 재현으로 확인됐다(#372 재발 조사). min/max/initial을
     # 전부 executor.instances(#471에서 2로 상향)와 맞춰 애초에 추가 요청이
-    # 발생하지 않게 한다.
+    # 발생하지 않게 한다. #508에서 이 파생을 SparkResourceProfile.conf_flags에
+    # 넣어 세 값이 어긋나는 것 자체가 불가능해졌다.
     operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
 
     params = operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
@@ -280,3 +281,108 @@ def test_stop_task_waits_for_the_stopped_state_within_a_bounded_window():
     assert operator.wait_for_completion is True
     assert operator.waiter_delay == 15
     assert operator.waiter_max_attempts == 20
+
+
+# --- #508: job별 자원 프로파일 ---
+
+
+def _params(profile: str) -> str:
+    operator = _build_operator(
+        task_id="run_thing", entry_point_arguments=["cmd"], profile=profile
+    )
+    return operator.job_driver["sparkSubmit"]["sparkSubmitParameters"]
+
+
+def _gigabytes(value: str) -> int:
+    """'8g' / '20G' 같은 Spark 메모리·디스크 표기를 GB 정수로 바꾼다."""
+    assert value[-1] in "gG", value
+    return int(value[:-1])
+
+
+def test_default_profile_keeps_the_sizes_that_were_already_deployed():
+    params = _params("default")
+
+    assert "spark.driver.cores=1" in params
+    assert "spark.driver.memory=2g" in params
+    assert "spark.driver.memoryOverhead=6g" in params
+    assert "spark.emr-serverless.driver.disk=20G" in params
+    assert "spark.executor.cores=2" in params
+    assert "spark.executor.memory=8g" in params
+    assert "spark.executor.memoryOverhead=6g" in params
+    assert "spark.emr-serverless.executor.disk=60G" in params
+    assert "spark.executor.instances=2" in params
+
+
+def test_heavy_profile_only_raises_the_executor_count():
+    # run_sensor_processing 전용이다. driver는 줄이지 않는다 —
+    # map_matching/candidates.py:109가 road_segment 약 17만 건을 driver로 collect해
+    # broadcast payload를 만들기 때문에 driver도 Python 메모리를 실제로 쓴다.
+    params = _params("heavy")
+
+    assert "spark.executor.instances=4" in params
+    assert "spark.driver.cores=1" in params
+    assert "spark.driver.memory=2g" in params
+    assert "spark.executor.memory=8g" in params
+
+
+def test_audit_profile_enlarges_the_driver_and_shrinks_the_executors():
+    # audit job은 executor를 거의 쓰지 않고(실측: audit_current의 executor 존재
+    # 시간 7초) driver가 exit 137로 죽는다 — Great Expectations가
+    # gold_audit_validation.py:112의 `SELECT * FROM {table}`로 997,332행을 driver의
+    # pandas에 전량 적재한다. 1 vCPU는 EMR Serverless 허용 메모리 상한이 8 GB라
+    # 그보다 크게 주려면 2 vCPU로 가야 한다.
+    params = _params("audit")
+
+    assert "spark.driver.cores=2" in params
+    assert "spark.driver.memory=4g" in params
+    assert "spark.driver.memoryOverhead=12g" in params
+    assert "spark.executor.instances=1" in params
+
+
+def test_every_profile_pins_dynamic_allocation_to_its_executor_instances():
+    # 세 값이 executor.instances와 어긋나면 EMR Serverless가 여분 executor를 계속
+    # 요청하다 ApplicationMaxCapacityExceededException을 반복하고, 실제 계산이
+    # 성공해도 job run을 FAILED로 판정한다(#372).
+    from emr_serverless import RESOURCE_PROFILES
+
+    for name, profile in RESOURCE_PROFILES.items():
+        params = _params(name)
+        instances = profile.executor_instances
+        assert f"spark.dynamicAllocation.minExecutors={instances}" in params, name
+        assert f"spark.dynamicAllocation.maxExecutors={instances}" in params, name
+        assert f"spark.dynamicAllocation.initialExecutors={instances}" in params, name
+
+
+def test_every_profile_fits_within_the_application_maximum_capacity():
+    # Application maximumCapacity는 12 vCPU / 80 GB / 300 GB다(#508).
+    # EMR Serverless worker의 메모리는 memory + memoryOverhead이고 이 값이
+    # 과금·용량에 반영된다 — 실측 GB-h/vCPU-h 7.20~7.22가 이를 확인해 준다.
+    from emr_serverless import RESOURCE_PROFILES
+
+    for name, profile in RESOURCE_PROFILES.items():
+        instances = int(profile.executor_instances)
+        vcpu = int(profile.driver_cores) + int(profile.executor_cores) * instances
+        memory = (
+            _gigabytes(profile.driver_memory)
+            + _gigabytes(profile.driver_memory_overhead)
+            + (
+                _gigabytes(profile.executor_memory)
+                + _gigabytes(profile.executor_memory_overhead)
+            )
+            * instances
+        )
+        disk = (
+            _gigabytes(profile.driver_disk) + _gigabytes(profile.executor_disk) * instances
+        )
+        assert vcpu <= 12, (name, vcpu)
+        assert memory <= 80, (name, memory)
+        assert disk <= 300, (name, disk)
+
+
+def test_unknown_profile_name_fails_loudly():
+    import pytest
+
+    with pytest.raises(KeyError):
+        _build_operator(
+            task_id="run_thing", entry_point_arguments=["cmd"], profile="nope"
+        )

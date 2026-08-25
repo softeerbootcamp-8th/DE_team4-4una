@@ -14,6 +14,7 @@ Variable을 아는 곳이 이 모듈이라 stop 쪽도 같은 자리에 둔다.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import Any
 
 from airflow.providers.amazon.aws.operators.emr import (
@@ -50,47 +51,107 @@ _EMR_SERVERLESS_LOG_S3_URI_TEMPLATE = (
 # batch_jobs를 못 찾는다(#360). Dockerfile의 ENV와 병행해 모든 Job Run에 강제한다.
 _PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
 
-# Application의 maximumCapacity는 12 vCPU / 48 GB / 200 GB disk이다(#372에서
-# 처음 4 vCPU/16 GB로 시작, #471에서 현재 값으로 상향). Spark 기본값(driver
-# 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을 많이 써버려 executor가
-# 못 뜨고 ApplicationMaxCapacityExceededException으로 죽는 문제가 있었다(#372) —
+
+@dataclass(frozen=True)
+class SparkResourceProfile:
+    """job run 하나가 요청할 driver/executor 크기 (#508).
+
+    EMR Serverless는 Application이 워커를 공유하지 않고 job run마다 전용
+    driver·executor 세트를 새로 띄운다. 그래서 job의 성격에 따라 크기를 다르게
+    요청할 수 있고, job run 개수가 그대로면 cold start 총량도 그대로다
+    (프로비저닝 실측 84~91초는 워커 크기·Application 상태와 무관하게 일정하다).
+
+    worker 하나의 실제 메모리는 `memory + memoryOverhead`이고 이 값이 과금과
+    maximumCapacity 계산에 들어간다 — 경합 없는 job run의 실측
+    GB-h/vCPU-h 7.20~7.22가 이를 확인해 준다.
+    """
+
+    driver_cores: str
+    driver_memory: str
+    driver_memory_overhead: str
+    driver_disk: str
+    executor_cores: str
+    executor_memory: str
+    executor_memory_overhead: str
+    executor_disk: str
+    executor_instances: str
+
+    def conf_flags(self) -> list[str]:
+        return [
+            f"--conf spark.driver.cores={self.driver_cores}",
+            f"--conf spark.driver.memory={self.driver_memory}",
+            f"--conf spark.driver.memoryOverhead={self.driver_memory_overhead}",
+            f"--conf spark.emr-serverless.driver.disk={self.driver_disk}",
+            f"--conf spark.executor.cores={self.executor_cores}",
+            f"--conf spark.executor.memory={self.executor_memory}",
+            f"--conf spark.executor.memoryOverhead={self.executor_memory_overhead}",
+            f"--conf spark.emr-serverless.executor.disk={self.executor_disk}",
+            f"--conf spark.executor.instances={self.executor_instances}",
+            # EMR Serverless는 dynamic allocation이 기본 켜져 있어 실제 목표
+            # executor 수가 max(initialExecutors, minExecutors, executor.instances)로
+            # 계산된다. EMR 기본값이 이보다 크면 Spark가 여분 executor를 계속
+            # 요청하다 ApplicationMaxCapacityExceededException을 반복하고, 실제
+            # 계산이 성공해도 Job Run이 FAILED로 판정된다(#372). 셋을 instances에서
+            # 파생시켜 값이 어긋나는 것이 애초에 불가능하게 한다.
+            f"--conf spark.dynamicAllocation.minExecutors={self.executor_instances}",
+            f"--conf spark.dynamicAllocation.maxExecutors={self.executor_instances}",
+            f"--conf spark.dynamicAllocation.initialExecutors={self.executor_instances}",
+        ]
+
+
+# 기본 프로파일 = 지금까지 모든 job run이 쓰던 값이다. 합계는 5 vCPU / 36 GB /
+# 140 GB다 — 이전 주석이 30 GB로 적었던 것은 driver의 memoryOverhead 6g를 빼먹은
+# 오기였다(#508에서 과금 실측으로 확인: GB-h / vCPU-h = 7.20~7.22 = 36 / 5).
+#
+# Spark 기본값(driver 4 vCPU/8G, executor 2 vCPU/8G)은 driver 혼자 vCPU 예산을 많이
+# 써버려 executor가 못 뜨고 ApplicationMaxCapacityExceededException으로 죽었다(#372) —
 # driver를 작게 고정해 executor가 안정적으로 뜨도록 한다.
-_SPARK_DRIVER_CORES = "1"
-_SPARK_DRIVER_MEMORY = "2g"
-_SPARK_EXECUTOR_CORES = "2"
-_SPARK_EXECUTOR_MEMORY = "8g"
-# sensor processing을 포함한 batch job 처리 시간 단축을 위해 1 -> 2로 늘렸다(#471).
-# dynamic allocation min/max/initial도 반드시 이 값과 동일하게 맞춘다(아래 참고,
-# 어긋나면 #372처럼 ApplicationMaxCapacityExceededException이 재발한다).
-_SPARK_EXECUTOR_INSTANCES = "2"
+#
+# executor의 memoryOverhead 6g는 Map Matching(find_segment_candidates의 mapInPandas)이
+# 파티션마다 Python worker 프로세스에서 road_segment broadcast(약 17만 건)로 STRtree를
+# 만드는 데 필요하다. cores=2라 이 무거운 작업이 최대 2개 동시에 뜨는데, overhead가
+# 기본값(~10%, 약 800MB)뿐이었을 때 executor가 exit code 137(SIGKILL)로 반복해서
+# 죽었다(#386). disk 60G는 실행 중 executor의 /tmp가 꽉 차 Job이 실패한 이력
+# 때문이다(#443).
+_DEFAULT_PROFILE = SparkResourceProfile(
+    driver_cores="1",
+    driver_memory="2g",
+    driver_memory_overhead="6g",
+    driver_disk="20G",
+    executor_cores="2",
+    executor_memory="8g",
+    executor_memory_overhead="6g",
+    executor_disk="60G",
+    executor_instances="2",
+)
 
-# Map Matching(find_segment_candidates의 mapInPandas)은 파티션마다 Python
-# worker 프로세스에서 road_segment broadcast(약 17만 건)로 STRtree를 새로
-# 만든다. cores=2라 이 무거운 작업이 최대 2개 동시에 뜨는데, JVM heap 밖
-# overhead가 이전엔 기본값(~10%, 약 800MB)뿐이라 그 메모리를 못 버티고
-# executor가 exit code 137(SIGKILL)로 반복해서 죽었다(#386, 그 시점 EMR Serverless
-# Application maximumCapacity 8 vCPU/32 GB 기준으로 적용). executor 총 사용량은
-# driver(1c/2g) + executor 2개(각 2c/8g+6g=14g) = 5 vCPU/30 GB로 현재
-# maximumCapacity(12 vCPU/48 GB, #471) 안에 여유 있게 들어간다.
-_SPARK_EXECUTOR_MEMORY_OVERHEAD = "6g"
-_SPARK_DRIVER_MEMORY_OVERHEAD = "6g"
+# run_sensor_processing 전용. 합계 9 vCPU / 64 GB / 260 GB.
+# 이 job이 가장 무겁다 — 실측 0.783 vCPU-h, 2,953 tasks로 run_hourly_scoring
+# (0.073 vCPU-h)의 10배다. driver는 줄이지 않는다: map_matching/candidates.py:109가
+# road_segment를 driver로 collect해 broadcast payload를 만들기 때문에 driver도
+# Python 메모리를 실제로 쓴다.
+_HEAVY_PROFILE = replace(_DEFAULT_PROFILE, executor_instances="4")
 
-# 기본 disk로 standard_score_pipeline 실행 중 executor의 /tmp가 꽉 차 Job이
-# 실패했다(#443). driver+executor 2개 합(20G + 2*60G = 140G)이 Application 최대
-# disk(200GB, #471에서 상향) 안에 들어오게 잡는다.
-_SPARK_DRIVER_DISK = "20G"
-_SPARK_EXECUTOR_DISK = "60G"
+# audit_* 전용. 합계 4 vCPU / 30 GB / 80 GB.
+# audit은 executor를 거의 쓰지 않고(실측: audit_current의 executor 존재 시간 7초)
+# driver가 exit 137로 죽는다 — Great Expectations가 gold_audit_validation.py:112의
+# `SELECT * FROM {table}`로 테이블 전량(997,332행)을 driver의 pandas에 올린다.
+# 1 vCPU는 EMR Serverless 허용 메모리 상한이 8 GB인데 그것이 지금 죽는 값이라,
+# 더 주려면 2 vCPU로 가야 한다. 전량 적재 자체를 없애는 것이 근본 해결이며 별도
+# 과제로 남겼다(#508 설계 문서).
+_AUDIT_PROFILE = replace(
+    _DEFAULT_PROFILE,
+    driver_cores="2",
+    driver_memory="4g",
+    driver_memory_overhead="12g",
+    executor_instances="1",
+)
 
-# EMR Serverless는 dynamic allocation이 기본 켜져 있어서, 실제 목표 executor 수는
-# spark.executor.instances가 아니라 max(dynamicAllocation.initialExecutors,
-# minExecutors, executor.instances)로 계산된다. EMR 기본값이 1보다 커서 Spark가
-# 계속 여분 executor를 요청하다 ApplicationMaxCapacityExceededException을
-# 반복적으로 만나고, 실제 계산은 성공해도 이 이력만으로 Job Run이 FAILED
-# 처리되는 것이 확인됐다(#372 재발 조사). min/max/initial을 전부 executor.instances와
-# 맞춰 애초에 추가 요청이 발생하지 않게 한다.
-_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS = "2"
-_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS = "2"
-_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS = "2"
+RESOURCE_PROFILES: dict[str, SparkResourceProfile] = {
+    "default": _DEFAULT_PROFILE,
+    "heavy": _HEAVY_PROFILE,
+    "audit": _AUDIT_PROFILE,
+}
 
 
 def submit_batch_jobs_command(
@@ -99,6 +160,7 @@ def submit_batch_jobs_command(
     *,
     driver_env: dict[str, str] | None = None,
     outlets: list[Any] | None = None,
+    profile: str = "default",
 ) -> EmrServerlessStartJobOperator:
     """batch-jobs CLI 커맨드 하나를 EMR Serverless Job Run으로 제출하는 task를 만든다.
 
@@ -110,6 +172,12 @@ def submit_batch_jobs_command(
     Job Run 설정에 평문으로 남아 GetJobRun API로 조회 가능하다 — Postgres
     비밀번호처럼 민감한 값을 이 경로로 넘기는 건 임시 방편이며(#292 논의,
     Secrets Manager 도입 전까지), 후속 이슈에서 IAM DB 인증 등으로 교체할 예정이다.
+
+    `profile`은 이 Job Run이 요청할 driver/executor 크기를 고른다(#508) —
+    `RESOURCE_PROFILES`의 키여야 하고, 없는 이름을 넘기면 DAG 파싱 시점에
+    KeyError로 바로 드러난다. job마다 필요한 자원이 10배까지 차이나는데
+    (run_sensor_processing 0.783 vCPU-h 대 run_hourly_scoring 0.073 vCPU-h)
+    지금까지는 전부 같은 크기를 썼다.
     """
     spark_submit: dict[str, Any] = {
         "entryPoint": _ENTRY_POINT_TEMPLATE,
@@ -130,18 +198,7 @@ def submit_batch_jobs_command(
         f"--conf spark.executorEnv.PYSPARK_PYTHON={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.pyspark.python={_PYSPARK_PYTHON_PATH}",
         f"--conf spark.pyspark.driver.python={_PYSPARK_PYTHON_PATH}",
-        f"--conf spark.driver.cores={_SPARK_DRIVER_CORES}",
-        f"--conf spark.driver.memory={_SPARK_DRIVER_MEMORY}",
-        f"--conf spark.driver.memoryOverhead={_SPARK_DRIVER_MEMORY_OVERHEAD}",
-        f"--conf spark.emr-serverless.driver.disk={_SPARK_DRIVER_DISK}",
-        f"--conf spark.executor.cores={_SPARK_EXECUTOR_CORES}",
-        f"--conf spark.executor.memory={_SPARK_EXECUTOR_MEMORY}",
-        f"--conf spark.executor.memoryOverhead={_SPARK_EXECUTOR_MEMORY_OVERHEAD}",
-        f"--conf spark.emr-serverless.executor.disk={_SPARK_EXECUTOR_DISK}",
-        f"--conf spark.executor.instances={_SPARK_EXECUTOR_INSTANCES}",
-        f"--conf spark.dynamicAllocation.minExecutors={_SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS}",
-        f"--conf spark.dynamicAllocation.maxExecutors={_SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS}",
-        f"--conf spark.dynamicAllocation.initialExecutors={_SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS}",
+        *RESOURCE_PROFILES[profile].conf_flags(),
         *(
             f"--conf spark.emr-serverless.driverEnv.{key}={value}"
             for key, value in (driver_env or {}).items()
