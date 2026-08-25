@@ -178,36 +178,56 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
     아니다). 로컬 기본값은 `http://localhost:8080`, 운영(EC2)에서는 실제
     접속 URL로 채운다.
 
-## hourly_comfort_score 파티션 전환 (#469) — 배포 시 1회
+## hourly_comfort_score 파티션 전환 (#469) — 2026-08-25 완료
 
-`hourly_comfort_score`는 원래 파티션 없이 루트에 평면으로 쌓였다. 파티션 writer를
-배포하기 전에 기존 평면 데이터를 루트에서 치워야 한다 — 평면 파일과 파티션
-디렉터리가 한 루트에 공존하면 `spark.read.parquet()`가
-`Conflicting directory structures`로 실패한다.
+`hourly_comfort_score`는 원래 파티션 없이 루트에 평면으로 쌓였다. 파티션 writer가
+동작하려면 기존 평면 데이터를 루트에서 치워야 한다 — 평면 파일과 파티션 디렉터리가
+한 루트에 공존하면 `spark.read.parquet()`가 `Conflicting directory structures`로
+실패하고, 루트를 읽는 `run_standard_score`가 죽는다.
 
-재파티션하지 않고 reference 버킷으로 옮긴다. 삭제가 아니라 이동이므로 판단이
+재파티션하지 않고 reference 버킷으로 옮겼다. 삭제가 아니라 이동이므로 판단이
 틀렸을 때 되꺼낼 수 있다.
 
-```bash
-# 1. standard_score_pipeline DAG 일시정지 (웹 UI 또는 CLI)
-
-# 2. Silver3 평면 데이터를 아카이브로 이동
-aws s3 mv --recursive \
-    s3://<lake>/silver/hourly_comfort_score/ \
-    s3://<reference>/raw/comfort_score_archive/hourly_comfort_score/
-
-# 3. quarantine도 같이 (읽는 곳은 없지만 같은 문제를 갖는다)
-aws s3 mv --recursive \
-    s3://<lake>/quarantine/hourly_comfort_score/ \
-    s3://<reference>/raw/comfort_score_archive/quarantine_hourly_comfort_score/
-
-# 4. 코드 배포 (파티션 writer/reader)
-
-# 5. DAG 재개, 첫 실행 확인
+```text
+s3://de4-reference-<account>-ap-northeast-2-an/raw/comfort_score_archive/
+  hourly_comfort_score/             17개 객체 / 14,932,639 bytes
+  quarantine_hourly_comfort_score/   2개 객체 /         736 bytes
 ```
 
-**4단계를 2~3단계보다 먼저 하면 안 된다.** 구 writer가 평면 파일을 다시 만들어
-같은 문제가 재발한다.
+### `develop` 머지가 곧 배포다
+
+이 전환에서 가장 중요한 제약이다. `deploy-batch-jobs.yml`과
+`deploy-orchestration.yml`이 **`develop` push에 자동 트리거**되고, 경로 필터에
+`services/batch-jobs/**`와 `services/orchestration/{dags,jobs}`가 들어 있다. 즉
+**PR을 머지하는 순간 배포가 나간다** — "머지한 뒤 사람이 배포한다"는 단계는 없다.
+
+그래서 아카이브 이동은 **머지보다 먼저** 끝나 있어야 한다. 같은 종류의 전환을 다시
+할 때 순서는 이렇다.
+
+```bash
+# 1. DAG 일시정지
+docker exec compose-airflow-scheduler-1     airflow dags pause standard_score_pipeline
+
+# 2. 평면 데이터를 아카이브로 이동 (경로는 Airflow Variable 참고:
+#    HOURLY_COMFORT_OUTPUT_PATH, HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
+#    REFERENCE_DATA_LAKE_URI)
+aws s3 mv --recursive --dryrun \
+    s3://<lake>/silver/hourly_comfort_score/ \
+    s3://<reference>/raw/comfort_score_archive/hourly_comfort_score/
+# 확인 후 --dryrun 없이 재실행. quarantine도 동일하게.
+
+# 3. PR 머지 (= 자동 배포)
+
+# 4. DAG 재개 후 첫 실행 확인
+docker exec compose-airflow-scheduler-1 \
+    airflow dags unpause standard_score_pipeline
+```
+
+**2026-08-25에는 이 순서가 지켜지지 않았다.** PR 세 건을 먼저 머지해 07:54에 배포가
+나갔고, 아카이브 이동은 08:05에 이뤄졌다. 그 사이 신 writer가 파티션을 쓰기 전에
+(직전 실행이 07:32에 끝나 있었고 다음 실행은 08:00 시작 후 약 20분간
+`sensor_processing`에 머물렀다) 이동을 마쳐 사고로 이어지지는 않았다. 운이 좋았던
+것이지 안전한 순서가 아니었다.
 
 ### 전환 후 168시간은 점수가 눌린다
 
