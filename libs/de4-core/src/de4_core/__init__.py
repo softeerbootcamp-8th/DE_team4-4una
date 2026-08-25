@@ -1,6 +1,12 @@
 """Shared contracts and domain primitives for DE4 services."""
 
 from de4_core.environment import DataArtifact, RoadEnvironmentManifest, SourceSnapshot
+from de4_core.gold_snapshot import (
+    StandardGoldManifest,
+    standard_manifest_uri,
+    standard_snapshot_uri,
+    standard_version_uri,
+)
 from de4_core.perf import PERF_LOG_PREFIX, perf_phase
 from de4_core.sensor import SensorEvent
 from de4_core.storage import ObjectStore, join_uri
@@ -14,6 +20,10 @@ __all__ = [
     "RoadEnvironmentManifest",
     "SensorEvent",
     "SourceSnapshot",
+    "StandardGoldManifest",
     "join_uri",
     "perf_phase",
+    "standard_manifest_uri",
+    "standard_snapshot_uri",
+    "standard_version_uri",
 ]

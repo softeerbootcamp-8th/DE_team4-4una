@@ -22,6 +22,24 @@ class ComfortScoreConfig:
     min_traffic_threshold: ProvisionalThreshold
     shrinkage_k: ProvisionalThreshold
 
+    def __post_init__(self) -> None:
+        # 점수 0~100은 방향 가중치가 비음수이고 합이 1이며 shrinkage_k가 비음수일
+        # 때만 성립한다(ADR-0012). 어긋나면 comfort_score가 범위를 벗어나는데,
+        # 방향 점수는 각각 범위 안이라 GX도 통과하고 Postgres CHECK 제약에서야
+        # 드러난다 — 계산을 다 마친 뒤다.
+        weights = {
+            "vertical_weight": self.vertical_weight.value,
+            "longitudinal_weight": self.longitudinal_weight.value,
+            "lateral_weight": self.lateral_weight.value,
+        }
+        for name, value in weights.items():
+            if value < 0:
+                raise ValueError(f"{name} must not be negative")
+        if abs(sum(weights.values()) - 1.0) > 1e-9:
+            raise ValueError("direction weights must sum to 1")
+        if self.shrinkage_k.value < 0:
+            raise ValueError("shrinkage_k must not be negative")
+
 
 # comfort_score.yaml을 읽어 ComfortScoreConfig로 검증한다
 def load_comfort_score_config(

@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 _SPARK_SESSION_PHASE = "spark_session"
 _POSTGRES_CONNECT_PHASE = "postgres_connect"
 _JOB_PHASE = "job"
+# 검증은 생산 job과 같은 Job Run에서 돈다(ADR-0012) — 계산 구간과 구분해 계측한다.
+_VALIDATION_PHASE = "validation"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,22 +82,6 @@ def build_parser() -> argparse.ArgumentParser:
     standard_parser = subparsers.add_parser("load-standard-segment-comfort-score")
     standard_parser.add_argument("--as-of", required=True)
 
-    validate_sensor_processing_parser = subparsers.add_parser("validate-sensor-processing")
-    validate_sensor_processing_parser.add_argument(
-        "--target-hour", type=datetime.fromisoformat, required=True
-    )
-    validate_sensor_processing_parser.add_argument("--output-path")
-    validate_sensor_processing_parser.add_argument("--quarantine-output-path")
-
-    validate_hourly_scoring_parser = subparsers.add_parser("validate-hourly-scoring")
-    validate_hourly_scoring_parser.add_argument(
-        "--target-hour", type=datetime.fromisoformat, required=True
-    )
-    validate_hourly_scoring_parser.add_argument("--output-path")
-
-    validate_standard_score_parser = subparsers.add_parser("validate-standard-score")
-    validate_standard_score_parser.add_argument("--as-of", required=True)
-
     audit_gold_parser = subparsers.add_parser("audit-gold")
     audit_gold_parser.add_argument(
         "--table",
@@ -132,9 +118,15 @@ def add_bbox_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def run_cleansing(arguments: argparse.Namespace) -> None:
+    from dataclasses import replace
+
     from batch_jobs.cleansing.config import CleansingJobConfig
     from batch_jobs.cleansing.job import build_spark_session, run_cleansing_job
     from batch_jobs.hourly_segment_feature_job import HourlySegmentFeatureJobConfig
+    from batch_jobs.sensor_processing_validation import (
+        SensorProcessingValidationConfig,
+        run_sensor_processing_validation,
+    )
 
     cleansing_defaults = CleansingJobConfig.from_env()
     feature_defaults = HourlySegmentFeatureJobConfig.from_env()
@@ -201,15 +193,33 @@ def run_cleansing(arguments: argparse.Namespace) -> None:
                 sort_keys=True,
             )
         )
+        # 검증이 실패해도 무엇이 만들어졌는지는 남도록 print 뒤에 둔다. 경로는 env를
+        # 다시 읽지 않고 방금 쓴 설정을 그대로 넘긴다 — 어긋날 여지를 없앤다.
+        with perf_phase(logger, f"sensor_processing.{_VALIDATION_PHASE}"):
+            run_sensor_processing_validation(
+                spark,
+                replace(
+                    SensorProcessingValidationConfig.from_env(),
+                    feature_output_path=feature_config.output_path,
+                    quarantine_output_path=cleansing_config.quarantine_output_path,
+                ),
+                arguments.target_hour,
+            )
     finally:
         spark.stop()
 
 
 def run_hourly_scoring(arguments: argparse.Namespace) -> None:
+    from dataclasses import replace
+
     from batch_jobs.hourly_comfort_job import (
         HourlyComfortJobConfig,
         build_spark_session,
         run_hourly_comfort_job,
+    )
+    from batch_jobs.hourly_scoring_validation import (
+        HourlyScoringValidationConfig,
+        run_hourly_scoring_validation,
     )
 
     defaults = HourlyComfortJobConfig.from_env()
@@ -244,6 +254,16 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
                 sort_keys=True,
             )
         )
+        # run_cleansing과 같은 이유로 print 뒤에 두고, 경로는 방금 쓴 설정을 넘긴다.
+        with perf_phase(logger, f"hourly_scoring.{_VALIDATION_PHASE}"):
+            run_hourly_scoring_validation(
+                spark,
+                replace(
+                    HourlyScoringValidationConfig.from_env(),
+                    score_output_path=config.score_output_path,
+                ),
+                arguments.target_hour,
+            )
     finally:
         spark.stop()
 
@@ -354,129 +374,6 @@ def run_gold_audit_cli(arguments: argparse.Namespace) -> None:
         connection.close()
 
 
-def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
-    from batch_jobs.sensor_processing_validation import (
-        SensorProcessingValidationConfig,
-        build_spark_session,
-        run_sensor_processing_validation,
-    )
-
-    defaults = SensorProcessingValidationConfig.from_env()
-    config = SensorProcessingValidationConfig(
-        feature_output_path=arguments.output_path or defaults.feature_output_path,
-        quarantine_output_path=(
-            arguments.quarantine_output_path or defaults.quarantine_output_path
-        ),
-        feature_ranges_suite_path=defaults.feature_ranges_suite_path,
-        quarantine_rate_suite_path=defaults.quarantine_rate_suite_path,
-    )
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    with perf_phase(logger, f"validate_sensor_processing.{_SPARK_SESSION_PHASE}"):
-        spark = build_spark_session()
-    try:
-        with perf_phase(logger, f"validate_sensor_processing.{_JOB_PHASE}"):
-            summary = run_sensor_processing_validation(
-                spark, config, arguments.target_hour
-            )
-        print(
-            json.dumps(
-                {
-                    "feature_row_count": summary.feature_row_count,
-                    "accepted_sample_count": summary.accepted_sample_count,
-                    "quarantine_row_count": summary.quarantine_row_count,
-                    "cleansing_quarantine_row_count": (
-                        summary.cleansing_quarantine_row_count
-                    ),
-                    "map_matching_quarantine_row_count": (
-                        summary.map_matching_quarantine_row_count
-                    ),
-                    "quarantine_rate": summary.quarantine_rate,
-                    "cleansing_quarantine_rate": summary.cleansing_quarantine_rate,
-                    "map_matching_quarantine_rate": summary.map_matching_quarantine_rate,
-                    "success": summary.success,
-                },
-                sort_keys=True,
-            )
-        )
-    finally:
-        spark.stop()
-
-
-def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
-    from batch_jobs.hourly_scoring_validation import (
-        HourlyScoringValidationConfig,
-        build_spark_session,
-        run_hourly_scoring_validation,
-    )
-
-    defaults = HourlyScoringValidationConfig.from_env()
-    config = HourlyScoringValidationConfig(
-        score_output_path=arguments.output_path or defaults.score_output_path,
-        score_ranges_suite_path=defaults.score_ranges_suite_path,
-    )
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    with perf_phase(logger, f"validate_hourly_scoring.{_SPARK_SESSION_PHASE}"):
-        spark = build_spark_session()
-    try:
-        with perf_phase(logger, f"validate_hourly_scoring.{_JOB_PHASE}"):
-            summary = run_hourly_scoring_validation(
-                spark, config, arguments.target_hour
-            )
-        print(
-            json.dumps(
-                {
-                    "target_hour": summary.target_hour.isoformat(),
-                    "row_count": summary.row_count,
-                    "success": summary.success,
-                },
-                sort_keys=True,
-            )
-        )
-    finally:
-        spark.stop()
-
-
-def run_standard_score_validation_cli(arguments: argparse.Namespace) -> None:
-    import psycopg2
-
-    from batch_jobs.standard_score_validation import (
-        StandardScoreValidationConfig,
-        run_standard_score_validation,
-    )
-
-    as_of = datetime.fromisoformat(arguments.as_of)
-    if as_of.utcoffset() is None:
-        raise ValueError(
-            "--as-of must include a UTC offset, e.g. 2026-08-19T00:00:00+00:00"
-        )
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    config = StandardScoreValidationConfig.from_env()
-    # 이 커맨드는 Spark를 쓰지 않는다(ADR-0004: Gold/Postgres는 SqlAlchemy 경로)
-    # — spark_session 구간이 없는 유일한 파이프라인 Job Run이다.
-    with perf_phase(logger, f"validate_standard_score.{_POSTGRES_CONNECT_PHASE}"):
-        connection = psycopg2.connect(
-            host=config.postgres_host,
-            port=config.postgres_port,
-            dbname=config.postgres_db,
-            user=config.postgres_user,
-            password=config.postgres_password,
-        )
-    try:
-        with perf_phase(logger, f"validate_standard_score.{_JOB_PHASE}"):
-            summary = run_standard_score_validation(config, as_of, connection)
-        print(
-            json.dumps(
-                {"row_count": summary.row_count, "success": summary.success},
-                sort_keys=True,
-            )
-        )
-    finally:
-        connection.close()
-
-
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -490,15 +387,6 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "load-standard-segment-comfort-score":
         run_standard_comfort_score_loading(arguments)
-        return
-    if arguments.command == "validate-sensor-processing":
-        run_sensor_processing_validation_cli(arguments)
-        return
-    if arguments.command == "validate-hourly-scoring":
-        run_hourly_scoring_validation_cli(arguments)
-        return
-    if arguments.command == "validate-standard-score":
-        run_standard_score_validation_cli(arguments)
         return
     if arguments.command == "audit-gold":
         run_gold_audit_cli(arguments)

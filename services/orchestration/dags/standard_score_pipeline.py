@@ -96,6 +96,20 @@ _HOURLY_COMFORT_REJECTED_OUTPUT_PATH = (
     "{{ var.value.get('HOURLY_COMFORT_REJECTED_OUTPUT_PATH', "
     "'data/local-lake/quarantine/hourly_comfort_score') }}"
 )
+# run_standard_score가 쓴 Gold snapshot을 validate_standard_score가 그대로 읽어야
+# 하므로(#495, ADR-0012) 위 경로 상수들과 같은 이유로 한 곳에서 정의해 공유한다.
+# airflow.yaml이 이 env var를 항상 선언해서, 호스트 .env에 값이 없으면 docker
+# compose가 빈 문자열로 채운다 — 그러면 var.value.get의 default가 아니라 그 빈
+# 문자열이 그대로 렌더링된다. emr_serverless._EMR_SERVERLESS_LOG_S3_URI_TEMPLATE와
+# 같은 이유로 `or`를 한 번 더 둔다(#409). 폴백 값은 StandardComfortScoreJobConfig
+# .from_env()의 것과 같아야 한다.
+_STANDARD_COMFORT_SCORE_DATA_LAKE_URI = (
+    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', 'data/local-lake') "
+    "or 'data/local-lake' }}"
+)
+_STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI = (
+    "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
+)
 
 
 def _resolve_road_snapshot_date() -> str:
@@ -136,6 +150,29 @@ def _resolve_road_snapshot_date() -> str:
         }
     )
     return fallback
+
+
+def _validate_standard_score(data_lake_uri: str, gold_output_uri: str, as_of: str) -> dict:
+    """run_standard_score가 쓴 Gold snapshot을 검증한다 (#495, ADR-0012).
+
+    Spark가 필요 없어 EMR Serverless Job Run 대신 여기서 직접 돈다. de4_core와
+    jobs는 dag-processor에 없으므로(airflow.yaml 참고) 이 함수 안에서만 import한다.
+    """
+    import datetime as dt
+
+    from de4_core import join_uri
+    from jobs.standard_score_validation import validate_standard_score
+
+    # 폴백은 StandardComfortScoreJobConfig와 같아야 한다 — 어긋나면 쓴 곳과 읽는 곳이
+    # 달라진다(comfort_score/standard_job.py).
+    root_uri = gold_output_uri or join_uri(
+        data_lake_uri, "gold", "standard_segment_comfort_score"
+    )
+    summary = validate_standard_score(root_uri, dt.datetime.fromisoformat(as_of))
+
+    result = {"row_count": summary.row_count, "success": summary.success}
+    print(result)
+    return result
 
 
 def _report_processing_counts(
@@ -232,27 +269,11 @@ with DAG(
                 _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
             ],
         )
-        # validate_sensor_processing은 run_sensor_processing이 방금 쓴
-        # hourly_segment_features/quarantine 파티션만 읽으므로, 같은 Airflow
-        # Variable(HOURLY_SEGMENT_FEATURE_OUTPUT_PATH, CLEANSING_QUARANTINE_OUTPUT_PATH)을
-        # 재사용해 항상 같은 경로를 가리키게 한다(#220, ADR-0004). GX가 통계적/
-        # 선언적 규칙(물리량 범위, quarantine 비율)을 검증하고 실패하면 이 task가
-        # 실패해 scoring으로 넘어가지 않는다(hard fail). 스키마/필수값/PK 중복 같은
-        # 하드 인바리언트는 run_sensor_processing이 쓰기 시점에 이미 강제하므로
-        # 여기서 다시 다루지 않는다.
-        validate_sensor_processing = submit_batch_jobs_command(
-            task_id="validate_sensor_processing",
-            entry_point_arguments=[
-                "validate-sensor-processing",
-                "--target-hour",
-                "{{ data_interval_start.isoformat() }}",
-                "--output-path",
-                _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
-                "--quarantine-output-path",
-                _CLEANSING_QUARANTINE_OUTPUT_PATH,
-            ],
-        )
-        resolve_road_snapshot_date >> run_sensor_processing >> validate_sensor_processing
+        # 품질 검증은 별도 task가 아니라 run_sensor_processing의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012) — 검증만을 위해 Job Run을 하나 더 띄우면
+        # 검증 자체(약 30초)보다 콜드 스타트(약 1분 25초)가 더 든다. 실패하면
+        # 이 task가 실패해 scoring으로 넘어가지 않는 것(hard fail)은 그대로다.
+        resolve_road_snapshot_date >> run_sensor_processing
 
     with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
         run_hourly_scoring = submit_batch_jobs_command(
@@ -271,21 +292,8 @@ with DAG(
                 _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
             ],
         )
-        # validate_hourly_scoring은 run_hourly_scoring이 방금 쓴 target_hour 파티션만
-        # 읽으므로(#249, ADR-0004, #469), 같은 Airflow Variable
-        # (HOURLY_COMFORT_OUTPUT_PATH)과 같은 시각 템플릿을 재사용해 두 task가 항상
-        # 같은 파티션을 가리키게 한다 — sensor_processing과 같은 방식이다.
-        validate_hourly_scoring = submit_batch_jobs_command(
-            task_id="validate_hourly_scoring",
-            entry_point_arguments=[
-                "validate-hourly-scoring",
-                "--target-hour",
-                "{{ data_interval_start.isoformat() }}",
-                "--output-path",
-                _HOURLY_COMFORT_OUTPUT_PATH,
-            ],
-        )
-        run_hourly_scoring >> validate_hourly_scoring
+        # sensor_processing과 같은 이유로 검증은 run_hourly_scoring의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012).
 
     with TaskGroup(group_id="standard_score") as standard_score:
         # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 S3 Gold
@@ -302,10 +310,7 @@ with DAG(
             ],
             driver_env={
                 **_POSTGRES_DRIVER_ENV,
-                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": (
-                    "{{ var.value.get('STANDARD_COMFORT_SCORE_DATA_LAKE_URI', "
-                    "'data/local-lake') }}"
-                ),
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
                 # road-environment(active pointer/manifest)는 gold/silver와 다른
                 # reference 버킷에 있다(#389) — build-road-environment/run-monthly가
                 # 이미 이 이름을 쓰고 있어 그대로 재사용한다. 비어 있으면 job이
@@ -316,24 +321,22 @@ with DAG(
                 "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
                     "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
                 ),
-                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": (
-                    "{{ var.value.get('STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI', '') }}"
-                ),
+                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
             },
         )
-        # validate_standard_score는 run_standard_score가 이번 실행에 UPSERT한
-        # 행만(score_as_of=as_of) Postgres에서 직접 조회해 검증한다(#249,
-        # ADR-0004: Gold/Postgres는 Spark가 아니라 SqlAlchemy 경로). 검증을
-        # 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
+        # validate_standard_score는 run_standard_score가 이번 실행에 쓴 Gold
+        # snapshot(기준 데이터셋)을 검증한다 — 서빙 테이블을 조회하던 방식은
+        # ADR-0012에서 바뀌었다(#495). Spark가 필요 없어 Job Run을 내지 않는다.
+        # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
         # run_standard_score가 아니라 여기 둔다(#249).
-        validate_standard_score = submit_batch_jobs_command(
+        validate_standard_score = PythonOperator(
             task_id="validate_standard_score",
-            entry_point_arguments=[
-                "validate-standard-score",
-                "--as-of",
-                "{{ data_interval_end.isoformat() }}",
-            ],
-            driver_env=_POSTGRES_DRIVER_ENV,
+            python_callable=_validate_standard_score,
+            op_kwargs={
+                "data_lake_uri": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
+                "gold_output_uri": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
+                "as_of": "{{ data_interval_end.isoformat() }}",
+            },
             outlets=[STANDARD_SCORE_ASSET],
         )
         run_standard_score >> validate_standard_score

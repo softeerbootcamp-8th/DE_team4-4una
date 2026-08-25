@@ -35,6 +35,10 @@ TaskGroup마다 수작업 SQL/Python 검증(`cleansing/validate.py` 선례)을 �
 - **실행 엔진은 데이터가 있는 저장소를 기준으로 갈라진다.**
   - **Gold**(`segment_comfort_score`, `vehicle_profile` — Postgres)만
     `SqlAlchemyExecutionEngine`으로 직접 조회한다.
+    > **ADR-0012에서 개정됨**: `standard_segment_comfort_score`의 in-flight
+    > 검증은 서빙 테이블이 아니라 기준 데이터셋인 S3 Gold snapshot을
+    > `PandasExecutionEngine`으로 읽는다. at-rest 감사는 그대로 SqlAlchemy
+    > 경로다.
   - **그 외 전부**(Bronze `sensor_event`, Silver `sensor_events_matched`,
     features 산출물 — 전부 S3/`local-lake`의 Parquet)는 in-flight든 at-rest든
     **Spark**(`SparkDFExecutionEngine`)로 검증한다. `cleanse`/`features`/
@@ -90,6 +94,10 @@ TaskGroup마다 수작업 SQL/Python 검증(`cleansing/validate.py` 선례)을 �
   갖는 신규 `data_quality_audit` DAG로 분리한다. 이 DAG가 정확히 어느
   계층(Bronze만인지, Silver·features까지 포함하는지)까지 감사할지는 하위
   이슈에서 확정한다.
+  > **ADR-0012에서 개정됨**: `validate_X`를 별도 task로 두면 이 저장소에서는
+  > 검증마다 EMR Serverless Job Run이 하나씩 더 뜬다. Spark 산출물 검증은
+  > 생산 job과 같은 세션 안에서 수행하고 별도 task를 두지 않는다. at-rest
+  > `data_quality_audit` DAG 분리는 그대로 유지된다.
 - **Suite 저장 위치**: `services/batch-jobs/src/batch_jobs/resources/expectations/`
   아래에 JSON으로 저장한다. 기존 `resources/migrations/`와 같은 컨벤션을
   따른다 — git으로 버전 관리하고 배포 이미지에 함께 포함한다.
