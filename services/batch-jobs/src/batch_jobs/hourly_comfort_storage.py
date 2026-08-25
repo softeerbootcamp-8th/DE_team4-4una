@@ -41,11 +41,18 @@ def write_hourly_comfort_partition(
     target_hour: datetime,
     run_id: str,
     expected_schema: StructType,
+    *,
+    allow_empty: bool = False,
 ) -> HourlyComfortWriteResult:
     """Replace only the requested UTC-hour partition after a read-back check.
 
     `cleansing/hourly_storage.py`, `hourly_segment_feature_storage.py`와 같은 절차다 —
     staging에 쓰고, 다시 읽어 행 수를 확인한 뒤에만 대상 파티션과 교체한다.
+
+    `allow_empty`는 0행 결과를 어떻게 볼지 정한다. 점수 출력이 비는 것은 정상 상황이
+    아니므로 기본은 거부다(`hourly_segment_feature_storage`가 Silver2에 거는 가드와
+    같다). quarantine처럼 비어 있는 것이 정상인 출력만 True로 열어 준다 — 그때는
+    기존 파티션을 지우기만 하고 새로 쓰지 않는다.
     """
     _require_safe_run_id(run_id)
     _require_utc_hour(target_hour)
@@ -54,6 +61,9 @@ def write_hourly_comfort_partition(
     final_path = hour_output_path(output_root, target_hour)
     staging_path = f"{output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
     expected_count = frame.count()
+    if expected_count == 0 and not allow_empty:
+        # 여기서 막지 않으면 아래 _replace_partition이 기존 정상 데이터를 지운다.
+        raise ValueError("refusing to write an empty result over an existing hour")
 
     try:
         staged_path: str | None = None

@@ -130,20 +130,53 @@ def test_writing_one_hour_leaves_other_hours_untouched(spark, tmp_path):
     assert spark.read.schema(SCHEMA).parquet(hour_output_path(root, second)).count() == 1
 
 
-def test_an_empty_result_removes_the_existing_partition(spark, tmp_path):
-    # rejected 출력은 정상 실행에서 비어 있는 것이 기본이다.
+def test_an_empty_result_removes_the_partition_when_allowed(spark, tmp_path):
+    # rejected 출력은 정상 실행에서 비어 있는 것이 기본이라 허용해야 한다.
     root = str(tmp_path / "rejected")
+    target_hour = datetime(2026, 8, 25, 9, tzinfo=UTC)
+    write_hourly_comfort_partition(
+        spark,
+        _frame(spark, target_hour, ["a"]),
+        root,
+        target_hour,
+        "run-1",
+        SCHEMA,
+        allow_empty=True,
+    )
+
+    result = write_hourly_comfort_partition(
+        spark,
+        _frame(spark, target_hour, []),
+        root,
+        target_hour,
+        "run-2",
+        SCHEMA,
+        allow_empty=True,
+    )
+
+    assert result.row_count == 0
+    assert not Path(hour_output_path(root, target_hour)).exists()
+
+
+def test_an_empty_result_is_refused_by_default(spark, tmp_path):
+    """점수 출력이 0행인 것은 정상 상황이 아니다 — 기존 파티션을 지우고 끝내면 안 된다.
+
+    `hourly_segment_feature_storage`가 Silver2에 대해 거는 것과 같은 가드다.
+    """
+    root = str(tmp_path / "hourly_comfort_score")
     target_hour = datetime(2026, 8, 25, 9, tzinfo=UTC)
     write_hourly_comfort_partition(
         spark, _frame(spark, target_hour, ["a"]), root, target_hour, "run-1", SCHEMA
     )
 
-    result = write_hourly_comfort_partition(
-        spark, _frame(spark, target_hour, []), root, target_hour, "run-2", SCHEMA
-    )
+    with pytest.raises(ValueError, match="refusing to write an empty result"):
+        write_hourly_comfort_partition(
+            spark, _frame(spark, target_hour, []), root, target_hour, "run-2", SCHEMA
+        )
 
-    assert result.row_count == 0
-    assert not Path(hour_output_path(root, target_hour)).exists()
+    # 기존 데이터가 살아 있어야 한다.
+    survivors = spark.read.schema(SCHEMA).parquet(hour_output_path(root, target_hour))
+    assert [row.segment_id for row in survivors.collect()] == ["a"]
 
 
 def test_staging_data_is_cleaned_up(spark, tmp_path):
