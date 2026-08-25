@@ -217,3 +217,28 @@ def test_replacing_one_hour_preserves_adjacent_quarantine(spark, tmp_path, monke
     ).collect()
     assert [row["event_id"] for row in hour_5] == ["bad-5"]
     assert [row["event_id"] for row in hour_6] == ["bad-6"]
+
+
+def test_feature_step_is_timed_separately_from_the_fused_job(
+    spark, tmp_path, monkeypatch, caplog
+):
+    """융합된 sensor_processing 안에서 T2 feature 시간이 따로 남아야 한다(#461).
+
+    T1 cleanse 시간은 CLI 경계의 sensor_processing.job에서 이 값을 빼면 나온다.
+    """
+    import json
+    import logging
+
+    from de4_core import PERF_LOG_PREFIX
+
+    bronze = write_bronze_parquet(spark, tmp_path, valid_value(event_id="first"))
+
+    with caplog.at_level(logging.INFO):
+        run_job(spark, tmp_path, bronze, monkeypatch)
+
+    phases = [
+        json.loads(message[len(PERF_LOG_PREFIX) + 1 :])["phase"]
+        for message in caplog.messages
+        if message.startswith(f"{PERF_LOG_PREFIX} ")
+    ]
+    assert "sensor_processing.features" in phases
