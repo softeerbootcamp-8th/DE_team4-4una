@@ -56,19 +56,27 @@ class FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.fail_delete_keys: set[str] = set()
+        self.requested_ranges: list[str] = []
 
     def put_object(self, **kwargs: object) -> None:
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = kwargs["Body"]  # type: ignore[assignment]
 
     def get_object(self, **kwargs: object) -> dict[str, object]:
         value = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
+        # 실제 S3처럼 Range 헤더를 존중해, 요청한 구간만 돌려준다. 어떤 구간을
+        # 요청했는지 기록해 두면 테스트가 "전량을 받지 않았다"를 직접 검증할 수 있다.
+        byte_range = kwargs.get("Range")
+        if byte_range is not None:
+            self.requested_ranges.append(str(byte_range))
+            start, _, end = str(byte_range).removeprefix("bytes=").partition("-")
+            value = value[int(start) : int(end) + 1]
         return {"Body": io.BytesIO(value)}
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
         key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
         if key not in self.objects:
             raise KeyError(f"Object not found: {key}")
-        return {}
+        return {"ContentLength": len(self.objects[key])}
 
     def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
         bucket = str(kwargs["Bucket"])
@@ -147,3 +155,46 @@ def test_delete_objects_raises_on_partial_s3_failure() -> None:
     assert store.exists("s3://test-bucket/b.parquet")
     # c.parquet should be deleted
     assert not store.exists("s3://test-bucket/c.parquet")
+
+
+def test_open_reader_reads_a_local_file_seekably(tmp_path) -> None:
+    store = ObjectStore()
+    uri = join_uri(tmp_path.as_uri(), "a.parquet")
+    store.write_bytes(uri, b"0123456789")
+
+    with store.open_reader(uri) as reader:
+        assert reader.seek(0, io.SEEK_END) == 10
+        reader.seek(-3, io.SEEK_END)
+        assert reader.read() == b"789"
+
+
+def test_open_reader_requests_only_the_asked_byte_range_from_s3() -> None:
+    client = FakeS3Client()
+    store = ObjectStore(client)  # type: ignore[arg-type]
+    store.write_bytes("s3://test-bucket/a.parquet", b"0123456789")
+
+    with store.open_reader("s3://test-bucket/a.parquet") as reader:
+        reader.seek(-3, io.SEEK_END)
+        tail = reader.read(3)
+
+    # 꼬리 3바이트만 필요했으므로 S3에도 그 구간만 요청해야 한다 — 이것이 이
+    # 리더의 존재 이유다(전량 다운로드 회피).
+    assert tail == b"789"
+    assert client.requested_ranges == ["bytes=7-9"]
+
+
+def test_open_reader_on_s3_reports_size_and_position() -> None:
+    client = FakeS3Client()
+    store = ObjectStore(client)  # type: ignore[arg-type]
+    store.write_bytes("s3://test-bucket/a.parquet", b"0123456789")
+
+    with store.open_reader("s3://test-bucket/a.parquet") as reader:
+        assert reader.seek(0, io.SEEK_END) == 10
+        assert reader.tell() == 10
+        # 파일 끝을 넘어선 위치에서 읽으면 빈 바이트열이고 S3 요청도 없어야 한다.
+        assert reader.read(5) == b""
+        reader.seek(4)
+        assert reader.read(2) == b"45"
+        assert reader.tell() == 6
+
+    assert client.requested_ranges == ["bytes=4-5"]

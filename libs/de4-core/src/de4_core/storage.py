@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import BinaryIO, Protocol
 from urllib.parse import unquote, urlparse
 
 from botocore.exceptions import ClientError
@@ -38,6 +39,72 @@ class ObjectMetadata:
     size: int
 
 
+class _S3RangeReader(io.RawIOBase):
+    """Seekable read-only view over one S3 object, fetched in ranges.
+
+    `read_bytes()`는 객체를 통째로 받지만, Parquet footer처럼 파일의 일부만
+    필요한 호출자도 있다. 이 리더는 요청받은 구간만 Range GET으로 가져와
+    전량 다운로드를 피한다. 객체 크기는 처음 필요해질 때 한 번만 조회한다.
+    """
+
+    def __init__(self, client: S3Client, bucket: str, key: str):
+        self._client = client
+        self._bucket = bucket
+        self._key = key
+        self._position = 0
+        self._size: int | None = None
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            position = offset
+        elif whence == io.SEEK_CUR:
+            position = self._position + offset
+        elif whence == io.SEEK_END:
+            position = self._length() + offset
+        else:
+            raise ValueError(f"unsupported whence value: {whence}")
+        if position < 0:
+            raise ValueError("negative seek position")
+        self._position = position
+        return self._position
+
+    def readinto(self, buffer) -> int:  # type: ignore[override]
+        chunk = self._read_range(self._position, len(buffer))
+        buffer[: len(chunk)] = chunk
+        self._position += len(chunk)
+        return len(chunk)
+
+    def readall(self) -> bytes:
+        chunk = self._read_range(self._position, self._length() - self._position)
+        self._position += len(chunk)
+        return chunk
+
+    def _length(self) -> int:
+        if self._size is None:
+            response = self._client.head_object(Bucket=self._bucket, Key=self._key)
+            self._size = int(response["ContentLength"])  # type: ignore[index,call-overload]
+        return self._size
+
+    def _read_range(self, start: int, length: int) -> bytes:
+        # 파일 끝을 넘어선 요청은 S3에 보내지 않는다 — 실제 S3는 416을 돌려준다.
+        if length <= 0 or start >= self._length():
+            return b""
+        last = min(start + length, self._length()) - 1  # HTTP Range는 양끝을 포함한다
+        response = self._client.get_object(
+            Bucket=self._bucket, Key=self._key, Range=f"bytes={start}-{last}"
+        )
+        return response["Body"].read()  # type: ignore[no-any-return, union-attr]
+
+
 class ObjectStore:
     """Read and write complete objects through portable file and S3 URIs."""
 
@@ -52,6 +119,18 @@ class ObjectStore:
         response = self._s3().get_object(Bucket=bucket, Key=path)
         body = response["Body"]
         return body.read()  # type: ignore[no-any-return, union-attr]
+
+    def open_reader(self, uri: str) -> BinaryIO:
+        """Open one object as a seekable, read-only binary stream.
+
+        `read_bytes()`와 달리 객체 전량을 내려받지 않는다. Parquet footer만 읽어
+        행 수를 세는 호출자처럼 파일의 일부만 필요한 경우에 쓴다.
+        """
+        scheme, bucket, path = parse_uri(uri)
+        if scheme == "file":
+            return Path(path).open("rb")
+        require_s3_key(path)
+        return _S3RangeReader(self._s3(), bucket, path)  # type: ignore[return-value]
 
     def write_bytes(self, uri: str, value: bytes) -> None:
         scheme, bucket, path = parse_uri(uri)
