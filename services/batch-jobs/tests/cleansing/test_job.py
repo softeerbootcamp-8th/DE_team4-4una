@@ -50,6 +50,7 @@ def stub_feature_job(monkeypatch, captured_rows: list[dict[str, object]]) -> Non
         processed_at,
         *,
         cleansing_quarantine,
+        raw_record_source,
         quarantine_output_path,
     ):
         captured_rows.extend(row.asDict() for row in sensor_df.collect())

@@ -21,6 +21,7 @@ from batch_jobs.hourly_segment_feature_storage import (
 from batch_jobs.schemas import (
     HOURLY_SEGMENT_FEATURE_SCHEMA,
     PROCESSED_SENSOR_EVENT_SCHEMA,
+    RAW_RECORD_COLUMN,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
 )
 from batch_jobs.sensor_features.aggregation import (
@@ -1732,9 +1733,16 @@ class TestHourlySegmentFeatureJob:
             0.0,
             0.0,
             0.0,
-            "{}",
             self.PROCESSED_AT,
             self.RUN_ID,
+        )
+
+    def raw_records(self, spark, rows: list[tuple]):
+        # 맵매칭 실패 격리가 event_id로 원문을 되찾을 때 쓰는 Bronze 조회용 두 컬럼.
+        # event_id마다 다른 문자열을 넣어, 조회가 맞는 행을 붙이는지 검증할 수 있게 한다.
+        return spark.createDataFrame(
+            [(row[0], f'{{"raw":"{row[0]}"}}') for row in rows],
+            ["event_id", RAW_RECORD_COLUMN],
         )
 
     def sensor_events(self, spark, rows: list[tuple]):
@@ -1764,6 +1772,7 @@ class TestHourlySegmentFeatureJob:
             self.RUN_ID,
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            raw_record_source=self.raw_records(spark, rows),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
         return summary, spark.read.parquet(summary.output_path).collect()
@@ -1909,6 +1918,8 @@ class TestHourlySegmentFeatureJob:
         assert quarantined[0]["event_id"] == "e2"
         assert quarantined[0]["reject_reason"] == "MAP_MATCH_FAILED"
         assert '"candidate_count":0' in quarantined[0]["reject_detail"]
+        # 원문은 더 이상 전 구간을 따라오지 않고 event_id로 되찾는다 — 맞는 행이 붙었는지 확인
+        assert quarantined[0]["raw_record"] == '{"raw":"e2"}'
 
     def test_rerunning_the_same_hour_replaces_the_stored_result(self, spark, tmp_path) -> None:
         config = self.build_config(spark, tmp_path)
@@ -1923,6 +1934,9 @@ class TestHourlySegmentFeatureJob:
             "run-1",
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            raw_record_source=self.raw_records(
+                spark, [self.sensor_row(self.TARGET_HOUR, "e1")]
+            ),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
         rows = [
@@ -1939,6 +1953,7 @@ class TestHourlySegmentFeatureJob:
             "run-2",
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            raw_record_source=self.raw_records(spark, rows),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
 
@@ -1977,6 +1992,9 @@ class TestHourlySegmentFeatureJob:
                 run_id,
                 processed_at,
                 cleansing_quarantine=self.empty_quarantine(spark),
+                raw_record_source=self.raw_records(
+                    spark, [self.sensor_row(self.TARGET_HOUR, "e1")]
+                ),
                 quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
             )
 

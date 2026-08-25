@@ -64,8 +64,9 @@ PROCESSED_SENSOR_EVENT_SCHEMA = StructType(
         StructField("jerk_z", DoubleType(), nullable=True),
         StructField("steering_vibration", DoubleType(), nullable=True),
         StructField("steering_angle", DoubleType(), nullable=True),
-        # 맵매칭 실패 시 원본 이벤트를 그대로 격리하기 위한 실행 중 전용 컬럼
-        StructField(RAW_RECORD_COLUMN, StringType(), nullable=False),
+        # _raw_record는 여기 넣지 않는다. 원문은 행당 614 B인데 맵매칭 실패 격리에만
+        # 쓰여서, 전체 행에 붙이면 persist와 event_id 조인을 통째로 따라다닌다.
+        # 실패 행이 확정된 뒤 event_id로 Bronze에서 다시 가져온다.
         StructField("_processed_at", TimestampType(), nullable=False),
         StructField("_run_id", StringType(), nullable=False),
     ]

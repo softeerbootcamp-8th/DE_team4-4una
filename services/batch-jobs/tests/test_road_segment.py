@@ -64,6 +64,7 @@ from batch_jobs.road_segment.validate import (
 )
 from batch_jobs.schemas import (
     PROCESSED_SENSOR_EVENT_SCHEMA,
+    RAW_RECORD_COLUMN,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
 )
 from pyproj import CRS, Transformer
@@ -1039,7 +1040,6 @@ class TestBuild:
             0.0,
             0.0,
             0.0,
-            "{}",
             cls.PROCESSED_AT,
             cls.RUN_ID,
         )
@@ -1205,6 +1205,9 @@ class TestBuild:
             spark, sensor_df, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION,
             self.RUN_ID, self.PROCESSED_AT,
             cleansing_quarantine=spark.createDataFrame([], SENSOR_EVENT_QUARANTINE_SCHEMA),
+            raw_record_source=spark.createDataFrame(
+                [("e1", "{}")], ["event_id", RAW_RECORD_COLUMN]
+            ),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
 
@@ -1249,6 +1252,9 @@ class TestBuild:
                 self.RUN_ID, self.PROCESSED_AT,
                 cleansing_quarantine=spark.createDataFrame(
                     [], SENSOR_EVENT_QUARANTINE_SCHEMA
+                ),
+                raw_record_source=spark.createDataFrame(
+                    [("e1", "{}")], ["event_id", RAW_RECORD_COLUMN]
                 ),
                 quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
             )
