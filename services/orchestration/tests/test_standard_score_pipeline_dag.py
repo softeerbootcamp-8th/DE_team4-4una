@@ -120,13 +120,12 @@ def test_all_emr_tasks_submit_with_the_shared_variables():
         )
 
 
-def test_sensor_processing_task_group_contains_the_combined_job_and_its_validation():
+def test_sensor_processing_task_group_contains_the_combined_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert "sensor_processing.resolve_road_snapshot_date" in task_ids
     assert "sensor_processing.run_sensor_processing" in task_ids
-    assert "sensor_processing.validate_sensor_processing" in task_ids
 
 
 def test_resolve_road_snapshot_date_is_a_python_operator_not_an_emr_job():
@@ -138,12 +137,11 @@ def test_resolve_road_snapshot_date_is_a_python_operator_not_an_emr_job():
     assert isinstance(task, PythonOperator)
 
 
-def test_hourly_scoring_task_group_contains_the_scoring_job_and_its_validation():
+def test_hourly_scoring_task_group_contains_the_scoring_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert "hourly_scoring.run_hourly_scoring" in task_ids
-    assert "hourly_scoring.validate_hourly_scoring" in task_ids
 
 
 def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
@@ -170,27 +168,6 @@ def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     assert "{{ run_id }}" in args
 
 
-def test_validate_sensor_processing_invokes_gx_validation_with_matching_paths():
-    module = _load_dag_module()
-
-    args = _entry_point_arguments(
-        module.dag.get_task("sensor_processing.validate_sensor_processing")
-    )
-    assert args[0] == "validate-sensor-processing"
-    assert "--target-hour" in args
-    assert "{{ data_interval_start.isoformat() }}" in args
-    # run_sensor_processing과 같은 Variable을 참조해야 같은 파티션을 가리킨다.
-    run_args = _entry_point_arguments(
-        module.dag.get_task("sensor_processing.run_sensor_processing")
-    )
-    assert args[args.index("--output-path") + 1] == run_args[
-        run_args.index("--output-path") + 1
-    ]
-    assert args[args.index("--quarantine-output-path") + 1] == run_args[
-        run_args.index("--quarantine-output-path") + 1
-    ]
-
-
 def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id():
     module = _load_dag_module()
 
@@ -206,26 +183,6 @@ def test_run_hourly_scoring_invokes_score_hourly_comfort_with_templated_run_id()
     )
 
 
-def test_validate_hourly_scoring_invokes_gx_validation_with_matching_output_path():
-    module = _load_dag_module()
-
-    args = _entry_point_arguments(
-        module.dag.get_task("hourly_scoring.validate_hourly_scoring")
-    )
-    assert args[0] == "validate-hourly-scoring"
-    # run_hourly_scoring이 쓴 파티션만 검증한다(#469).
-    assert args[args.index("--target-hour") + 1] == (
-        "{{ data_interval_start.isoformat() }}"
-    )
-    run_args = _entry_point_arguments(
-        module.dag.get_task("hourly_scoring.run_hourly_scoring")
-    )
-    # run_hourly_scoring과 같은 Variable을 참조해야 같은 output을 가리킨다.
-    assert args[args.index("--output-path") + 1] == run_args[
-        run_args.index("--output-path") + 1
-    ]
-
-
 def test_dag_contains_expected_pipeline_tasks_so_far():
     module = _load_dag_module()
 
@@ -233,9 +190,7 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
     assert task_ids == {
         "sensor_processing.resolve_road_snapshot_date",
         "sensor_processing.run_sensor_processing",
-        "sensor_processing.validate_sensor_processing",
         "hourly_scoring.run_hourly_scoring",
-        "hourly_scoring.validate_hourly_scoring",
         "standard_score.run_standard_score",
         "standard_score.validate_standard_score",
         "report_processing_counts",
@@ -261,12 +216,11 @@ def test_task_groups_follow_standard_score_pipeline_order():
     run_sensor_processing = module.dag.get_task(
         "sensor_processing.run_sensor_processing"
     )
-    validate_sensor_processing = module.dag.get_task(
-        "sensor_processing.validate_sensor_processing"
-    )
     run_hourly_scoring = module.dag.get_task("hourly_scoring.run_hourly_scoring")
-    validate_hourly_scoring = module.dag.get_task("hourly_scoring.validate_hourly_scoring")
     run_standard_score = module.dag.get_task("standard_score.run_standard_score")
+    validate_standard_score = module.dag.get_task(
+        "standard_score.validate_standard_score"
+    )
 
     assert resolve_road_snapshot_date.upstream_task_ids == set()
     assert resolve_road_snapshot_date.downstream_task_ids == {
@@ -276,29 +230,16 @@ def test_task_groups_follow_standard_score_pipeline_order():
         "sensor_processing.resolve_road_snapshot_date"
     }
     assert run_sensor_processing.downstream_task_ids == {
-        "sensor_processing.validate_sensor_processing"
-    }
-    assert validate_sensor_processing.upstream_task_ids == {
-        "sensor_processing.run_sensor_processing"
-    }
-    assert validate_sensor_processing.downstream_task_ids == {
         "hourly_scoring.run_hourly_scoring"
     }
     assert run_hourly_scoring.upstream_task_ids == {
-        "sensor_processing.validate_sensor_processing"
+        "sensor_processing.run_sensor_processing"
     }
     assert run_hourly_scoring.downstream_task_ids == {
-        "hourly_scoring.validate_hourly_scoring"
-    }
-    assert validate_hourly_scoring.upstream_task_ids == {
-        "hourly_scoring.run_hourly_scoring"
-    }
-    assert validate_hourly_scoring.downstream_task_ids == {
         "standard_score.run_standard_score"
     }
-    validate_standard_score = module.dag.get_task("standard_score.validate_standard_score")
     assert run_standard_score.upstream_task_ids == {
-        "hourly_scoring.validate_hourly_scoring"
+        "hourly_scoring.run_hourly_scoring"
     }
     assert run_standard_score.downstream_task_ids == {
         "standard_score.validate_standard_score"

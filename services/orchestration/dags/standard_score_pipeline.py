@@ -263,27 +263,11 @@ with DAG(
                 _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
             ],
         )
-        # validate_sensor_processing은 run_sensor_processing이 방금 쓴
-        # hourly_segment_features/quarantine 파티션만 읽으므로, 같은 Airflow
-        # Variable(HOURLY_SEGMENT_FEATURE_OUTPUT_PATH, CLEANSING_QUARANTINE_OUTPUT_PATH)을
-        # 재사용해 항상 같은 경로를 가리키게 한다(#220, ADR-0004). GX가 통계적/
-        # 선언적 규칙(물리량 범위, quarantine 비율)을 검증하고 실패하면 이 task가
-        # 실패해 scoring으로 넘어가지 않는다(hard fail). 스키마/필수값/PK 중복 같은
-        # 하드 인바리언트는 run_sensor_processing이 쓰기 시점에 이미 강제하므로
-        # 여기서 다시 다루지 않는다.
-        validate_sensor_processing = submit_batch_jobs_command(
-            task_id="validate_sensor_processing",
-            entry_point_arguments=[
-                "validate-sensor-processing",
-                "--target-hour",
-                "{{ data_interval_start.isoformat() }}",
-                "--output-path",
-                _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
-                "--quarantine-output-path",
-                _CLEANSING_QUARANTINE_OUTPUT_PATH,
-            ],
-        )
-        resolve_road_snapshot_date >> run_sensor_processing >> validate_sensor_processing
+        # 품질 검증은 별도 task가 아니라 run_sensor_processing의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012) — 검증만을 위해 Job Run을 하나 더 띄우면
+        # 검증 자체(약 30초)보다 콜드 스타트(약 1분 25초)가 더 든다. 실패하면
+        # 이 task가 실패해 scoring으로 넘어가지 않는 것(hard fail)은 그대로다.
+        resolve_road_snapshot_date >> run_sensor_processing
 
     with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
         run_hourly_scoring = submit_batch_jobs_command(
@@ -302,21 +286,8 @@ with DAG(
                 _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
             ],
         )
-        # validate_hourly_scoring은 run_hourly_scoring이 방금 쓴 target_hour 파티션만
-        # 읽으므로(#249, ADR-0004, #469), 같은 Airflow Variable
-        # (HOURLY_COMFORT_OUTPUT_PATH)과 같은 시각 템플릿을 재사용해 두 task가 항상
-        # 같은 파티션을 가리키게 한다 — sensor_processing과 같은 방식이다.
-        validate_hourly_scoring = submit_batch_jobs_command(
-            task_id="validate_hourly_scoring",
-            entry_point_arguments=[
-                "validate-hourly-scoring",
-                "--target-hour",
-                "{{ data_interval_start.isoformat() }}",
-                "--output-path",
-                _HOURLY_COMFORT_OUTPUT_PATH,
-            ],
-        )
-        run_hourly_scoring >> validate_hourly_scoring
+        # sensor_processing과 같은 이유로 검증은 run_hourly_scoring의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012).
 
     with TaskGroup(group_id="standard_score") as standard_score:
         # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 S3 Gold

@@ -45,43 +45,6 @@ def _perf_payloads(caplog) -> dict[str, dict]:
 
 
 @pytest.fixture
-def _fake_hourly_scoring_validation(monkeypatch):
-    from batch_jobs import hourly_scoring_validation
-
-    monkeypatch.setattr(
-        hourly_scoring_validation, "build_spark_session", lambda: FakeSpark()
-    )
-    monkeypatch.setattr(
-        hourly_scoring_validation,
-        "run_hourly_scoring_validation",
-        lambda spark, config, target_hour: FakeValidationSummary(),
-    )
-
-
-def test_cli_logs_spark_session_build_and_job_separately(
-    caplog, capsys, _fake_hourly_scoring_validation
-):
-    with caplog.at_level(logging.INFO):
-        main(
-            [
-                "validate-hourly-scoring",
-                "--target-hour",
-                "2026-08-25T02:00:00+00:00",
-                "--output-path",
-                "s3://lake/scores",
-            ]
-        )
-
-    capsys.readouterr()
-    payloads = _perf_payloads(caplog)
-    assert set(payloads) == {
-        "validate_hourly_scoring.spark_session",
-        "validate_hourly_scoring.job",
-    }
-    assert payloads["validate_hourly_scoring.job"]["ok"] is True
-
-
-@pytest.fixture
 def _postgres_env(monkeypatch):
     """*_ValidationConfig.from_env()가 요구하는 값만 채운다. 실제 접속은 하지 않는다."""
     for key, value in {
@@ -161,6 +124,14 @@ def test_cleanse_sensor_events_logs_session_job_and_feature_split(
         "run_cleansing_job",
         lambda *args, **kwargs: _fake_cleansing_summary(),
     )
+    # 검증은 이제 같은 Job Run 안에서 이어 돈다(ADR-0012).
+    from batch_jobs import sensor_processing_validation
+
+    monkeypatch.setattr(
+        sensor_processing_validation,
+        "run_sensor_processing_validation",
+        lambda *args: FakeValidationSummary(),
+    )
 
     with caplog.at_level(logging.INFO):
         main(_CLEANSE_ARGV)
@@ -169,6 +140,7 @@ def test_cleanse_sensor_events_logs_session_job_and_feature_split(
     assert set(_perf_payloads(caplog)) == {
         "sensor_processing.spark_session",
         "sensor_processing.job",
+        "sensor_processing.validation",
     }
 
 
@@ -178,6 +150,13 @@ def test_score_hourly_comfort_logs_session_and_job(caplog, capsys, monkeypatch):
     monkeypatch.setattr(hourly_comfort_job, "build_spark_session", lambda: FakeSpark())
     monkeypatch.setattr(
         hourly_comfort_job, "run_hourly_comfort_job", lambda *args: FakeSummary()
+    )
+    from batch_jobs import hourly_scoring_validation
+
+    monkeypatch.setattr(
+        hourly_scoring_validation,
+        "run_hourly_scoring_validation",
+        lambda *args: FakeValidationSummary(),
     )
 
     with caplog.at_level(logging.INFO):
@@ -195,34 +174,7 @@ def test_score_hourly_comfort_logs_session_and_job(caplog, capsys, monkeypatch):
     assert set(_perf_payloads(caplog)) == {
         "hourly_scoring.spark_session",
         "hourly_scoring.job",
-    }
-
-
-def test_validate_sensor_processing_logs_session_and_job(caplog, capsys, monkeypatch):
-    from batch_jobs import sensor_processing_validation
-
-    monkeypatch.setattr(
-        sensor_processing_validation, "build_spark_session", lambda: FakeSpark()
-    )
-    monkeypatch.setattr(
-        sensor_processing_validation,
-        "run_sensor_processing_validation",
-        lambda *args: FakeSummary(),
-    )
-
-    with caplog.at_level(logging.INFO):
-        main(
-            [
-                "validate-sensor-processing",
-                "--target-hour",
-                "2026-08-25T02:00:00+00:00",
-            ]
-        )
-
-    capsys.readouterr()
-    assert set(_perf_payloads(caplog)) == {
-        "validate_sensor_processing.spark_session",
-        "validate_sensor_processing.job",
+        "hourly_scoring.validation",
     }
 
 

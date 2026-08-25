@@ -172,7 +172,9 @@ suite 정리와 레벨 0-C·1의 전제 검증 추가는 #495에서 함께 수�
 
 - 파이프라인에서 EMR Serverless Job Run이 3건 줄고, 검증 경로의 프로비저닝
   대기가 사라진다.
-- `hourly_scoring` TaskGroup은 task가 하나만 남으므로 TaskGroup 구조를 재편한다.
+- `hourly_scoring` TaskGroup에는 task가 하나만 남는다. 그래도 그룹은 유지한다 —
+  UI에서 단계 구분이 일관되게 보이는 편이 낫고, 그룹을 없애면 이 변경과 무관한
+  DAG 구조까지 건드리게 된다.
 - **Spark 검증의 실패 원인 구분이 task 경계에서 예외·로그 경계로 옮겨간다.**
   ADR-0004가 이미 단점으로 적어둔 사항이며, 전용 예외
   (`SensorProcessingValidationFailed` 등)와 #461의 PERF phase 로그로 구분한다.
