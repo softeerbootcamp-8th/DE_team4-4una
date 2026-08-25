@@ -108,6 +108,7 @@ def run_hourly_segment_feature_job(
     processed_at: datetime,
     *,
     cleansing_quarantine: DataFrame,
+    raw_record_source: DataFrame,
     quarantine_output_path: str,
 ) -> HourlySegmentFeatureJobSummary:
     _validate_job_arguments(target_hour, feature_version, run_id, processed_at)
@@ -189,7 +190,7 @@ def run_hourly_segment_feature_job(
             # quarantine write + feature write를 "storage" 시간으로 보되 사이에 낀 aggregation은 빼려고 따로 잰다(#474).
             quarantine_write_started = time.monotonic()
             map_matching_quarantine = _build_map_matching_quarantine(
-                target_df, run_id, processed_at
+                target_df, raw_record_source, run_id, processed_at
             ).persist(StorageLevel.MEMORY_AND_DISK)
             try:
                 map_matching_quarantined_count = map_matching_quarantine.count()
@@ -280,10 +281,15 @@ def run_hourly_segment_feature_job(
 
 def _build_map_matching_quarantine(
     matched: DataFrame,
+    raw_record_source: DataFrame,
     run_id: str,
     rejected_at: datetime,
 ) -> DataFrame:
-    """맵매칭 실패 행을 공통 sensor_event_quarantine 형태로 변환한다."""
+    """맵매칭 실패 행을 공통 sensor_event_quarantine 형태로 변환한다.
+
+    `raw_record_source`는 (event_id, _raw_record) 두 컬럼짜리 Bronze 조회용
+    DataFrame이다. 원문을 전체 행에 붙여 오지 않고 여기서 실패 행에만 붙인다.
+    """
     reject_detail = F.to_json(
         F.struct(
             F.lit("distance+heading").alias("match_method"),
@@ -296,16 +302,35 @@ def _build_map_matching_quarantine(
         ),
         options={"ignoreNullFields": "false"},
     )
-    return matched.filter(F.col("segment_id").isNull()).select(
+    failed = matched.filter(F.col("segment_id").isNull()).select(
         "event_id",
         "trip_id",
         F.to_date("event_time").alias("event_date"),
         F.lit("MAP_MATCH_FAILED").alias("reject_reason"),
         reject_detail.alias("reject_detail"),
-        F.col(RAW_RECORD_COLUMN).alias("raw_record"),
         F.lit(run_id).alias("_run_id"),
         F.lit(rejected_at).alias("_rejected_at"),
         F.lit(rejected_at.date()).alias("rejected_date"),
+    )
+    # 실패 행은 소수라 그 event_id만 broadcast해 Bronze에서 원문을 끌어온다.
+    # Bronze에는 같은 event_id가 중복될 수 있어(중복 제거 전) 한 건만 남긴다.
+    raw_records = (
+        raw_record_source.join(
+            F.broadcast(failed.select("event_id").distinct()), on="event_id"
+        )
+        .dropDuplicates(["event_id"])
+        .select("event_id", F.col(RAW_RECORD_COLUMN).alias("raw_record"))
+    )
+    return failed.join(F.broadcast(raw_records), on="event_id", how="left").select(
+        "event_id",
+        "trip_id",
+        "event_date",
+        "reject_reason",
+        "reject_detail",
+        "raw_record",
+        "_run_id",
+        "_rejected_at",
+        "rejected_date",
     )
 
 

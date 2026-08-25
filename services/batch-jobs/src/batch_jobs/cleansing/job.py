@@ -25,6 +25,7 @@ from batch_jobs.hourly_segment_feature_job import (
     feature_input_window,
     run_hourly_segment_feature_job,
 )
+from batch_jobs.schemas import RAW_RECORD_COLUMN
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ def run_cleansing_job(
     cached_bronze_frames: list[DataFrame] = []
     target_processed: DataFrame | None = None
     target_quarantined: DataFrame | None = None
+    target_bronze: DataFrame | None = None
 
     for hour in _overlapping_hours(window_start, window_end):
         bronze_hour = read_bronze_sensor_events(
@@ -101,8 +103,9 @@ def run_cleansing_job(
         if hour == target_hour:
             target_processed = cleansed.processed
             target_quarantined = cleansed.quarantined
+            target_bronze = hourly_bronze
 
-    if target_processed is None or target_quarantined is None:
+    if target_processed is None or target_quarantined is None or target_bronze is None:
         raise ValueError("feature input window does not contain target_hour")
 
     processed_window = _union_frames(processed_frames).persist(
@@ -132,6 +135,9 @@ def run_cleansing_job(
                 run_id,
                 processed_at,
                 cleansing_quarantine=target_quarantined,
+                # 맵매칭 실패 격리가 원문을 붙일 때만 쓰는 조회용 두 컬럼.
+                # 이미 캐시된 대상 시간 Bronze에서 뽑으므로 다시 읽지 않는다.
+                raw_record_source=target_bronze.select("event_id", RAW_RECORD_COLUMN),
                 quarantine_output_path=cleansing_config.quarantine_output_path,
             )
     finally:
