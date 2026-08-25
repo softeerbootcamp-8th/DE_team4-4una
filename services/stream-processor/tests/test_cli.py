@@ -1,8 +1,10 @@
 import signal
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from stream_processor import cli
 from stream_processor.cli import (
     HADOOP_AWS_PACKAGE,
     KAFKA_PACKAGE,
@@ -11,6 +13,7 @@ from stream_processor.cli import (
     bundled_hadoop_version,
     install_shutdown_handler,
 )
+from stream_processor.config import StreamConfig
 
 
 def test_spark_packages_include_matching_kafka_and_s3a_connectors() -> None:
@@ -48,3 +51,34 @@ def test_await_shutdown_stops_query_outside_signal_handler() -> None:
 
     query.stop.assert_called_once_with()
     query.awaitTermination.assert_not_called()
+
+
+def test_build_spark_session_applies_the_configured_driver_memory(monkeypatch) -> None:
+    # Spark 기본 driver heap은 1 GiB이고 local[*]에서는 driver가 곧 executor라
+    # micro-batch 전체가 그 heap에서 파싱된다(#482). 세션을 실제로 띄우지 않고
+    # builder에 conf가 실리는지만 확인한다.
+    recorded: dict[str, str] = {}
+
+    class FakeBuilder:
+        appName = None
+
+        def config(self, key: str, value: str) -> "FakeBuilder":
+            recorded[key] = value
+            return self
+
+        def master(self, _value: str) -> "FakeBuilder":
+            return self
+
+        def getOrCreate(self) -> str:
+            return "session"
+
+    builder = FakeBuilder()
+    monkeypatch.setattr(
+        cli, "SparkSession", SimpleNamespace(builder=SimpleNamespace(appName=lambda _n: builder))
+    )
+    monkeypatch.delenv("STREAM_SPARK_MASTER", raising=False)
+
+    cli.build_spark_session(StreamConfig.from_env({"STREAM_DRIVER_MEMORY": "6g"}))
+
+    assert recorded["spark.driver.memory"] == "6g"
+    assert recorded["spark.sql.session.timeZone"] == "UTC"

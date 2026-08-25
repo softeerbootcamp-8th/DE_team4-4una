@@ -19,7 +19,9 @@ class StreamConfig:
     starting_offsets: str
     min_offsets_per_trigger: int
     max_trigger_delay: str
+    max_offsets_per_trigger: int
     bronze_output_partitions: int
+    driver_memory: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> StreamConfig:
@@ -52,7 +54,21 @@ class StreamConfig:
             # min_offsets_per_trigger만 걸면 트래픽이 적을 때 스트림이 아무것도 쓰지 않는다.
             # 양이 모자라도 이 시간이 지나면 배치를 실행시키는 상한이다.
             max_trigger_delay=source.get("STREAM_MAX_TRIGGER_DELAY", "5m"),
+            # 복구 배치 상한(#482). min_offsets_per_trigger는 하한이라, 상한이 없으면
+            # 장애 후 재시작할 때 첫 micro-batch가 그동안 Kafka에 쌓인 offset을 전부
+            # 소비하려 한다. bronze_sink의 coalesce(1)이 플랜 전체를 단일 태스크로
+            # 좁히고 local mode driver heap도 크지 않아 OOM이 나는데, 컨테이너에
+            # --restart unless-stopped가 걸려 있어 같은 범위를 다시 시도하며 crash
+            # loop가 된다. 하한의 2배로 둬서 정상 배치(600,000건)는 그대로 두고
+            # 복구 배치만 제한한다. 0이면 상한 없음(이전 동작).
+            max_offsets_per_trigger=int(
+                source.get("STREAM_MAX_OFFSETS_PER_TRIGGER", "1200000")
+            ),
             # 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
             # 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
             bronze_output_partitions=int(source.get("STREAM_BRONZE_OUTPUT_PARTITIONS", "1")),
+            # Spark 기본 driver heap은 1 GiB다(로컬에서 직접 확인). local[*]에서는
+            # driver가 곧 executor이므로 micro-batch 전체가 이 heap 안에서 파싱된다 --
+            # 위 상한과 짝이다(#482).
+            driver_memory=source.get("STREAM_DRIVER_MEMORY", "4g"),
         )
