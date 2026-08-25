@@ -80,6 +80,15 @@ uv run --all-packages ruff check .
 uv run --all-packages pytest
 ```
 
+`services/batch-jobs`의 Spark 테스트는 **JDK 21**이 필요하다. JDK 24 이상에서는
+`Subject.getSubject`가 막혀 SparkSession 생성 단계에서
+`UnsupportedOperationException: getSubject is not supported`로 실패한다. JDK 21을
+설치하고(`brew install openjdk@21`) `JAVA_HOME`을 지정한 뒤 실행한다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run --all-packages pytest
+```
+
 ## 테스트 및 빌드
 
 🚧 향후 작성 예정

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+from de4_core import perf_phase
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 
@@ -116,18 +117,23 @@ def run_cleansing_job(
     try:
         processed_count = target_processed.count()
         cleansing_quarantined_count = target_quarantined.count()
-        feature_summary = run_hourly_segment_feature_job(
-            spark,
-            processed_window,
-            feature_config,
-            target_hour,
-            road_snapshot_date,
-            feature_version,
-            run_id,
-            processed_at,
-            cleansing_quarantine=target_quarantined,
-            quarantine_output_path=cleansing_config.quarantine_output_path,
-        )
+        # T1 cleanse와 T2 feature가 한 Spark 세션에서 이어 돌기 때문에(#205, ADR-0006)
+        # Job Run 총시간만으로는 둘을 못 가른다. 여기서 T2만 따로 재고, T1은 CLI
+        # 경계의 sensor_processing.job에서 이 값을 빼서 얻는다(#461). 이 시점에
+        # processed_window는 이미 materialize돼 있어 액션을 새로 강제하지 않는다.
+        with perf_phase(logger, "sensor_processing.features"):
+            feature_summary = run_hourly_segment_feature_job(
+                spark,
+                processed_window,
+                feature_config,
+                target_hour,
+                road_snapshot_date,
+                feature_version,
+                run_id,
+                processed_at,
+                cleansing_quarantine=target_quarantined,
+                quarantine_output_path=cleansing_config.quarantine_output_path,
+            )
     finally:
         target_quarantined.unpersist()
         processed_window.unpersist()

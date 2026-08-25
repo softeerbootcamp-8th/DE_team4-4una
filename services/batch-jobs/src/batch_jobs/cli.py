@@ -10,8 +10,20 @@ import tempfile
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from de4_core import perf_phase
+
 from batch_jobs.pipeline import build_and_publish_environment
 from batch_jobs.sources import fetch_reference_sources
+
+logger = logging.getLogger(__name__)
+
+# 각 EMR Serverless Job Run 안에서 Spark 세션을 띄우는 데 쓴 시간과 job 로직에 쓴
+# 시간을 갈라 놓는다(#461). Job Run 총시간(GetJobRun)에서 이 둘을 빼면 EMR이 컨테이너를
+# 띄우고 내리는 데 쓴 시간이 남아, 베이스라인(#460)의 "오버헤드 대 실제 계산" 분해가 된다.
+# 액션을 새로 강제하지 않고 이미 끝난 호출의 벽시계 시간만 재므로 실행 계획은 그대로다.
+_SPARK_SESSION_PHASE = "spark_session"
+_POSTGRES_CONNECT_PHASE = "postgres_connect"
+_JOB_PHASE = "job"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -149,18 +161,20 @@ def run_cleansing(arguments: argparse.Namespace) -> None:
     )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    spark = build_spark_session()
+    with perf_phase(logger, f"sensor_processing.{_SPARK_SESSION_PHASE}"):
+        spark = build_spark_session()
     try:
-        summary = run_cleansing_job(
-            spark,
-            cleansing_config,
-            feature_config,
-            arguments.run_id,
-            arguments.target_hour,
-            arguments.road_snapshot_date,
-            arguments.feature_version,
-            datetime.now(UTC),
-        )
+        with perf_phase(logger, f"sensor_processing.{_JOB_PHASE}"):
+            summary = run_cleansing_job(
+                spark,
+                cleansing_config,
+                feature_config,
+                arguments.run_id,
+                arguments.target_hour,
+                arguments.road_snapshot_date,
+                arguments.feature_version,
+                datetime.now(UTC),
+            )
         print(
             json.dumps(
                 {
@@ -206,11 +220,11 @@ def run_hourly_scoring(arguments: argparse.Namespace) -> None:
     )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    spark = build_spark_session()
+    with perf_phase(logger, f"hourly_scoring.{_SPARK_SESSION_PHASE}"):
+        spark = build_spark_session()
     try:
-        summary = run_hourly_comfort_job(
-            spark, config, run_id, datetime.now(UTC)
-        )
+        with perf_phase(logger, f"hourly_scoring.{_JOB_PHASE}"):
+            summary = run_hourly_comfort_job(spark, config, run_id, datetime.now(UTC))
         print(
             json.dumps(
                 {
@@ -267,16 +281,19 @@ def run_standard_comfort_score_loading(arguments: argparse.Namespace) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     config = StandardComfortScoreJobConfig.from_env()
-    spark = build_spark_session()
-    connection = psycopg2.connect(
-        host=config.postgres_host,
-        port=config.postgres_port,
-        dbname=config.postgres_db,
-        user=config.postgres_user,
-        password=config.postgres_password,
-    )
+    with perf_phase(logger, f"standard_score.{_SPARK_SESSION_PHASE}"):
+        spark = build_spark_session()
+    with perf_phase(logger, f"standard_score.{_POSTGRES_CONNECT_PHASE}"):
+        connection = psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
     try:
-        summary = run_standard_comfort_score_job(spark, config, as_of, connection)
+        with perf_phase(logger, f"standard_score.{_JOB_PHASE}"):
+            summary = run_standard_comfort_score_job(spark, config, as_of, connection)
         print(
             json.dumps(
                 {
@@ -345,9 +362,13 @@ def run_sensor_processing_validation_cli(arguments: argparse.Namespace) -> None:
     )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    spark = build_spark_session()
+    with perf_phase(logger, f"validate_sensor_processing.{_SPARK_SESSION_PHASE}"):
+        spark = build_spark_session()
     try:
-        summary = run_sensor_processing_validation(spark, config, arguments.target_hour)
+        with perf_phase(logger, f"validate_sensor_processing.{_JOB_PHASE}"):
+            summary = run_sensor_processing_validation(
+                spark, config, arguments.target_hour
+            )
         print(
             json.dumps(
                 {
@@ -387,9 +408,11 @@ def run_hourly_scoring_validation_cli(arguments: argparse.Namespace) -> None:
     )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    spark = build_spark_session()
+    with perf_phase(logger, f"validate_hourly_scoring.{_SPARK_SESSION_PHASE}"):
+        spark = build_spark_session()
     try:
-        summary = run_hourly_scoring_validation(spark, config)
+        with perf_phase(logger, f"validate_hourly_scoring.{_JOB_PHASE}"):
+            summary = run_hourly_scoring_validation(spark, config)
         print(
             json.dumps(
                 {
@@ -421,15 +444,19 @@ def run_standard_score_validation_cli(arguments: argparse.Namespace) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     config = StandardScoreValidationConfig.from_env()
-    connection = psycopg2.connect(
-        host=config.postgres_host,
-        port=config.postgres_port,
-        dbname=config.postgres_db,
-        user=config.postgres_user,
-        password=config.postgres_password,
-    )
+    # 이 커맨드는 Spark를 쓰지 않는다(ADR-0004: Gold/Postgres는 SqlAlchemy 경로)
+    # — spark_session 구간이 없는 유일한 파이프라인 Job Run이다.
+    with perf_phase(logger, f"validate_standard_score.{_POSTGRES_CONNECT_PHASE}"):
+        connection = psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
     try:
-        summary = run_standard_score_validation(config, as_of, connection)
+        with perf_phase(logger, f"validate_standard_score.{_JOB_PHASE}"):
+            summary = run_standard_score_validation(config, as_of, connection)
         print(
             json.dumps(
                 {"row_count": summary.row_count, "success": summary.success},
