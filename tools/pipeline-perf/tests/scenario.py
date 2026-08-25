@@ -68,7 +68,17 @@ TASK_LOG = (
 )
 
 
-def build_collector(lake, *, xcoms=None, listed=None, with_spark=True, task_logs=None):
+def build_collector(
+    lake,
+    *,
+    xcoms=None,
+    listed=None,
+    with_spark=True,
+    task_logs=None,
+    run_ids=(),
+    since=None,
+    until=None,
+):
     airflow = FakeAirflowClient(
         dag_runs={"standard_score_pipeline": [DAG_RUN]},
         task_instances={RUN_ID: TASK_INSTANCES},
@@ -85,6 +95,9 @@ def build_collector(lake, *, xcoms=None, listed=None, with_spark=True, task_logs
     config = CollectConfig(
         dag_ids=["standard_score_pipeline"],
         last=5,
+        run_ids=run_ids,
+        since=since,
+        until=until,
         application_id=APPLICATION_ID,
         log_uri=str(lake / "logs"),
         bronze_input_uri=str(lake / "bronze"),

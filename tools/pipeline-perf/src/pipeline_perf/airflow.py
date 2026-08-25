@@ -103,12 +103,42 @@ class AirflowClient:
 
     # --- 도메인 --------------------------------------------------------
 
-    def dag_runs(self, dag_id: str, limit: int) -> list[dict[str, Any]]:
-        payload = self.get(
-            f"/dags/{dag_id}/dagRuns",
-            {"limit": limit, "order_by": "-run_after"},
-        )
+    def dag_runs(
+        self,
+        dag_id: str,
+        limit: int,
+        since: str | None = None,
+        until: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """최신순 DAG run 목록. 시간 구간은 `run_after`를 기준으로 자른다.
+
+        `run_after`가 `dag_run_id`에 박히는 시각이라 사람이 "9시 실행"이라고 부르는
+        것과 일치한다. `logical_date`는 data interval의 시작이라 09:00 실행이
+        08:00으로 잡혀 한 시간 어긋나고, `start_date`는 스케줄러 지연만큼 밀린다.
+        """
+        params: dict[str, Any] = {"limit": limit, "order_by": "-run_after"}
+        if since:
+            params["run_after_gte"] = since
+        if until:
+            params["run_after_lte"] = until
+        if state:
+            params["state"] = state
+        payload = self.get(f"/dags/{dag_id}/dagRuns", params)
         return payload.get("dag_runs", [])
+
+    def dag_run(self, dag_id: str, dag_run_id: str) -> dict[str, Any] | None:
+        """DAG run 하나를 지목해 읽는다. 없는 실행은 예외 대신 None이다.
+
+        오타나 이미 정리된 실행 하나 때문에 나머지 수집을 통째로 버릴 이유가 없다.
+        호출자가 None을 받아 `notes`에 남긴다.
+        """
+        try:
+            return self.get(f"/dags/{dag_id}/dagRuns/{dag_run_id}")
+        except requests.HTTPError as error:
+            if error.response is not None and error.response.status_code == 404:
+                return None
+            raise
 
     def task_instances(self, dag_id: str, dag_run_id: str) -> list[dict[str, Any]]:
         payload = self.get(f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", {"limit": 500})

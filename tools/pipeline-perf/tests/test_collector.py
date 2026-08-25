@@ -207,6 +207,47 @@ def test_a_run_without_spark_reports_no_compute_ratio(lake):
     assert overhead["compute_ratio"] is None
 
 
+def test_a_named_run_is_collected_in_full_without_listing_the_dag(lake):
+    """지목한 실행은 최근 N건에 없어도 가져오고, 목록 수집과 같은 깊이로 채운다."""
+    collector = build_collector(lake, run_ids=(RUN_ID,))
+
+    payload = collector.collect()
+
+    assert collector.airflow.dag_runs_calls == []
+    assert [run["dag_run_id"] for run in payload["dags"][0]["runs"]] == [RUN_ID]
+    task = payload["dags"][0]["runs"][0]["tasks"][1]
+    assert task["job_run_id"] == JOB_RUN_ID
+    assert task["emr"]["provisioning_wait_s"] == 70.0
+    assert task["spark"]["stage_count"] == 3
+
+
+def test_an_unknown_run_id_is_noted_rather_than_failing_the_collection(lake):
+    collector = build_collector(lake, run_ids=("does-not-exist", RUN_ID))
+
+    payload = collector.collect()
+
+    assert [run["dag_run_id"] for run in payload["dags"][0]["runs"]] == [RUN_ID]
+    assert any("does-not-exist" in note for note in payload["notes"])
+
+
+def test_a_time_window_is_passed_through_to_the_dag_run_query(lake):
+    collector = build_collector(
+        lake, since="2026-08-25T02:00:00+00:00", until="2026-08-25T03:00:00+00:00"
+    )
+
+    collector.collect()
+
+    assert collector.airflow.dag_runs_calls == [
+        {
+            "dag_id": "standard_score_pipeline",
+            "limit": 5,
+            "since": "2026-08-25T02:00:00+00:00",
+            "until": "2026-08-25T03:00:00+00:00",
+            "state": None,
+        }
+    ]
+
+
 def test_in_flight_run_is_excluded_from_the_baseline(lake):
     """아직 도는 중인 실행은 구간이 반만 찍혀 있어 평균을 왜곡한다."""
     collector = build_collector(lake)

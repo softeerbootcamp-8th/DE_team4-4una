@@ -33,10 +33,17 @@ _NEVER_RAN_STATES = frozenset({"upstream_failed", "skipped", "removed", "none", 
 
 @dataclass(frozen=True, slots=True)
 class CollectConfig:
-    """`pipeline-perf collect` 한 번의 수집 범위."""
+    """`pipeline-perf collect` 한 번의 수집 범위.
+
+    선택자는 셋 중 하나다. `run_ids`가 있으면 그 실행만 지목해 읽고 목록 조회를
+    건너뛴다. 없으면 `since`/`until`로 자른 구간에서 최신 `last`건을 본다.
+    """
 
     dag_ids: list[str]
     last: int = 5
+    run_ids: tuple[str, ...] = ()
+    since: str | None = None
+    until: str | None = None
     application_id: str | None = None
     log_uri: str | None = None
     bronze_input_uri: str | None = None
@@ -101,7 +108,7 @@ class Collector:
         asset_triggers: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         runs = []
-        for dag_run in self.airflow.dag_runs(dag_id, self.config.last):
+        for dag_run in self._selected_dag_runs(dag_id):
             if not dag_run.get("end_date"):
                 # 아직 도는 중인 실행은 구간이 반만 찍혀 있다. 베이스라인 평균에
                 # 섞으면 총시간을 실제보다 짧게 만든다.
@@ -116,6 +123,28 @@ class Collector:
                 )
             )
         return {"dag_id": dag_id, "runs": runs}
+
+    def _selected_dag_runs(self, dag_id: str) -> list[dict[str, Any]]:
+        """이 DAG에서 수집할 실행 목록.
+
+        `run_ids`를 지정하면 목록 조회 없이 그 실행만 한 건씩 읽는다. 최근 N건 안에
+        남아 있지 않은 실행도 지목할 수 있고, event log를 읽는 양도 그만큼 줄어든다.
+        """
+        if not self.config.run_ids:
+            return self.airflow.dag_runs(
+                dag_id,
+                self.config.last,
+                since=self.config.since,
+                until=self.config.until,
+            )
+        selected = []
+        for run_id in self.config.run_ids:
+            dag_run = self.airflow.dag_run(dag_id, run_id)
+            if dag_run is None:
+                self.notes.append(f"{dag_id}: {run_id} 실행이 없어 건너뛴다.")
+                continue
+            selected.append(dag_run)
+        return selected
 
     def _collect_run(
         self,

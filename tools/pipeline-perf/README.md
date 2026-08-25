@@ -1,7 +1,7 @@
 # pipeline-perf
 
 승차감 점수 파이프라인의 성능 베이스라인을 명령 한 번으로 수집하고, 같은 명령으로
-최적화 전후를 비교하기 위한 오프라인 도구다(#460, #462).
+최적화 전후를 비교하기 위한 오프라인 도구다(#460, #462, #492).
 
 `services/*`가 아니라 `tools/`에 있는 이유는 런타임 경로가 아니기 때문이다. 배포되지
 않고, 사람이 손으로 돌린다.
@@ -49,6 +49,41 @@ uv run --package pipeline-perf pipeline-perf compare \
     --before out/perf/collect-before.json \
     --after out/perf/collect-after.json
 ```
+
+### 수집할 실행 고르기
+
+`collect`의 선택자는 셋 중 하나다.
+
+| 선택자 | 무엇을 가져오는가 |
+| --- | --- |
+| `--last N` (기본 5) | 최근 N건 |
+| `--since` / `--until` | 그 시간 구간의 실행 (`--last`가 개수 상한) |
+| `--run-id` (반복 가능) | 지목한 실행만. 목록 조회를 건너뛴다 |
+
+```bash
+# 실행 1건만 — 파이프라인 1회 실행에 대한 성능 검증
+uv run --package pipeline-perf pipeline-perf collect \
+    --dag-id standard_score_pipeline \
+    --run-id 'scheduled__2026-08-25T09:00:00+00:00'
+
+# 시간 구간 — 최적화 전후를 같은 시간대끼리 비교할 때
+uv run --package pipeline-perf pipeline-perf collect \
+    --dag-id standard_score_pipeline \
+    --since 2026-08-25T09:00:00Z --until 2026-08-25T10:00:00Z
+```
+
+**단일 실행을 권장한다.** `compare`는 DAG run 1건당 평균으로 비교하는데, 수집 구간에
+실패·재시도한 실행이 섞이면 평균이 크게 움직인다. 실제 베이스라인 수집에서 5건 평균의
+Airflow gap은 25.4%였지만 정상 실행 1건만 보면 0.3%였다(#492). 수집도 그만큼 빠르다 —
+`--last 5`는 event log 약 30건을 파싱해 4분이 걸리지만 1건이면 6건만 읽는다.
+
+`--since` / `--until`의 기준 시각은 **`run_after`** 다. `run_after`가 `dag_run_id`에
+박히는 시각이라 사람이 "9시 실행"이라고 부르는 것과 일치한다. `logical_date`는 data
+interval의 시작이라 09:00 실행이 08:00으로 잡혀 한 시간 어긋나고, `start_date`는
+스케줄러 지연만큼 밀린다. 시간대를 안 붙인 값은 UTC로 읽는다.
+
+`--run-id`는 DAG 하나를 대상으로 쓴다. 존재하지 않는 실행을 넘기면 수집이 실패하지
+않고 그 사실을 `notes`에 남긴 채 나머지를 이어간다.
 
 AWS 자격증명은 boto3 기본 체인을 따른다. 프로필을 쓰면 `--aws-profile`,
 `--aws-region`을 넘긴다. Application ID·로그 URI·Bronze 입력 경로는 지정하지 않으면
