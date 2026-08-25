@@ -5,7 +5,7 @@ from batch_jobs.comfort_scoring_config import (
     DEFAULT_HOURLY_SCORING_CONFIG,
     DEFAULT_HOURLY_SCORING_CONFIG_PATH,
 )
-from batch_jobs.hourly_comfort import calculate_hourly_comfort_scores
+from batch_jobs.hourly_comfort import CLASSIFIED_COLUMNS, build_hourly_scoring_plan
 from batch_jobs.hourly_comfort_job import HourlyComfortJobConfig, run_hourly_comfort_job
 from batch_jobs.hourly_comfort_storage import hour_output_path as score_hour_path
 from batch_jobs.hourly_segment_feature_storage import (
@@ -17,6 +17,16 @@ from batch_jobs.schemas import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructField, StructType
+
+# Parquet 읽기는 선언 스키마의 nullable=False를 강제하지 않는다. 파일에 NULL이 있으면
+# 그대로 흘러들어오므로, 그 상황을 만들려면 느슨한 스키마로 DataFrame을 만들어야 한다.
+_NULLABLE = StructType(
+    [
+        StructField(field.name, field.dataType, nullable=True)
+        for field in HOURLY_SEGMENT_FEATURE_SCHEMA
+    ]
+)
 
 
 @pytest.fixture(scope="module")
@@ -88,22 +98,37 @@ class TestCalculateHourlyComfortScores:
             row[target] = int(value * row["trip_count"]) if name in count_columns else value
         return row
 
-    def score(self, spark, *rows: dict[str, object]):
-        features = spark.createDataFrame(list(rows), HOURLY_SEGMENT_FEATURE_SCHEMA)
-        return calculate_hourly_comfort_scores(features, "silver3-run", self.PROCESSED_AT)
+    def nullable_row(self, segment_id: str = "100001", **overrides: object):
+        """NULL을 넣을 수 있는 행. `_NULLABLE` 스키마와 함께 쓴다."""
+        return _NULLABLE, self.feature_row(segment_id, **overrides)
+
+    def score(self, spark, *rows):
+        # nullable_row()를 섞어 쓰면 그 행들은 느슨한 스키마로 만든다 — Parquet 읽기가
+        # nullable=False를 강제하지 않는 상황을 그대로 재현하기 위함이다.
+        schema = HOURLY_SEGMENT_FEATURE_SCHEMA
+        payload = []
+        for row in rows:
+            if isinstance(row, tuple):
+                schema, row = row
+            payload.append(row)
+        features = spark.createDataFrame(payload, schema)
+        return build_hourly_scoring_plan(features, "silver3-run", self.PROCESSED_AT)
 
     def test_produces_the_declared_schema_and_metadata(self, spark):
         result = self.score(spark, self.feature_row())
 
-        assert result.scored.collect() == self.score(spark, self.feature_row()).scored.collect()
-        assert result.scored.columns == [
+        assert (
+            result.scored().collect()
+            == self.score(spark, self.feature_row()).scored().collect()
+        )
+        assert result.scored().columns == [
             field.name for field in HOURLY_COMFORT_SCORE_SCHEMA
         ]
-        assert [field.dataType for field in result.scored.schema] == [
+        assert [field.dataType for field in result.scored().schema] == [
             field.dataType for field in HOURLY_COMFORT_SCORE_SCHEMA
         ]
-        row = result.scored.first()
-        assert all(row[column] is not None for column in result.scored.columns)
+        row = result.scored().first()
+        assert all(row[column] is not None for column in result.scored().columns)
         assert row["scoring_version"] == "1.0.0"
         assert row["_run_id"] == "silver3-run"
         assert (row["sample_count"], row["trip_count"]) == (36_000, 10)
@@ -117,7 +142,7 @@ class TestCalculateHourlyComfortScores:
             self.uncomfortable_row("turning", "lateral_score"),
             self.feature_row("ten-trips", hard_brake_count=10, trip_count=10),
             self.feature_row("twenty-trips", hard_brake_count=20, trip_count=20),
-        ).scored
+        ).scored()
         by_segment = {row.segment_id: row for row in rows.collect()}
         smooth = by_segment["smooth"]
 
@@ -139,18 +164,79 @@ class TestCalculateHourlyComfortScores:
         accepted = self.score(spark, self.feature_row(rms_steering_vibration=None))
         rejected = self.score(spark, self.feature_row(rms_accel_z=None, p95_abs_accel_z=None))
 
-        assert accepted.scored.count() == 1
-        assert accepted.rejected.count() == 0
-        assert rejected.scored.count() == 0
-        assert rejected.rejected.first().reject_reason == "INSUFFICIENT_SCORING_FEATURES"
+        assert accepted.scored().count() == 1
+        assert accepted.rejected().count() == 0
+        assert rejected.scored().count() == 0
+        assert (
+            rejected.rejected().first().reject_reason == "INSUFFICIENT_SCORING_FEATURES"
+        )
 
+    def test_caches_only_the_columns_the_two_outputs_need(self, spark):
+        """분기 전에 캐시할 공통 결과는 downstream이 쓰는 컬럼만 들고 있어야 한다."""
+        plan = self.score(spark, self.feature_row())
+
+        assert plan.classified.columns == list(CLASSIFIED_COLUMNS)
+        # 점수 출력이 요구하는 필드는 캐시 컬럼이거나 F.lit()으로 붙는 메타데이터뿐이다.
+        supplied = set(CLASSIFIED_COLUMNS) | {
+            "scoring_version",
+            "_run_id",
+            "_processed_at",
+        }
+        assert not {field.name for field in HOURLY_COMFORT_SCORE_SCHEMA} - supplied
+
+    def test_audit_reports_both_row_counts_in_one_pass(self, spark):
+        counts = self.score(
+            spark,
+            self.feature_row("scored"),
+            self.feature_row("rejected", sample_count=0),
+        ).audit()
+
+        assert (counts.scored_count, counts.rejected_count) == (1, 1)
+
+    # 데이터를 읽어야 아는 검증은 audit()의 단일 집계로 모았다. 계획을 만드는 단계는
+    # 표현식만 세우므로 여기서는 아직 실패하지 않는다.
     def test_rejects_an_unsupported_feature_version(self, spark):
+        plan = self.score(spark, self.feature_row(feature_version="hourly-features-v2"))
+
         with pytest.raises(ValueError, match="unsupported feature versions"):
-            self.score(spark, self.feature_row(feature_version="hourly-features-v2"))
+            plan.audit()
+
+    def test_rejects_a_null_feature_version(self, spark):
+        """collect_set이 NULL을 버리므로 별도로 세지 않으면 조용히 통과한다."""
+        plan = self.score(spark, self.nullable_row(feature_version=None))
+
+        with pytest.raises(ValueError, match="feature_version must not be null"):
+            plan.audit()
 
     def test_rejects_duplicate_primary_keys(self, spark):
+        plan = self.score(spark, self.feature_row(), self.feature_row())
+
         with pytest.raises(ValueError, match="duplicate primary keys"):
-            self.score(spark, self.feature_row(), self.feature_row())
+            plan.audit()
+
+    def test_a_null_in_a_non_nullable_count_is_quarantined(self, spark):
+        """`nullable=False` 선언은 Parquet 읽기에서 강제되지 않는다.
+
+        NULL이 섞이면 eligible 조건식이 NULL이 되는데, 이를 boolean으로 확정하지 않으면
+        그 행은 점수 출력과 격리 출력 어디에도 못 들어가고 사라진다.
+        """
+        plan = self.score(
+            spark,
+            self.nullable_row("healthy"),
+            self.nullable_row("null-sample-count", sample_count=None),
+            self.nullable_row("null-trip-count", trip_count=None),
+        )
+
+        scored = {row.segment_id for row in plan.scored().collect()}
+        rejected = {row.segment_id: row.reject_reason for row in plan.rejected().collect()}
+
+        assert scored == {"healthy"}
+        assert rejected == {
+            "null-sample-count": "INVALID_SCORING_INPUT",
+            "null-trip-count": "INVALID_SCORING_INPUT",
+        }
+        # 입력 3행이 출력 3행으로 보존된다 — 어느 쪽에서도 조용히 사라지지 않는다.
+        assert len(scored) + len(rejected) == 3
 
 
 class TestRunHourlyComfortJob:
