@@ -29,7 +29,8 @@ RUN uv export \
         --no-deps \
         ./libs/de4-core \
         ./services/batch-jobs \
-    && rm -f /tmp/batch-jobs-requirements.txt
+    && rm -f /tmp/batch-jobs-requirements.txt \
+    && rm -rf /root/.cache/uv
 
 # PostgreSQL JDBC Driver
 RUN curl -fL \
