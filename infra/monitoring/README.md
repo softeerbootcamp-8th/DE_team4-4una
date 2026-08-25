@@ -430,6 +430,52 @@ Grafana는 3000 포트를 그대로 공개하므로 브라우저에서 바로 �
 http://<MONITORING_EC2_PUBLIC_IP>:3000
 ```
 
+## Alert rule
+
+`grafana/provisioning/alerting/`의 세 파일이 alert를 정의한다. 파일 기반 프로비저닝이라
+Grafana UI에서 수정할 수 없다 — 변경은 이 파일들을 고쳐 배포한다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `rules.yaml` | alert 룰 (`spark-streaming`, `infrastructure` 그룹) |
+| `contact-points.yaml` | `ops-agent`(webhook+Slack), `infra-slack`(Slack 전용) |
+| `notification-policies.yaml` | 기본 `ops-agent`, `service=infrastructure`는 `infra-slack` |
+
+### ProjectDiskPressure (#495)
+
+Project EC2 루트 볼륨 사용률이 **80%를 10분 이상** 넘으면 Slack으로 알린다.
+
+```promql
+100 * (1 - node_filesystem_avail_bytes{job="project-node",mountpoint="/"}
+         / node_filesystem_size_bytes{job="project-node",mountpoint="/"})
+```
+
+이 볼륨은 Kafka·Airflow·serving-api·dashboard·Docker 이미지가 공유한다. 가득 차면
+broker만 죽는 것이 아니라 scheduler와 API까지 함께 멈춘다(`no space left on device`
+2회 발생). 그래서 대상이 Kafka가 아니라 **호스트 디스크**다.
+
+`for: 10m`은 대량 segment 삭제나 이미지 pull 중의 순간적인 상승에 반응하지 않기
+위한 것이다. `device`/`fstype`은 인스턴스를 교체하면 바뀔 수 있어 매칭에 쓰지 않는다.
+
+**자동 조치를 붙이지 않는다.** 디스크 정리는 삭제 동작이라 무엇을 지울지 사람이
+판단해야 한다. `auto_remediate` 라벨이 없으므로 ops-agent는 이 alert에 반응하지 않고,
+`infra-slack` route가 ops-agent webhook 자체를 건너뛴다.
+
+발화 시 확인 순서는 다음과 같다.
+
+```bash
+df -h /
+docker system df                     # 이미지/빌드 캐시
+docker exec de4-kafka-kafka-1 du -sh /var/lib/kafka/data
+du -sh ~/DE_team4-4una/logs 2>/dev/null   # Airflow 로그
+```
+
+### 임계값 검증 방법
+
+`for: 10m` + 80% 조건은 평상시(약 50%) 발화하지 않는다. 실제 Slack 수신을 확인하려면
+`rules.yaml`의 `params: [80]`을 현재 사용률 아래로 잠시 낮춰 배포하고, 확인 후 원복한다.
+Grafana UI의 Alert rules에서 룰이 `Provisioned`로 보이는지도 함께 확인한다.
+
 ## Grafana Dashboard
 
 Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`, `Serving API`,
