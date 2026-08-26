@@ -86,7 +86,6 @@ jobs:
             workspace:
               - *shared
               - 'services/dashboard/**'
-              - 'services/gold-loader/**'
               - 'tests/**'
             # 바뀐 Python 파일 목록을 받기 위한 필터다. 이 목록 중 위 필터가 담당하지
             # 않는 경로가 있으면 아래 스텝이 전체 대상으로 승격한다. 여기서 '!' 제외
@@ -141,7 +140,7 @@ jobs:
           for path in $PYTHON_FILES; do
             case "$path" in
               libs/de4-core/* | tests/* | \
-              services/batch-jobs/* | services/dashboard/* | services/gold-loader/* | \
+              services/batch-jobs/* | services/dashboard/* | \
               services/ops-agent/* | services/orchestration/* | \
               services/sensor-producer/* | \
               services/serving-api/* | services/stream-processor/* | \
