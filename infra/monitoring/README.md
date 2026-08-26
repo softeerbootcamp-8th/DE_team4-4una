@@ -848,9 +848,6 @@ ops-agent 코드는 전혀 건드리지 않았고 새 secret도 필요 없다.
 | `kafka_topic_partitions` | Gauge | `topic` |
 | `kafka_topic_partition_current_offset` | Gauge | `topic`, `partition` |
 | `kafka_topic_partition_under_replicated_partition` | Gauge | `topic`, `partition` |
-| `kafka_consumergroup_lag` | Gauge | `consumergroup`, `topic`, `partition` |
-| `kafka_consumergroup_lag_sum` | Gauge | `consumergroup`, `topic` (모든 partition 합산) |
-| `kafka_consumergroup_members` | Gauge | `consumergroup` |
 
 패널별 PromQL:
 
@@ -863,10 +860,6 @@ ops-agent 코드는 전혀 건드리지 않았고 새 secret도 필요 없다.
 | Under Replicated | `sum(kafka_topic_partition_under_replicated_partition{job="kafka"})` |
 | Under Replicated Partitions(표) | `kafka_topic_partition_under_replicated_partition{job="kafka"} > 0` |
 | Message Rate over Time | `sum by (topic) (rate(kafka_topic_partition_current_offset{job="kafka", topic!~"__.*"}[5m]))` |
-| Consumer Lag | `sum(kafka_consumergroup_lag{job="kafka"})` |
-| Consumer Lag Trend | `deriv(sum by (instance, consumergroup) (kafka_consumergroup_lag_sum{job="kafka"})[10m:1m])` |
-| Consumer Lag by Topic | `sum by (topic) (kafka_consumergroup_lag_sum{job="kafka"})` |
-| Consumer Group Members | `sum by (consumergroup) (kafka_consumergroup_members{job="kafka"})` |
 
 **Under Replicated Partitions**는 새 metric 없이 `Under Replicated` 패널이 쓰는
 raw metric을 `table` 패널로 그대로 나열한 것이다. `Under Replicated`가 개수만
@@ -875,15 +868,8 @@ raw metric을 `table` 패널로 그대로 나열한 것이다. `Under Replicated
 컬럼으로 보여준다. under-replicated partition이 없으면(`> 0` 조건에 걸리는
 시계열이 없으면) 표가 비어 있는 게 정상이다.
 
-**Consumer Lag Trend**는 새 metric 없이 기존 `kafka_consumergroup_lag_sum`의
-10분 구간 변화율(`deriv`)만 계산한다. 절대값(Consumer Lag)만으로는 "지금 lag가
-쌓이는 중인지 줄어드는 중인지" 알기 어려운데, 이 패널은 그 추세를 직접
-보여준다 — 양수면 계속 쌓이는 중(=consumer가 producer 속도를 못 따라감), 음수면
-줄어드는 중이다. 이 프로젝트에서 `sensor-events`의 consumer는
-Spark Streaming(stream-processor) 하나뿐이라, 이 값이 계속 양수로 유지되면
-파이프라인 지연이 커지고 있다는 신호다 — Spark Streaming dashboard의 `Last
-Progress Age`/`Event-Time Lag`와 함께 보면 지연이 Kafka 쪽(consumer가 못
-따라감)인지 Spark 쪽(마이크로배치 자체가 멈춤)인지 구분하는 데 도움이 된다.
+**이 dashboard에는 consumer lag 패널이 없다.** 이유는 아래 "명확히 해 둘 점"
+참고 — lag은 Spark Streaming dashboard의 `Kafka Offset Lag`로 본다.
 
 몇 가지 명확히 해 둘 점:
 
@@ -895,12 +881,17 @@ Progress Age`/`Event-Time Lag`와 함께 보면 지연이 Kafka 쪽(consumer가 
   증가율로 근사한 message(레코드) 개수 기준 rate다. Kafka broker의 실제
   `Bytes In/Out` JMX metric은 이번 작업 범위에서 제외했다(JMX Exporter 추가
   금지) — dashboard와 이 문서 모두 "Bytes In/Out"이라고 부르지 않는다.
-- **Consumer 관련 패널(`Consumer Lag`, `Consumer Lag by Topic`,
-  `Consumer Group Members`)은 consumer group이 하나도 없으면 `No data`가
-  정상이다.** Kafka Exporter는 실행 중인 consumer group이 없으면 이 metric
-  자체를 아예 내보내지 않는다 — Prometheus나 exporter 장애가 아니다. 검증할
-  때는 먼저 실제 consumer(예: `stream-processor`)가 그 토픽에 붙어 있는지
-  확인한다.
+- **consumer lag 패널을 두지 않는다(#586).** `sensor-events`의 유일한
+  consumer인 Spark Structured Streaming은 consumer group에 join하지 않고
+  offset을 commit하지도 않는다 — 파티션을 `assign()`으로 직접 잡고 offset은
+  checkpoint에만 저장한다(`services/stream-processor/src/stream_processor/kafka_source.py`,
+  `kafka.group.id` 설정 없음). Kafka Exporter는 committed offset으로 lag을
+  계산하므로 `kafka_consumergroup_*` 시계열이 애초에 생성되지 않는다.
+  stream-processor가 정상 동작 중이어도 영구 `No data`라서, 한때 있던 네 개의
+  Consumer 패널을 지웠다. lag은 Spark Streaming dashboard의 `Kafka Offset Lag`
+  (`sum(kafka_topic_partition_current_offset) - stream_processor_kafka_end_offset_sum`)로
+  본다 — consumer group lag이 commit 주기에 묶이는 것과 달리 micro-batch commit
+  기준이라 이 구조에 더 정확하다.
 
 ### Airflow dashboard 지표
 
@@ -1071,7 +1062,7 @@ metric들을 갱신한다.
   풀린다.
 - **`Micro-batch Duration`은 배치가 5초~5분 간격으로만 발생해 데이터 포인트가
   희소하다.** `rate(...[5m])` 윈도우 안에 샘플이 아예 없으면 `No data`가
-  정상이다 — Kafka Exporter의 `Consumer Lag`류 패널과 같은 이유다.
+  정상이다 — 장애가 아니라 그 구간에 배치가 없었다는 뜻이다.
 
 ### Silver/Gold freshness는 아직 측정 불가 (observability gap)
 
@@ -1229,8 +1220,10 @@ Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시�
 
 **의도적으로 뺀 상태 — 임의 threshold를 만들지 않기 위해서다.**
 
-- Kafka `HIGH LAG`: `kafka_consumergroup_lag`에 정상 범위로 합의된 기준이
-  없다. Consumer Lag 패널도 threshold 없이 raw 값만 보여준다.
+- Kafka `HIGH LAG`: 정상 범위로 합의된 기준이 없고, 애초에
+  `kafka_consumergroup_lag` metric 자체가 이 구조에서는 존재하지 않는다
+  (위 [Kafka dashboard 지표](#kafka-dashboard-지표) 참고). lag은 Spark
+  Streaming 쪽 `Kafka Offset Lag`로 본다.
 - Spark `KAFKA BACKLOG` 절대값: 정상 backlog 크기로 합의한 기준이 없어
   임의 threshold를 두지 않는다. 대신 Kafka 입력 중 2분 연속으로
   backlog가 커지는 추세를 `BronzeIngestionLagGrowing`으로 감지한다.
@@ -1253,8 +1246,8 @@ Kafka Consumer Lag, Serving API p95 latency는 위와 같은 이유로 Gauge로
 나중에 `prometheus.yml`에 같은 job에 target을 하나 더 추가하면(아래
 [Prometheus target 구조](#prometheus-target-구조) 참고) 그 즉시 instance별로
 분리돼 나온다. 적용한 곳: Kafka(Topics/Partitions/Under Replicated/Message
-Rate/Consumer Lag류 전부), Airflow(Failures by DAG/Task), Serving API
-(Requests/Latency by Endpoint).
+Rate), Airflow(Failures by DAG/Task), Serving API(Requests/Latency by
+Endpoint).
 
 **Airflow의 multi-instance 한계 (해결하지 않음, 알려진 제약).** scheduler/
 dag-processor/api-server가 여러 node에 떠도 전부 StatsD UDP로
@@ -1354,9 +1347,9 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
      응답하는지(연결 자체가 안 되면 3번은 통과해도 이건 실패할 수 있다).
   5. Project EC2 Security Group에 9308(source: Monitoring EC2 Security Group)
      inbound 규칙이 있는지.
-  6. 위가 다 정상인데 `Consumer Lag`류 패널만 `No data`라면, 위
-     [Kafka dashboard 지표](#kafka-dashboard-지표) 마지막 항목대로 consumer
-     group이 아직 없는 것뿐일 수 있다 — 장애가 아니다.
+  6. consumer lag이 궁금하다면 이 dashboard가 아니라 Spark Streaming
+     dashboard의 `Kafka Offset Lag`를 본다 — 이유는 위
+     [Kafka dashboard 지표](#kafka-dashboard-지표)의 consumer lag 항목 참고.
 
 - Airflow 패널: `up{job="airflow"}`가 `0`이거나 값이 없으면, 또는 `up`은
   `1`인데 `airflow_`로 시작하는 metric이 하나도 안 보이면 아래를 순서대로
