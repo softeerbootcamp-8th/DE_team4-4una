@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 # Service Map
@@ -55,8 +55,11 @@ against `services/batch-jobs` (which owns the road environment) is unchanged.
 
 ## Current `dashboard` scope
 
-Issue #376 implements the dashboard as a Streamlit/Folium application. It reads
-the versioned `road_segment` geometry snapshot directly from S3, but reads
+Issue #376 implemented the first dashboard as a Streamlit/Folium application;
+issue #435 replaced it with a FastAPI backend serving a React frontend. The
+browser talks only to this backend, and S3/serving-API access happens
+server-side. It reads the versioned `road_segment` geometry snapshot
+directly from S3, but reads
 comfort scores only through the serving API batch endpoint. It does not connect
 to PostgreSQL, calculate scores, or reproduce the serving API's
 current-to-standard fallback policy.
