@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from de4_core import perf_phase
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -140,23 +141,26 @@ def run_hourly_segment_feature_job(
         matching_config.heading_weight.value,
     )
 
-    # Map Matching/Steering-Event 단계 elapsed를 따로 재려고 여기서 먼저 materialize한다(#474).
-    matched_df = sensor_df.join(selected, on="event_id", how="left").persist(
-        StorageLevel.MEMORY_AND_DISK
-    )
-    try:
+    # 단계를 여기서 먼저 materialize해야 Map Matching과 Steering-Event 시간이 갈린다(#474).
+    # 그 시간은 perf_phase가 PERF 줄로 남긴다(#527) — 예전에는 time.monotonic()으로 재서
+    # 자유 형식 로그에 실었는데, pipeline-perf가 PERF 줄만 파싱해 리포트에 들어오지
+    # 않았다. 아래 phase는 모두 이미 있던 count()/write 경계에 붙어, 시간을 재려고
+    # 액션을 새로 강제하지 않는다.
+    with perf_phase(logger, "sensor_processing.map_matching") as map_matching_fields:
+        matched_df = sensor_df.join(selected, on="event_id", how="left").persist(
+            StorageLevel.MEMORY_AND_DISK
+        )
         matched_count = matched_df.count()
-        map_matching_elapsed = time.monotonic() - job_started
+        map_matching_fields["rows"] = matched_count
+    try:
         logger.info(
             "hourly segment feature job map matching finished run_id=%s target_hour=%s "
-            "matched=%d elapsed=%.1fs",
+            "matched=%d",
             run_id,
             target_hour.isoformat(),
             matched_count,
-            map_matching_elapsed,
         )
 
-        steering_event_started = time.monotonic()
         # steering_rate/reversal + 3개 episode를 한 파이프라인에서 계산해 반복되는 trip-order Window를 줄인다(#487).
         event_df = add_steering_and_event_features(
             matched_df,
@@ -171,82 +175,76 @@ def run_hourly_segment_feature_job(
         )
 
         # 입력이 이미 대상 시간뿐이라 이 필터는 안전장치다. 재계산 방지를 위해 persist한다.
-        target_df = event_df.filter(
-            (F.col("event_time") >= target_hour) & (F.col("event_time") < target_hour_end)
-        ).persist(StorageLevel.MEMORY_AND_DISK)
         # 즉시 materialize 안 하면 실패 스택트레이스가 엉뚱한 곳(aggregation.py)을 가리킨다(#386).
-        try:
+        with perf_phase(logger, "sensor_processing.steering_event") as steering_fields:
+            target_df = event_df.filter(
+                (F.col("event_time") >= target_hour)
+                & (F.col("event_time") < target_hour_end)
+            ).persist(StorageLevel.MEMORY_AND_DISK)
             target_count = target_df.count()
-            steering_event_elapsed = time.monotonic() - steering_event_started
+            steering_fields["rows"] = target_count
+        try:
             logger.info(
                 "hourly segment feature job steering/event feature processing finished "
-                "run_id=%s target_hour=%s target=%d elapsed=%.1fs",
+                "run_id=%s target_hour=%s target=%d",
                 run_id,
                 target_hour.isoformat(),
                 target_count,
-                steering_event_elapsed,
             )
 
-            # quarantine write + feature write를 "storage" 시간으로 보되 사이에 낀 aggregation은 빼려고 따로 잰다(#474).
-            quarantine_write_started = time.monotonic()
-            map_matching_quarantine = _build_map_matching_quarantine(
-                target_df, raw_record_source, run_id, processed_at
-            ).persist(StorageLevel.MEMORY_AND_DISK)
-            try:
-                map_matching_quarantined_count = map_matching_quarantine.count()
-                combined_quarantine = cleansing_quarantine.unionByName(
-                    map_matching_quarantine
-                )
-                quarantine_write = write_hourly_quarantine(
-                    spark,
-                    combined_quarantine,
-                    quarantine_output_path,
-                    target_hour,
-                    run_id,
-                )
-            finally:
-                map_matching_quarantine.unpersist()
-            quarantine_write_elapsed = time.monotonic() - quarantine_write_started
+            with perf_phase(
+                logger, "sensor_processing.quarantine_write"
+            ) as quarantine_fields:
+                map_matching_quarantine = _build_map_matching_quarantine(
+                    target_df, raw_record_source, run_id, processed_at
+                ).persist(StorageLevel.MEMORY_AND_DISK)
+                try:
+                    map_matching_quarantined_count = map_matching_quarantine.count()
+                    combined_quarantine = cleansing_quarantine.unionByName(
+                        map_matching_quarantine
+                    )
+                    quarantine_write = write_hourly_quarantine(
+                        spark,
+                        combined_quarantine,
+                        quarantine_output_path,
+                        target_hour,
+                        run_id,
+                    )
+                finally:
+                    map_matching_quarantine.unpersist()
+                quarantine_fields["rows"] = quarantine_write.row_count
 
             accepted_count = target_count - map_matching_quarantined_count
-            aggregation_started = time.monotonic()
-            result = build_hourly_segment_features(
-                target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
-            ).persist(StorageLevel.MEMORY_AND_DISK)
-            try:
+            with perf_phase(logger, "sensor_processing.aggregation") as aggregation_fields:
+                result = build_hourly_segment_features(
+                    target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
+                ).persist(StorageLevel.MEMORY_AND_DISK)
                 # 한 번에 materialize해 validate/write가 이 캐시를 재사용하게 한다(#474).
                 result_count = result.count()
                 # 이미 persist된 DataFrame이면 validate가 캐시를 건드리지 않아 여기서 재계산 안 한다.
                 validate_hourly_segment_features(result)
-                aggregation_elapsed = time.monotonic() - aggregation_started
+                aggregation_fields["rows"] = result_count
+            try:
                 logger.info(
                     "hourly segment feature job hourly aggregation finished run_id=%s "
-                    "target_hour=%s result=%d elapsed=%.1fs",
+                    "target_hour=%s result=%d",
                     run_id,
                     target_hour.isoformat(),
                     result_count,
-                    aggregation_elapsed,
                 )
 
-                feature_write_started = time.monotonic()
-                write_result = write_hourly_segment_features(
-                    spark,
-                    result,
-                    config.output_path,
-                    target_hour,
-                    run_id,
-                    result_count=result_count,
-                )
-                feature_write_elapsed = time.monotonic() - feature_write_started
-                storage_elapsed = quarantine_write_elapsed + feature_write_elapsed
-                logger.info(
-                    "hourly segment feature job storage finished run_id=%s target_hour=%s "
-                    "output_path=%s elapsed=%.1fs",
-                    run_id,
-                    target_hour.isoformat(),
-                    write_result.output_path,
-                    storage_elapsed,
-                )
+                with perf_phase(
+                    logger, "sensor_processing.feature_write"
+                ) as feature_write_fields:
+                    write_result = write_hourly_segment_features(
+                        spark,
+                        result,
+                        config.output_path,
+                        target_hour,
+                        run_id,
+                        result_count=result_count,
+                    )
+                    feature_write_fields["rows"] = write_result.row_count
 
                 total_elapsed = time.monotonic() - job_started
                 _log_summary(

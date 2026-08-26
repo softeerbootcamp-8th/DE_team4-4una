@@ -87,43 +87,49 @@ def run_cleansing_job(
     target_quarantined: DataFrame | None = None
     target_bronze: DataFrame | None = None
 
-    for hour in _overlapping_hours(window_start, window_end):
-        bronze_hour = read_bronze_sensor_events(
-            spark, cleansing_config.bronze_input_path, hour
-        )
-        hourly_bronze = filter_bronze_sensor_events_for_hour(bronze_hour, hour)
-        cleansed = cleanse_bronze_sensor_events(
-            hourly_bronze,
-            rules,
-            run_id,
-            processed_at,
-        )
-        cached_bronze_frames.append(hourly_bronze)
-        processed_frames.append(cleansed.processed)
-        if hour == target_hour:
-            target_processed = cleansed.processed
-            target_quarantined = cleansed.quarantined
-            target_bronze = hourly_bronze
+    # T1 cleanse와 T2 feature가 한 Spark 세션에서 이어 돌기 때문에(#205, ADR-0006)
+    # Job Run 총시간만으로는 둘을 못 가른다. 둘 다 phase로 재서 뺄셈 없이 읽는다(#527) —
+    # 예전에는 T2만 재고 T1은 CLI 경계의 sensor_processing.job에서 빼서 얻었다(#461).
+    # 두 phase 모두 이미 있던 count() 경계에 붙으므로 액션을 새로 강제하지 않는다.
+    with perf_phase(logger, "sensor_processing.cleanse") as cleanse_fields:
+        for hour in _overlapping_hours(window_start, window_end):
+            bronze_hour = read_bronze_sensor_events(
+                spark, cleansing_config.bronze_input_path, hour
+            )
+            hourly_bronze = filter_bronze_sensor_events_for_hour(bronze_hour, hour)
+            cleansed = cleanse_bronze_sensor_events(
+                hourly_bronze,
+                rules,
+                run_id,
+                processed_at,
+            )
+            cached_bronze_frames.append(hourly_bronze)
+            processed_frames.append(cleansed.processed)
+            if hour == target_hour:
+                target_processed = cleansed.processed
+                target_quarantined = cleansed.quarantined
+                target_bronze = hourly_bronze
 
-    if target_processed is None or target_quarantined is None or target_bronze is None:
-        raise ValueError("feature input window does not contain target_hour")
+        if (
+            target_processed is None
+            or target_quarantined is None
+            or target_bronze is None
+        ):
+            raise ValueError("feature input window does not contain target_hour")
 
-    processed_window = _union_frames(processed_frames).persist(
-        StorageLevel.MEMORY_AND_DISK
-    )
-    # persist는 lazy라 여기서 즉시 materialize하지 않으면, 바로 아래 첫 action
-    # (target_processed.count())이 processed_window가 아닌 다른 DataFrame을
-    # 건드려서 실제 계산이 run_hourly_segment_feature_job 안의 target_df.count()
-    # (#386)까지 조용히 미뤄진다(#389). count()로 여기서 먼저 materialize한다.
-    processed_window.count()
-    target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
-    try:
+        processed_window = _union_frames(processed_frames).persist(
+            StorageLevel.MEMORY_AND_DISK
+        )
+        # persist는 lazy라 여기서 즉시 materialize하지 않으면, 바로 아래 첫 action
+        # (target_processed.count())이 processed_window가 아닌 다른 DataFrame을
+        # 건드려서 실제 계산이 run_hourly_segment_feature_job 안의 target_df.count()
+        # (#386)까지 조용히 미뤄진다(#389). count()로 여기서 먼저 materialize한다.
+        processed_window.count()
+        target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
         processed_count = target_processed.count()
         cleansing_quarantined_count = target_quarantined.count()
-        # T1 cleanse와 T2 feature가 한 Spark 세션에서 이어 돌기 때문에(#205, ADR-0006)
-        # Job Run 총시간만으로는 둘을 못 가른다. 여기서 T2만 따로 재고, T1은 CLI
-        # 경계의 sensor_processing.job에서 이 값을 빼서 얻는다(#461). 이 시점에
-        # processed_window는 이미 materialize돼 있어 액션을 새로 강제하지 않는다.
+        cleanse_fields["rows"] = processed_count + cleansing_quarantined_count
+    try:
         with perf_phase(logger, "sensor_processing.features"):
             feature_summary = run_hourly_segment_feature_job(
                 spark,

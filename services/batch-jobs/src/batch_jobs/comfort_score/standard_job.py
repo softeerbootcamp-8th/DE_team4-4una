@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from de4_core import join_uri
+from de4_core import join_uri, perf_phase
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -173,7 +173,12 @@ def run_standard_comfort_score_job(
     try:
         # 행 수와 score_as_of 검사를 aggregation 한 번으로 끝낸다. 이 값을 writer에
         # 넘겨 저장 직전의 중복 집계도 없앤다.
-        scored_count = audit_standard_snapshot(scored, as_of)
+        #
+        # 이 aggregation이 위 lineage 전체(168h 읽기 -> universe -> 점수 산출)를
+        # materialize하는 유일한 액션이라, 이 phase가 곧 Spark 계산 시간이다(#527).
+        with perf_phase(logger, "standard_score.compute") as compute_fields:
+            scored_count = audit_standard_snapshot(scored, as_of)
+            compute_fields["rows"] = scored_count
         if scored_count == 0:
             raise RuntimeError(
                 "standard comfort score job produced 0 rows — the universe resolved "
@@ -181,10 +186,14 @@ def run_standard_comfort_score_job(
                 "had no qualifying hour at all so no population mean could be formed"
             )
 
-        gold_result = write_standard_comfort_score_snapshot(
-            spark, scored, config.gold_output_uri, as_of,
-            expected_count=scored_count,
-        )
+        # read-back 검증이 이 함수 안으로 들어가 있어(#522의 expected_count) 쓰기와
+        # 검증을 한 phase로 잡는다 — 바깥에는 둘을 가를 액션 경계가 없다.
+        with perf_phase(logger, "standard_score.gold_write") as gold_fields:
+            gold_result = write_standard_comfort_score_snapshot(
+                spark, scored, config.gold_output_uri, as_of,
+                expected_count=scored_count,
+            )
+            gold_fields["rows"] = gold_result.row_count
         # 방금 쓴 gold_result.version_uri를 직접 읽지 않는다 — manifest를 다시 resolve해서
         # 얻은 활성 snapshot을 읽어야 manifest가 실제 source-of-truth pointer가 된다(#343).
         gold_df = read_active_standard_comfort_score_snapshot(
