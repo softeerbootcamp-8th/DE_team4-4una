@@ -146,108 +146,12 @@
       }
     },
     {
-      "id": 3,
-      "type": "stat",
-      "title": "2xx",
-      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 15, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"2..\"}[5m])) or vector(0)",
-          "legendFormat": "2xx",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "color": { "fixedColor": "green", "mode": "fixed" }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "4xx",
-      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 8, "y": 15, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"4..\"}[5m])) or vector(0)",
-          "legendFormat": "4xx",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "color": { "fixedColor": "orange", "mode": "fixed" }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "type": "stat",
-      "title": "5xx",
-      "description": "트래픽이 한 번도 없으면 0/sec가 정상이다 — or vector(0)로 0을 명시한다.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 16, "y": 15, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)",
-          "legendFormat": "5xx",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "color": { "fixedColor": "red", "mode": "fixed" }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 6,
       "type": "timeseries",
       "title": "Request Rate over Time",
       "description": "Status class(2xx/4xx/5xx)별 requests/sec.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -284,7 +188,7 @@
       "type": "row",
       "title": "Latency",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -293,7 +197,7 @@
       "title": "Latency over Time (p50/p95/p99)",
       "description": "아래 p50/p95/p99 latency stat 패널과 같은 query를 시간축(range query)으로 합쳤다 — 순간값 3개만으로는 안 보이는 추세(지연이 서서히 늘어나는 중인지)를 여기서 본다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -321,102 +225,11 @@
       }
     },
     {
-      "id": 7,
-      "type": "stat",
-      "title": "p50 latency",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 36, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))",
-          "legendFormat": "p50",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 8,
-      "type": "stat",
-      "title": "p95 latency",
-      "description": "Gauge로 바꾸지 않았다(#437) — 정상 범위에 대한 확립된 threshold(SLA)가 없어 임의로 green/orange/red를 만들 수 없다. 실제 SLA가 정해지면 재검토한다.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 8, "y": 36, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))",
-          "legendFormat": "p95",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 9,
-      "type": "stat",
-      "title": "p99 latency",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 16, "y": 36, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))",
-          "legendFormat": "p99",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 102,
       "type": "row",
       "title": "By Endpoint",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -424,7 +237,7 @@
       "type": "timeseries",
       "title": "Requests by Endpoint",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -449,7 +262,7 @@
       "type": "timeseries",
       "title": "Latency by Endpoint (p95)",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 49, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
