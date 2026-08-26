@@ -62,6 +62,18 @@ _PYSPARK_PYTHON_PATH = "/usr/bin/python3.12"
 # 반드시 존재한다.
 EMR_SERVERLESS_POOL = "emr_serverless"
 
+# operator가 Job Run 상태를 확인하는 주기. provider 기본값은 60초인데, 그 주기가
+# 그대로 "이미 끝난 일을 아직 모르는 시간"이 된다 — 2026-08-26T02:00 실행(성공,
+# 14분 57초) 실측에서 Application 기동 대기 62.0초와 Job Run 종료 감지 16.2 + 31.4 +
+# 29.2초를 합쳐 136.8초, DAG run의 15.2%가 폴링 대기였다. 종료 감지 셋이 모두 60초
+# 미만이라는 점이 계산이 아니라 폴링 위상 탓임을 보여준다.
+#
+# 두 값을 함께 바꾼다. provider가 waiter 타임아웃을 delay x max_attempts로 계산하므로
+# delay만 줄이면 타임아웃이 25분에서 6분 15초로 떨어지고, run_sensor_processing
+# (실측 created -> ended 5분 44초)이 바로 걸린다. 15 x 100으로 25분을 그대로 둔다.
+_WAITER_DELAY_SECONDS = 15
+_WAITER_MAX_ATTEMPTS = 100
+
 
 @dataclass(frozen=True)
 class SparkResourceProfile:
@@ -233,6 +245,8 @@ def submit_batch_jobs_command(
         name=task_id,
         outlets=outlets or [],
         pool=EMR_SERVERLESS_POOL,
+        waiter_delay=_WAITER_DELAY_SECONDS,
+        waiter_max_attempts=_WAITER_MAX_ATTEMPTS,
     )
 
 
