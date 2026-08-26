@@ -24,6 +24,8 @@ Step 1의 가중치로 합쳐서 만든다. Step 1~5가 전부 선형이라 "먼
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
@@ -59,67 +61,128 @@ REQUIRED_SCHEMA = StructType(
     [field for field in HOURLY_COMFORT_SCORE_SCHEMA.fields if field.name in REQUIRED_COLUMNS]
 )
 
-UNIVERSE_COLUMNS = ("segment_id", "vehicle_profile_id")
+
+@dataclass(frozen=True, slots=True)
+class Universe:
+    """이번 실행이 행을 만들어야 할 (segment, vehicle profile) 조합.
+
+    두 축을 합친 cross join 결과 하나로 들고 다니면, 소비처마다 필요한 축만 뽑으려고
+    그 큰 프레임에 distinct를 걸게 된다. 운영 기준 831,110행(166,222 세그먼트 x 5
+    프로필)에 셔플이 세 번 붙었다. 축을 따로 들고 있으면 그 셔플이 전부 없어진다.
+
+    - `segments`: `segment_id` 한 컬럼. 도로망 artifact에서 이미 중복이 제거돼 온다.
+    - `profile_ids`: PostgreSQL `vehicle_profile`의 실제 프로필 ID(sentinel 0 제외).
+      수가 적어 파이썬 값으로 들고 있는다 — 덕분에 sentinel 검사도 Spark Action 없이
+      끝난다.
+    """
+
+    segments: DataFrame
+    profile_ids: tuple[int, ...]
 
 
 def compute_standard_comfort_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame,
+    universe: Universe,
 ) -> DataFrame:
     """standard_segment_comfort_score용 산출 (#198).
 
-    `universe_df`는 (segment_id, vehicle_profile_id) 두 컬럼으로 이번 실행이 행을
-    만들어야 할 실제 차량 프로필 조합 전체를 담는다(sentinel 0 제외 — vehicle-agnostic
-    행은 그 안의 segment 목록으로 여기서 직접 만든다). 관측이 전혀 없는 조합도
-    N=0, confidence=0으로 행이 나온다.
+    `universe`는 이번 실행이 행을 만들어야 할 세그먼트와 실제 차량 프로필을 담는다
+    (sentinel 0 제외 — vehicle-agnostic 행은 그 segment 목록으로 여기서 직접 만든다).
+    관측이 전혀 없는 조합도 N=0, confidence=0으로 행이 나온다.
 
     mu_p가 정의되지 않는 프로필(윈도우 전체에서 qualifying hour가 없는 경우)은
     vehicle-agnostic 경로의 전역 mu로 대체한다.
     """
-    _validate_universe(universe_df)
-    return _compute(hourly_df, config, universe_df)
+    _validate_universe(universe)
+    return _compute(hourly_df, config, universe)
 
 
 def _compute(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame,
+    universe: Universe,
 ) -> DataFrame:
     _validate_schema(hourly_df.schema, REQUIRED_SCHEMA, source="hourly_comfort_score")
     _validate_no_reserved_vehicle_profile_id(hourly_df)
 
     # 시간별 원본은 per-vehicle 경로가 그대로 쓰고, vehicle-agnostic 경로는 프로필을
-    # 트래픽 가중으로 접은 뒤 같은 Step 2~5를 탄다.
-    pooled_hourly = _pool_vehicle_profiles(hourly_df)
+    # 트래픽 가중으로 접은 뒤 같은 Step 2~5를 탄다. 전역 mu와 vehicle-agnostic 경로가
+    # 똑같이 T_min 필터를 걸므로 필터까지 끝낸 결과를 한 번만 만들어 둘이 나눠 쓴다.
+    #
+    # 이 프레임을 persist하는 것도 시도했지만 실측 결과 손해였다 — 캐시가 AQE의
+    # post-shuffle coalescing을 끊어서, 입력 756,000행 기준 실행 task가 188 -> 807로
+    # 늘었다. Spark가 셔플을 재사용해 주지도 않는다(계획에 ReusedExchange 없음).
+    pooled_qualifying = _qualifying_hours(_pool_vehicle_profiles(hourly_df), config)
 
     # 전역 mu는 vehicle-agnostic 경로의 모집단 평균이다. per-vehicle 경로의 mu_p
     # 대체값으로도 쓰이므로 한 번만 계산해 양쪽이 같은 값을 보게 한다.
-    global_mu = _population_means(_qualifying_hours(pooled_hourly, config), group_keys=())
+    global_mu = _collect_global_population_means(pooled_qualifying)
 
-    per_vehicle = _per_vehicle_scores(hourly_df, config, universe_df, global_mu)
-    vehicle_agnostic = _vehicle_agnostic_scores(pooled_hourly, config, universe_df, global_mu)
+    per_vehicle = _per_vehicle_scores(hourly_df, config, universe, global_mu)
+    vehicle_agnostic = _vehicle_agnostic_scores(
+        pooled_qualifying, config, universe, global_mu
+    )
     return per_vehicle.unionByName(vehicle_agnostic)
 
 
-def _validate_universe(universe_df: DataFrame) -> None:
-    missing = [column for column in UNIVERSE_COLUMNS if column not in universe_df.columns]
-    if missing:
-        raise ValueError(f"universe: missing required column(s): {', '.join(missing)}")
-    reserved_present = (
-        universe_df.filter(
-            F.col("vehicle_profile_id") == VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID
-        )
-        .limit(1)
-        .count()
-        > 0
-    )
-    if reserved_present:
+def _collect_global_population_means(
+    pooled_qualifying: DataFrame,
+) -> dict[str, Column]:
+    """전역 mu를 드라이버로 한 번 걷어 방향별 리터럴로 만든다.
+
+    한 행짜리 DataFrame으로 들고 다니면 그 한 행을 만들기 위해 168시간 lineage(윈도우
+    필터 -> scoring_version 윈도우 -> pooling)가 소비처마다 계획에 다시 붙는다. 전역 mu는
+    per-vehicle 경로와 vehicle-agnostic 경로 양쪽이 쓰므로, 실측한 physical plan에서
+    그 서브트리가 두 벌 더 생기고 crossJoin(BroadcastNestedLoopJoin)도 두 개 붙었다.
+
+    값 자체는 한 행 세 컬럼뿐이라 드라이버로 걷어도 안전하다. 리터럴로 바꾸면 두 소비처가
+    같은 상수를 보고, crossJoin과 중복 서브트리가 함께 사라진다.
+
+    윈도우 전체에 qualifying hour가 하나도 없으면 평균이 NULL이다. 여기서 막지 않고
+    NULL 리터럴을 그대로 흘려보낸다 — 실행을 실패시킬지는 호출자(standard_job)의 책임이다.
+    """
+    row = _population_means(pooled_qualifying, group_keys=()).first()
+    return {
+        _population_column(direction): F.lit(
+            None if row is None else row[_population_column(direction)]
+        ).cast("double")
+        for direction in DIRECTION_COLUMNS
+    }
+
+
+def _validate_universe(universe: Universe) -> None:
+    """프로필 목록이 파이썬 값이라 sentinel 검사에 Spark Action이 필요 없다."""
+    if "segment_id" not in universe.segments.columns:
+        raise ValueError("universe: missing required column(s): segment_id")
+    if not universe.profile_ids:
+        raise ValueError("universe: no vehicle_profile_id was resolved")
+    if VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID in universe.profile_ids:
         raise ValueError(
             f"universe must not contain vehicle_profile_id="
             f"{VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID}; the vehicle-agnostic row is "
             "generated from the universe's segment list instead"
         )
+
+
+def _universe_pairs(universe: Universe) -> DataFrame:
+    """(segment x profile) 조합을 만든다.
+
+    crossJoin 대신 explode를 쓴다 — 프로필 목록이 파이썬 값이라 리터럴 배열로 펼치면
+    되고, explode는 좁은(narrow) 연산이라 셔플이 없다.
+    """
+    return universe.segments.withColumn(
+        "vehicle_profile_id",
+        F.explode(F.array(*[F.lit(profile_id) for profile_id in universe.profile_ids])),
+    )
+
+
+def _profiles_frame(universe: Universe) -> DataFrame:
+    """프로필 목록만 담은 작은 프레임. 831,110행에 distinct를 걸던 자리를 대신한다."""
+    return universe.segments.sparkSession.createDataFrame(
+        [(profile_id,) for profile_id in universe.profile_ids],
+        "vehicle_profile_id int",
+    )
 
 
 def _validate_no_reserved_vehicle_profile_id(hourly_df: DataFrame) -> None:
@@ -179,25 +242,23 @@ def _pool_vehicle_profiles(hourly_df: DataFrame) -> DataFrame:
 def _per_vehicle_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame | None,
-    global_mu: DataFrame | None,
+    universe: Universe,
+    global_mu: dict[str, Column] | None,
 ) -> DataFrame:
     group_keys = ("segment_id", "vehicle_profile_id")
 
     qualifying = _qualifying_hours(hourly_df, config)
-    universe = (
-        universe_df.select(*group_keys).distinct()
-        if universe_df is not None
-        else hourly_df.select(*group_keys).distinct()
+    # cross join 결과는 이미 중복이 없으므로 distinct를 걸지 않는다.
+    observed_full = _observed_with_universe(
+        qualifying, _universe_pairs(universe), group_keys
     )
-    observed_full = _observed_with_universe(qualifying, universe, group_keys)
 
     population = _population_means(qualifying, group_keys=("vehicle_profile_id",))
     if global_mu is not None:
         # mu_p가 없는 프로필은 전역 mu로 대체한다. universe의 프로필 전체를 기준으로
         # 왼쪽 조인해야 관측이 하나도 없는 프로필까지 값을 갖는다.
         population = _fill_population_means(
-            universe.select("vehicle_profile_id").distinct(), population, global_mu
+            _profiles_frame(universe), population, global_mu
         )
 
     joined = observed_full.join(population, on="vehicle_profile_id", how="left")
@@ -205,23 +266,20 @@ def _per_vehicle_scores(
 
 
 def _vehicle_agnostic_scores(
-    pooled_hourly: DataFrame,
+    pooled_qualifying: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame | None,
-    global_mu: DataFrame,
+    universe: Universe,
+    global_mu: dict[str, Column],
 ) -> DataFrame:
     group_keys = ("segment_id",)
 
-    qualifying = _qualifying_hours(pooled_hourly, config)
-    universe = (
-        universe_df.select("segment_id").distinct()
-        if universe_df is not None
-        else pooled_hourly.select("segment_id").distinct()
+    # T_min 필터는 _compute가 이미 적용했다. segment 목록도 이미 중복이 없다.
+    observed_full = _observed_with_universe(
+        pooled_qualifying, universe.segments, group_keys
     )
-    observed_full = _observed_with_universe(qualifying, universe, group_keys)
 
-    # 전역 mu는 그룹 없는 한 행짜리라 crossJoin으로 모든 segment 행에 동일하게 붙인다.
-    joined = observed_full.crossJoin(global_mu)
+    # 전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 조인 없이 컬럼으로 붙인다.
+    joined = observed_full.withColumns(global_mu)
     scored = _apply_shrinkage(joined, group_keys=group_keys, config=config)
     return scored.withColumn(
         "vehicle_profile_id", F.lit(VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID)
@@ -248,33 +306,25 @@ def _population_means(qualifying: DataFrame, group_keys: tuple[str, ...]) -> Dat
 
 
 def _fill_population_means(
-    profiles: DataFrame, population: DataFrame, global_mu: DataFrame
+    profiles: DataFrame, population: DataFrame, global_mu: dict[str, Column]
 ) -> DataFrame:
     """mu_p가 없는 프로필의 모집단 평균을 전역 mu로 채운다 (#198).
+
+    전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 crossJoin과 컬럼 rename 없이 그대로
+    coalesce에 넣는다.
 
     전역 mu 자체가 NULL이면(윈도우 전체에 qualifying hour가 하나도 없는 경우) 여기서
     막지 않고 NULL을 그대로 흘려보낸다 — 그 판단은 실행 단위로 실패시켜야 하므로
     호출자(standard_job)의 책임이다.
     """
-    global_columns = {
-        _population_column(direction): F.col(f"_global_{_population_column(direction)}")
-        for direction in DIRECTION_COLUMNS
-    }
-    renamed_global = global_mu.select(
-        *[
-            F.col(_population_column(direction)).alias(f"_global_{_population_column(direction)}")
-            for direction in DIRECTION_COLUMNS
-        ]
-    )
-    joined = profiles.join(population, on="vehicle_profile_id", how="left").crossJoin(
-        renamed_global
-    )
+    joined = profiles.join(population, on="vehicle_profile_id", how="left")
     return joined.select(
         "vehicle_profile_id",
         *[
-            F.coalesce(F.col(_population_column(direction)), global_columns[
-                _population_column(direction)
-            ]).alias(_population_column(direction))
+            F.coalesce(
+                F.col(_population_column(direction)),
+                global_mu[_population_column(direction)],
+            ).alias(_population_column(direction))
             for direction in DIRECTION_COLUMNS
         ],
     )

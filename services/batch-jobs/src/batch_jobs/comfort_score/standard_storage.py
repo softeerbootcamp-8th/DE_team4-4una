@@ -46,20 +46,26 @@ def write_standard_comfort_score_snapshot(
     output_root: str,
     as_of: datetime,
     store: ObjectStore | None = None,
+    expected_count: int | None = None,
 ) -> StandardGoldWriteResult:
     """새 version을 unique 경로에 쓰고 read-back으로 검증한 뒤에만 manifest를 전환한다.
 
     write든 검증이든 하나라도 실패하면 예외가 그대로 올라가고, 이 함수는 manifest를
     건드리지 않는다 — 기존 활성 snapshot이 그대로 서빙 기준으로 남는다.
+
+    `expected_count`는 호출자가 이미 `audit_standard_snapshot()`을 돌렸을 때 넘긴다.
+    그러면 행 수 집계와 `score_as_of` 검사를 여기서 다시 하지 않는다. 안 넘기면 여기서
+    직접 확인한다. 이 값은 아래 read-back 대조의 기준이므로, 실제 행 수와 다른 값을
+    넘기면 manifest 전환 전에 실패한다.
     """
     # 경로를 먼저 만든다 — naive as_of는 standard_snapshot_uri가 거부하므로 Spark
     # 작업을 시작하기 전에 실패한다.
     snapshot_root_uri = standard_snapshot_uri(output_root, as_of)
-    _require_single_as_of(df, as_of)
+    if expected_count is None:
+        expected_count = audit_standard_snapshot(df, as_of)
 
     version_id = uuid.uuid4().hex
     version_uri = standard_version_uri(snapshot_root_uri, version_id)
-    expected_count = df.count()
 
     # version_id가 매번 새 경로를 만들므로 overwrite가 필요 없다 — 대신 "error" 모드로
     # 기존 경로를 실수로 덮어쓰는 상황 자체를 명시적으로 막는다.
@@ -152,10 +158,27 @@ def _read_manifest(
     return manifest
 
 
-def _require_single_as_of(df: DataFrame, as_of: datetime) -> None:
-    mismatched = df.filter(F.col("score_as_of") != F.lit(as_of))
-    if mismatched.limit(1).count():
+def audit_standard_snapshot(df: DataFrame, as_of: datetime) -> int:
+    """행 수를 세면서 `score_as_of` 불일치도 함께 확인하고 행 수를 돌려준다.
+
+    두 검사를 하나의 aggregation으로 묶는다. 따로 두면 같은 프레임에 Action이 두 번
+    걸리는데, 호출자(standard_job)는 어차피 행 수가 필요하므로 한 번에 끝낸다.
+    """
+    row = df.agg(
+        F.count(F.lit(1)).alias("row_count"),
+        # 빈 입력에서 F.sum은 NULL이라 0으로 확정한다.
+        F.coalesce(
+            F.sum(F.when(F.col("score_as_of") != F.lit(as_of), 1).otherwise(0)),
+            F.lit(0),
+        ).alias("mismatched_count"),
+    ).first()
+    if row is None:
+        # groupBy 없는 global aggregation은 빈 입력에도 한 행을 돌려준다. 여기 걸리면
+        # 집계식 구성이 잘못된 것이다.
+        raise RuntimeError("standard snapshot audit returned no aggregation row")
+    if row["mismatched_count"]:
         raise ValueError("df contains rows whose score_as_of does not match as_of")
+    return row["row_count"]
 
 
 def _validate_snapshot_schema(stored: DataFrame, written: DataFrame) -> None:

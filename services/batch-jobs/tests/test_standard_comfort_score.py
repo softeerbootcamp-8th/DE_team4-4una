@@ -13,6 +13,7 @@ import pytest
 from batch_jobs.comfort_score.config import ComfortScoreConfig
 from batch_jobs.comfort_score.formula import (
     VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID,
+    Universe,
     compute_standard_comfort_scores,
 )
 from batch_jobs.comfort_score.universe import resolve_segment_artifact_uri
@@ -35,7 +36,6 @@ HOURLY_SCHEMA = (
     "lateral_score double, trip_count long, sample_count long"
 )
 
-UNIVERSE_SCHEMA = "segment_id string, vehicle_profile_id int"
 
 
 @pytest.fixture(scope="module")
@@ -82,7 +82,19 @@ def hourly_df(spark, *rows: tuple):
 
 
 def universe_df(spark, *pairs: tuple):
-    return spark.createDataFrame(list(pairs), UNIVERSE_SCHEMA)
+    """(segment, profile) 쌍 목록을 Universe로 바꾼다.
+
+    Universe는 두 축을 따로 들고 있지만, 테스트는 조합을 나열하는 쪽이 읽기 쉬워서
+    여기서 두 축으로 쪼갠다. 순서는 나열 순서를 유지한다.
+    """
+    segment_ids = list(dict.fromkeys(segment_id for segment_id, _ in pairs))
+    profile_ids = tuple(dict.fromkeys(profile_id for _, profile_id in pairs))
+    return Universe(
+        segments=spark.createDataFrame(
+            [(segment_id,) for segment_id in segment_ids], "segment_id string"
+        ),
+        profile_ids=profile_ids,
+    )
 
 
 def rows_by_key(result) -> dict:
@@ -258,12 +270,25 @@ class TestUniverseMaterialization:
                 df, TEST_CONFIG, universe_df(spark, ("seg-1", 0))
             )
 
-    def test_universe_requires_both_key_columns(self, spark):
+    def test_universe_requires_the_segment_id_column(self, spark):
         df = hourly_df(spark, hour())
-        broken = spark.createDataFrame([("seg-1",)], "segment_id string")
+        broken = Universe(
+            segments=spark.createDataFrame([("seg-1",)], "other_id string"),
+            profile_ids=(1,),
+        )
 
-        with pytest.raises(ValueError, match="vehicle_profile_id"):
+        with pytest.raises(ValueError, match="segment_id"):
             compute_standard_comfort_scores(df, TEST_CONFIG, broken)
+
+    def test_universe_requires_at_least_one_profile(self, spark):
+        df = hourly_df(spark, hour())
+        empty = Universe(
+            segments=spark.createDataFrame([("seg-1",)], "segment_id string"),
+            profile_ids=(),
+        )
+
+        with pytest.raises(ValueError, match="no vehicle_profile_id"):
+            compute_standard_comfort_scores(df, TEST_CONFIG, empty)
 
 
 class TestUniverseResolution:
