@@ -1,7 +1,5 @@
-# 예제 alert rule(#447). expr은 spark-streaming.json/prometheus_client.STREAM_PROCESSOR_STATUS_QUERY와 항상 동일하게 유지한다.
-# 값 3(QUERY STOPPED)/4(TARGET DOWN)만 StreamProcessorDown(auto_remediate)으로 재시작 대상이고,
-# 1(EVENT DATA STALE)/2(PROGRESS STALE)는 StreamProcessorStale로 분리해 알림만 보낸다 — 잠깐의 stale로 컨테이너를 재시작하면 안 되기 때문이다.
-# within_range의 params는 경계값을 배타적으로 취급한다([1,2]는 1도 2도 안 잡힘, 실제 Grafana로 확인함) — 그래서 [0.5, 2.5]를 쓴다.
+# stream-processor가 내려간 경우만 자동 복구 대상으로 삼는다
+# 적재 지연은 Kafka에 실제 입력이 있을 때만 경고하고 자동 재시작하지 않는다
 apiVersion: 1
 
 groups:
@@ -31,6 +29,31 @@ groups:
               instant: true
               range: false
               refId: A
+          - refId: B
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                clamp_min(
+                  scalar(sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))
+                  - stream_processor_kafka_end_offset_sum{job="stream-processor"}, 0)
+              instant: true
+              range: false
+              refId: B
+          - refId: D
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: stream_processor_event_time_lag_seconds{job="stream-processor"}
+              instant: true
+              range: false
+              refId: D
           - refId: C
             datasourceUid: __expr__
             model:
@@ -43,16 +66,22 @@ groups:
                     params: [2]
         noDataState: NoData
         execErrState: Error
-        for: 2m
+        # 1분 평가 주기에서 1회 더 지속돼야 발화시켜, 일시적인 scrape 실패는 넘기되
+        # 실제 query/target 중단은 2분 안에 알린다
+        for: 1m
         labels:
           service: stream-processor
-          severity: high
+          severity: critical
           auto_remediate: "true"
         annotations:
-          summary: "stream-processor Component Status가 QUERY STOPPED 또는 TARGET DOWN 상태로 2분 이상 지속됨"
+          summary: "stream-processor query 또는 Prometheus target이 중단됨"
+          __dashboardUid__: "spark-streaming"
+          __panelId__: "1"
 
-      - uid: stream-processor-stale
-        title: StreamProcessorStale
+      # Kafka에 실제 신규 메시지가 들어오는 동안에만 progress age를 본다
+      # 무입력 상태는 batch가 돌지 않아도 정상이라 noDataState=OK로 처리한다
+      - uid: bronze-ingestion-stalled
+        title: BronzeIngestionStalled
         condition: C
         data:
           - refId: A
@@ -63,15 +92,49 @@ groups:
             model:
               editorMode: code
               expr: >-
-                (4 * (up{job="stream-processor"} == bool 0) > 0)
-                or (3 * (stream_processor_query_running{job="stream-processor"} == bool 0) > 0)
-                or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"})
-                    and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)) > bool 330) > 0)
-                or (1 * (stream_processor_event_time_lag_seconds{job="stream-processor"} > bool 330) > 0)
-                or (0 * up{job="stream-processor"})
+                ((time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"})
+                 and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0))
+                and on()
+                (sum(rate(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}[2m])) > 0)
               instant: true
               range: false
               refId: A
+          - refId: B
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: stream_processor_query_running{job="stream-processor"}
+              instant: true
+              range: false
+              refId: B
+          - refId: D
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                clamp_min(
+                  scalar(sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))
+                  - stream_processor_kafka_end_offset_sum{job="stream-processor"}, 0)
+              instant: true
+              range: false
+              refId: D
+          - refId: E
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: stream_processor_event_time_lag_seconds{job="stream-processor"}
+              instant: true
+              range: false
+              refId: E
           - refId: C
             datasourceUid: __expr__
             model:
@@ -80,16 +143,97 @@ groups:
               expression: A
               conditions:
                 - evaluator:
-                    type: within_range
-                    params: [0.5, 2.5]
-        noDataState: NoData
+                    type: gt
+                    params: [90]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          service: stream-processor
+          severity: warning
+        annotations:
+          summary: "Kafka 입력이 있지만 성공한 Bronze micro-batch가 90초 넘게 없음"
+          __dashboardUid__: "spark-streaming"
+          __panelId__: "23"
+
+      # progress는 계속되더라도 처리량이 유입량을 못 따라가 lag가 커지는 경우를 잡는다
+      # event-time lag와 offset lag는 단위가 달라 0/1 조건으로 정규화한 뒤 합친다
+      - uid: bronze-ingestion-lag-growing
+        title: BronzeIngestionLagGrowing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                ((stream_processor_event_time_lag_seconds{job="stream-processor"} > bool 90)
+                 + ((scalar(delta((sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))[2m:]))
+                     - delta(stream_processor_kafka_end_offset_sum{job="stream-processor"}[2m])) > bool 0))
+                and on()
+                (sum(rate(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}[2m])) > 0)
+              instant: true
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                clamp_min(
+                  scalar(sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))
+                  - stream_processor_kafka_end_offset_sum{job="stream-processor"}, 0)
+              instant: true
+              range: false
+              refId: B
+          - refId: D
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: stream_processor_event_time_lag_seconds{job="stream-processor"}
+              instant: true
+              range: false
+              refId: D
+          - refId: E
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: stream_processor_query_running{job="stream-processor"}
+              instant: true
+              range: false
+              refId: E
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
         execErrState: Error
         for: 2m
         labels:
           service: stream-processor
-          severity: medium
+          severity: warning
         annotations:
-          summary: "stream-processor Component Status가 EVENT DATA STALE 또는 PROGRESS STALE 상태로 2분 이상 지속됨 (자동 조치 없음, 확인 필요)"
+          summary: "Kafka 입력이 계속되는 동안 Bronze event-time 또는 offset lag가 증가함"
+          __dashboardUid__: "spark-streaming"
+          __panelId__: "24"
 
   # EC2 host + self-health alert 그룹 — project-disk-pressure는 DiskWarning의 상위 호환이라 지우고 여기 흡수했다.
   - orgId: 1

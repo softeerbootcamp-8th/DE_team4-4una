@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 # Target Architecture
@@ -255,6 +255,13 @@ dedicated Spark Streaming EC2). Every dashboard JSON is the
 source of truth (`allowUiUpdates: false` in `dashboards.yml`); manual Grafana
 UI edits are not persisted.
 
+Spark Streaming alerts distinguish process failure from data-flow degradation.
+Target/query failure is critical, while a Bronze progress stall or growing
+Kafka/event-time lag during active Kafka ingress is warning-only and never opts
+into automatic remediation. The traffic condition prevents an idle topic from
+being reported as an S3 ingestion failure. Slack notifications include the
+observed state and lag values and link back to the Spark Streaming dashboard.
+
 Kafka is an EC2-hosted infrastructure service managed from
 `infra/compose/kafka.yaml`. Automatic CD reconciles that Compose definition and
 the `sensor-events` topic, while Sensor Producer replay runs locally rather than
@@ -283,6 +290,3 @@ dependencies. A small `statsd_exporter` mapping
 (`infra/monitoring/statsd/airflow-mapping.yml`) converts exactly the three
 Airflow timer metrics the dashboard uses into Prometheus histograms, because
 the exporter's default (a fixed-quantile Summary) can't produce a p95.
-
-Alerting and metrics for the remaining services (Spark) remain outside this
-scope.

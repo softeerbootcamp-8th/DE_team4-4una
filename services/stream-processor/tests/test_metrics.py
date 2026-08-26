@@ -11,6 +11,7 @@ from stream_processor.metrics import (
     EVENT_TIME_LAG_METRIC_NAME,
     INPUT_ROWS_PER_SECOND_METRIC_NAME,
     INPUT_ROWS_TOTAL_METRIC_NAME,
+    KAFKA_END_OFFSET_SUM_METRIC_NAME,
     KAFKA_OFFSET_LAG_METRIC_NAME,
     LAST_PROGRESS_TIMESTAMP_METRIC_NAME,
     PROCESSED_ROWS_PER_SECOND_METRIC_NAME,
@@ -180,6 +181,9 @@ class TestKafkaOffsetLag:
 
         # (150-100) + (205-200) = 55
         assert metrics.registry.get_sample_value(KAFKA_OFFSET_LAG_METRIC_NAME) == 55.0
+        assert (
+            metrics.registry.get_sample_value(KAFKA_END_OFFSET_SUM_METRIC_NAME) == 300.0
+        )
 
     def test_no_sources_does_not_raise(self) -> None:
         metrics = StreamMetrics(CollectorRegistry())
@@ -187,6 +191,7 @@ class TestKafkaOffsetLag:
         metrics.observe_progress(_progress(sources=[]))
 
         assert metrics.registry.get_sample_value(KAFKA_OFFSET_LAG_METRIC_NAME) == 0.0
+        assert metrics.registry.get_sample_value(KAFKA_END_OFFSET_SUM_METRIC_NAME) == 0.0
 
     def test_unparseable_offsets_keep_the_previous_value_without_raising(self) -> None:
         # 실제로 file source에서 관측됨: latestOffset이 문자열 "None"으로 온다
@@ -198,11 +203,18 @@ class TestKafkaOffsetLag:
             )
         )
         first_value = metrics.registry.get_sample_value(KAFKA_OFFSET_LAG_METRIC_NAME)
+        first_end_offset_sum = metrics.registry.get_sample_value(
+            KAFKA_END_OFFSET_SUM_METRIC_NAME
+        )
 
         metrics.observe_progress(
             _progress(sources=[_source('{"sensor-events":{"0":100}}', "None")])
         )
 
         assert metrics.registry.get_sample_value(KAFKA_OFFSET_LAG_METRIC_NAME) == first_value
+        assert (
+            metrics.registry.get_sample_value(KAFKA_END_OFFSET_SUM_METRIC_NAME)
+            == first_end_offset_sum
+        )
         # 나머지 metric은 정상적으로 계속 갱신되어야 한다.
         assert metrics.registry.get_sample_value(INPUT_ROWS_TOTAL_METRIC_NAME) == 240.0

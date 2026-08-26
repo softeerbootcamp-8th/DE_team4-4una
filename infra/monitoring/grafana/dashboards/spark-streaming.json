@@ -393,15 +393,15 @@
       "id": 11,
       "type": "stat",
       "title": "Kafka Offset Lag",
-      "description": "subscribe 중인 topic의 (latestOffset - endOffset) 합 -- Kafka에는 이미 있지만 이번 micro-batch까지 아직 못 읽은 메시지 수다(#426 후속). 정상 범위에 대한 확립된 기준이 아직 없어 Kafka dashboard의 Consumer Lag와 같이 threshold 없이 raw 값만 보여준다.",
+      "description": "Kafka Exporter의 현재 topic offset에서 Spark가 마지막으로 처리한 end offset을 뺀 값이다. Spark progress가 멈춰도 Kafka 입력이 계속되면 즉시 증가한다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 12, "y": 41, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "stream_processor_kafka_offset_lag{job=\"stream-processor\"}",
-          "legendFormat": "offset lag",
+          "expr": "clamp_min(scalar(sum(kafka_topic_partition_current_offset{job=\"kafka\",topic=\"sensor-events\"})) - stream_processor_kafka_end_offset_sum{job=\"stream-processor\"}, 0)",
+          "legendFormat": "live offset lag",
           "instant": true
         }
       ],
@@ -458,8 +458,8 @@
         {
           "refId": "A",
           "datasource": "Prometheus",
-          "expr": "stream_processor_kafka_offset_lag{job=\"stream-processor\"}",
-          "legendFormat": "offset lag"
+          "expr": "clamp_min(scalar(sum(kafka_topic_partition_current_offset{job=\"kafka\",topic=\"sensor-events\"})) - stream_processor_kafka_end_offset_sum{job=\"stream-processor\"}, 0)",
+          "legendFormat": "live offset lag"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
