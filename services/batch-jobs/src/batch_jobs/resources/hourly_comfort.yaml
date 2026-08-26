@@ -1,35 +1,37 @@
-# 실제 Silver2 분포가 나오면 기준값과 scoring_version을 함께 갱신한다
-# comfort_score/loader.py::_select_latest_scoring_version이 점으로 구분된 자리를
-# array<int>로 캐스팅해 비교하므로, 반드시 SemVer(MAJOR.MINOR.PATCH) 형식이어야 한다.
-scoring_version: 1.0.0
+# comfort_score/loader.py::_select_latest_scoring_version이 점으로 구분된 자리를 array<int>로 캐스팅해 비교하므로, 반드시 SemVer(MAJOR.MINOR.PATCH) 형식이어야 한다.
+# normalizers는 2026-08-19~08-26 실제 hourly_segment_features(1,331,614행) 분포로 comfortable=P50/uncomfortable=P95 기본 규칙으로 calibration했다(#544, 예외는 각 항목 주석 참고) — 매시간 동적으로 다시 구하지 않고 이 대표 기간 값으로 고정한다. 산출 도구: comfort_calibration.py의 analyze-hourly-feature-distribution CLI.
+scoring_version: 1.1.0
 compatible_feature_versions: [hourly-features-v1]
 minimum_valid_weight: 0.8
 
-# 같은 움직임도 속도대별 정상 범위가 달라질 수 있어 앵커만 완만하게 보정한다
+# 같은 움직임도 속도대별 정상 범위가 달라질 수 있어 앵커만 완만하게 보정한다.
+# 실측 avg_speed_mps 분포(P25=4.93, P90=9.92)가 이 경계와 거의 겹쳐 그대로 둔다.
 speed_bands:
   - {upper_mps: 5.0, anchor_scale: 0.9}
   - {upper_mps: 10.0, anchor_scale: 1.0}
   - {upper_mps: null, anchor_scale: 1.1}
 
 normalizers:
-  rms_accel_x: {comfortable: 0.15, uncomfortable: 1.5}
-  rms_accel_y: {comfortable: 0.12, uncomfortable: 1.2}
-  rms_accel_z: {comfortable: 0.10, uncomfortable: 1.0}
-  p95_abs_accel_x: {comfortable: 0.40, uncomfortable: 3.0}
-  p95_abs_accel_y: {comfortable: 0.35, uncomfortable: 2.5}
-  p95_abs_accel_z: {comfortable: 0.30, uncomfortable: 2.0}
-  rms_jerk_x: {comfortable: 0.50, uncomfortable: 6.0}
-  rms_jerk_y: {comfortable: 0.50, uncomfortable: 6.0}
-  rms_jerk_z: {comfortable: 0.50, uncomfortable: 8.0}
-  p95_abs_jerk_x: {comfortable: 1.50, uncomfortable: 15.0}
-  p95_abs_jerk_y: {comfortable: 1.50, uncomfortable: 15.0}
-  p95_abs_jerk_z: {comfortable: 2.00, uncomfortable: 20.0}
-  hard_brake_rate: {comfortable: 0.0, uncomfortable: 2.0}
-  hard_accel_rate: {comfortable: 0.0, uncomfortable: 2.0}
-  sharp_steer_rate: {comfortable: 0.0, uncomfortable: 2.0}
-  steer_reversal_rate: {comfortable: 0.5, uncomfortable: 5.0}
-  rms_steering_rate: {comfortable: 2.0, uncomfortable: 30.0}
-  rms_steering_vibration: {comfortable: 0.05, uncomfortable: 1.0}
+  # 종방향(x축) 4개는 실측에서 97%+가 정확히 0이라(nonzero 2.6~3.0%) comfortable=0, 나머지 소수 신호는 P99.5를 uncomfortable로 잡았다 — 이 쏠림 자체는 feature 계산 쪽 별도 확인이 필요하다고 보고에 남겼고(calibration 범위 밖이라 안 건드림).
+  rms_accel_x: {comfortable: 0.0, uncomfortable: 1.45} # P99.5=1.451, nonzero 2.85%
+  rms_accel_y: {comfortable: 0.07, uncomfortable: 1.1} # P50=0.068, P95=1.109
+  rms_accel_z: {comfortable: 0.14, uncomfortable: 0.34} # P50=0.139, P95=0.335
+  p95_abs_accel_x: {comfortable: 0.0, uncomfortable: 2.67} # P99.5=2.673, nonzero 2.58%
+  p95_abs_accel_y: {comfortable: 0.35, uncomfortable: 2.5} # P90=1.307 이후 4.0(=max)에서 평평 — 상한 근처 값이라 유지
+  p95_abs_accel_z: {comfortable: 0.23, uncomfortable: 0.57} # P50=0.229, P95=0.572
+  rms_jerk_x: {comfortable: 0.0, uncomfortable: 2.25} # P99.5=2.249, nonzero 2.96%
+  rms_jerk_y: {comfortable: 0.47, uncomfortable: 11.4} # P50=0.473, P95=11.399
+  rms_jerk_z: {comfortable: 1.08, uncomfortable: 3.58} # P50=1.080, P95=3.584
+  p95_abs_jerk_x: {comfortable: 0.0, uncomfortable: 3.15} # P99.5=3.135, nonzero 2.70%
+  p95_abs_jerk_y: {comfortable: 1.50, uncomfortable: 18.0} # P90=14.924로 기존 15.0에 거의 붙어 있어 소폭만 확장 — 상한 근처 값이라 P95 규칙 대신 유지
+  p95_abs_jerk_z: {comfortable: 1.97, uncomfortable: 6.39} # P50=1.970, P95=6.388
+  # 이 세 rate는 P99.5까지도 0이라(사건 자체가 극히 드묾) P50/P95 규칙을 못 쓰고 실측 max를 근거로 잡았다 — 기존 uncomfortable=2.0은 실측 max=1.0보다 커서 원천적으로 도달 불가능했다(90점대 쏠림의 가장 뚜렷한 원인).
+  hard_brake_rate: {comfortable: 0.0, uncomfortable: 1.0} # 실측 max=1.0(nonzero 0.22%)
+  hard_accel_rate: {comfortable: 0.0, uncomfortable: 1.0} # 실측 max=1.0(nonzero 0.27%)
+  sharp_steer_rate: {comfortable: 0.0, uncomfortable: 1.0} # 이벤트 자체가 극히 드묾(nonzero 0.10%) — 위 두 rate와 같은 기준으로 통일
+  steer_reversal_rate: {comfortable: 0.5, uncomfortable: 2.0} # P90=P95=2 — comfortable은 "가끔의 반전은 정상"이라는 기존 판단을 유지
+  rms_steering_rate: {comfortable: 2.0, uncomfortable: 86.0} # P95=86.194 (comfortable은 P25~P50 사이 기존 값 유지)
+  rms_steering_vibration: {comfortable: 0.08, uncomfortable: 0.2} # P50=0.078, P95=0.200
 
 components:
   vertical_score:

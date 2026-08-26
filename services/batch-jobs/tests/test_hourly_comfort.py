@@ -5,7 +5,11 @@ from batch_jobs.comfort_scoring_config import (
     DEFAULT_HOURLY_SCORING_CONFIG,
     DEFAULT_HOURLY_SCORING_CONFIG_PATH,
 )
-from batch_jobs.hourly_comfort import CLASSIFIED_COLUMNS, build_hourly_scoring_plan
+from batch_jobs.hourly_comfort import (
+    CLASSIFIED_COLUMNS,
+    _normalized_penalty,
+    build_hourly_scoring_plan,
+)
 from batch_jobs.hourly_comfort_job import HourlyComfortJobConfig, run_hourly_comfort_job
 from batch_jobs.hourly_comfort_storage import hour_output_path as score_hour_path
 from batch_jobs.hourly_segment_feature_storage import (
@@ -40,6 +44,54 @@ def spark():
     )
     yield session
     session.stop()
+
+
+class TestNormalizedPenaltyBoundaries:
+    """low/high 경계에서 정확히 0/1로 clamp되고, 그 사이는 선형인지 확인한다(#544)."""
+
+    def _penalty(self, spark, value: float, low: float, high: float, scale: float = 1.0) -> float:
+        df = spark.range(1).select(
+            _normalized_penalty(F.lit(value), low, high, F.lit(scale)).alias("penalty")
+        )
+        return df.first()["penalty"]
+
+    def test_at_or_below_low_is_zero(self, spark):
+        assert self._penalty(spark, -5.0, low=0.0, high=10.0) == 0.0
+        assert self._penalty(spark, 0.0, low=0.0, high=10.0) == 0.0
+
+    def test_at_or_above_high_is_one(self, spark):
+        assert self._penalty(spark, 10.0, low=0.0, high=10.0) == 1.0
+        assert self._penalty(spark, 50.0, low=0.0, high=10.0) == 1.0
+
+    def test_midpoint_is_linear(self, spark):
+        assert self._penalty(spark, 5.0, low=0.0, high=10.0) == pytest.approx(0.5)
+
+    def test_speed_scale_shrinks_the_anchors_proportionally(self, spark):
+        # scale=0.5면 low/high가 반으로 줄어 같은 value가 상대적으로 더 나쁘게 잡힌다.
+        assert self._penalty(spark, 5.0, low=0.0, high=10.0, scale=0.5) == 1.0
+
+    def test_default_config_normalizers_all_satisfy_comfortable_below_uncomfortable(self):
+        # __post_init__이 이미 강제하지만 실제 anchor 세트로 회귀 확인용으로 남긴다(#544).
+        for name, anchors in DEFAULT_HOURLY_SCORING_CONFIG.normalizers:
+            assert anchors.comfortable < anchors.uncomfortable, name
+
+    def test_rejects_a_config_where_comfortable_is_not_below_uncomfortable(self):
+        from batch_jobs.comfort_scoring_config import (
+            ComponentRule,
+            HourlyScoringConfig,
+            NormalizationRange,
+            SpeedBand,
+        )
+
+        with pytest.raises(ValueError, match="comfortable anchors must be below uncomfortable"):
+            HourlyScoringConfig(
+                scoring_version="9.9.9",
+                compatible_feature_versions=frozenset({"v1"}),
+                minimum_valid_weight=0.5,
+                speed_bands=(SpeedBand(upper_mps=None, anchor_scale=1.0),),
+                normalizers=(("a", NormalizationRange(comfortable=1.0, uncomfortable=1.0)),),
+                components=(ComponentRule("score", (("a", 1.0),)),),
+            )
 
 
 class TestCalculateHourlyComfortScores:
@@ -129,7 +181,7 @@ class TestCalculateHourlyComfortScores:
         ]
         row = result.scored().first()
         assert all(row[column] is not None for column in result.scored().columns)
-        assert row["scoring_version"] == "1.0.0"
+        assert row["scoring_version"] == DEFAULT_HOURLY_SCORING_CONFIG.scoring_version
         assert row["_run_id"] == "silver3-run"
         assert (row["sample_count"], row["trip_count"]) == (36_000, 10)
 
@@ -333,7 +385,7 @@ class TestRunHourlyComfortJob:
             field.dataType for field in HOURLY_COMFORT_SCORE_SCHEMA
         ]
         row = scores.first()
-        assert row["scoring_version"] == "1.0.0"
+        assert row["scoring_version"] == DEFAULT_HOURLY_SCORING_CONFIG.scoring_version
         assert row["_run_id"] == "silver3-run"
         stored_epoch = scores.select(F.unix_timestamp("_processed_at")).first()[0]
         assert stored_epoch == int(self.PROCESSED_AT.timestamp())

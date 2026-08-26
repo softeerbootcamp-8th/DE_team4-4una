@@ -89,8 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["standard_segment_comfort_score", "current_segment_comfort_score"],
     )
 
-    # 정규 파이프라인이 아니다 — 어떤 DAG도 이 command를 부르지 않는다. hourly_comfort.yaml의
-    # anchor/threshold를 사람이 캘리브레이션할 때만 수동으로 실행한다(#544).
+    # 정규 파이프라인이 아니다 — 어떤 DAG도 안 부르고, anchor/threshold 캘리브레이션할 때만 수동 실행한다(#544).
     calibrate_parser = subparsers.add_parser("analyze-hourly-feature-distribution")
     calibrate_parser.add_argument("--input-path")
     calibrate_parser.add_argument("--start", type=datetime.fromisoformat)

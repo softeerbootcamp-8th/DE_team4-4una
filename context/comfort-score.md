@@ -52,6 +52,47 @@ The vertical/longitudinal/lateral groups above are the ones realized as
 `hourly_comfort_score.vertical_score` / `.longitudinal_score` / `.lateral_score`
 in Silver, which are the direct inputs to the Gold formula below.
 
+### Silver hourly scoring calibration (issue #544)
+
+Each directional score is `100 * (1 - weighted_penalty)`, where every feature's
+penalty is `clamp((value - comfortable) / (uncomfortable - comfortable), 0, 1)`
+scaled per speed band. The `comfortable`/`uncomfortable` anchor per feature and
+`scoring_version` live in
+`services/batch-jobs/src/batch_jobs/resources/hourly_comfort.yaml` (each entry
+carries an inline comment with its data basis), not in this document — this
+section only records *that* and *why* they moved.
+
+The original anchors (`scoring_version: 1.0.0`) were picked before any real
+traffic existed and turned out far wider than the real feature distribution,
+so almost every row's penalty rounded to ~0 and `standard_segment_comfort_score.comfort_score`
+clustered at 90+ (measured 2026-08-26: 96.03% at 80+, only 0.10% below 60).
+`scoring_version: 1.1.0` recalibrates every `hourly_comfort.yaml` anchor
+against real `hourly_segment_features` from 2026-08-19 through 2026-08-26
+(1,331,614 rows), using a one-off analysis command
+(`batch-jobs analyze-hourly-feature-distribution`, in
+`services/batch-jobs/src/batch_jobs/comfort_calibration.py` — not part of any
+DAG) to pull P50/P75/P90/P95/P97/P99/P99.5 per feature. The default rule is
+`comfortable ≈ P50`, `uncomfortable ≈ P95`, with named exceptions in the YAML
+for features whose real distribution is heavily zero-inflated (longitudinal
+`_x` features, nonzero in only ~2.6-3.0% of rows — flagged as worth a separate
+data-quality look, since this issue only recalibrates scoring and does not
+touch feature computation) or apparently ceiling-capped
+(`p95_abs_accel_y`/`p95_abs_jerk_y`, whose top percentiles pin at a round
+number below their declared max) or event-rate features so rare that even
+P99.5 is still zero (`hard_brake_rate`/`hard_accel_rate`/`sharp_steer_rate`,
+anchored instead on the real observed max).
+
+This is a values-only change — the formula shape, the five-input
+`vertical_score`/`longitudinal_score`/`lateral_score` component weights, and
+the Gold-layer 0.5/0.3/0.2 combination and shrinkage (`k`) are all unchanged
+and out of this issue's scope. Whether 1.1.0 fully resolves the 90+ clustering
+at the Gold layer still needs to be confirmed by re-running scoring against
+real data and re-checking the bucket percentages (see the CLI's `README.md`
+usage section for the verification query); a further nonlinear-penalty
+adjustment (`penalty = min(1, alpha * ratio ** gamma)`, config-driven) is a
+deliberately deferred follow-up if anchor recalibration alone turns out not to
+be enough.
+
 ## Standard score calculation (Segment x vehicle profile)
 
 Grain: one `(segment_id, vehicle_profile_id)` row, rolled up from every

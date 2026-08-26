@@ -20,9 +20,7 @@ from batch_jobs.hourly_comfort import RATE_SOURCE_COLUMNS
 # 최소 출력으로 요구된 percentile들. 필요하면 늘릴 수 있게 튜플로 둔다.
 PERCENTILES = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
 
-# scoring이 직접 쓰지 않지만(정규화 대상이 아님) speed band scaling에 영향을 주는
-# feature라 분석 대상에 항상 포함한다(이슈 2번 "speed band scaling이 분포 압축에
-# 영향을 주는지" 확인용).
+# scoring이 직접 쓰진 않지만 speed band scaling에 영향을 주는 feature라 항상 포함한다.
 ALWAYS_INCLUDED_COLUMNS = ("avg_speed_mps",)
 
 
