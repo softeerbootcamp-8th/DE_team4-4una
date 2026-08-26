@@ -498,6 +498,7 @@ dependencies = [
     { name = "pyspark" },
     { name = "pyyaml" },
     { name = "shapely" },
+    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -520,6 +521,7 @@ requires-dist = [
     { name = "pyspark", specifier = "==4.0.2" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "shapely", specifier = ">=2.1.2" },
+    { name = "tzdata", specifier = ">=2026.3" },
 ]
 
 [package.metadata.requires-dev]
@@ -1112,8 +1114,8 @@ name = "httpcore2"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/83/a896fc59940fc5a6e2aff3a4be1d92fa890112936803b331cae75a993c34/httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc", size = 67427, upload-time = "2026-08-09T09:11:32.123Z" }
 wheels = [
