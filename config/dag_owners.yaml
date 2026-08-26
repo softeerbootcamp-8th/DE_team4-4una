@@ -17,12 +17,6 @@ dags:
   standard_score_pipeline:
     owner: KIMYONGJIN
     severity: critical
-    tasks:
-      # 담당자는 DAG와 같지만 심각도만 낮춘다 — 이 task는 실패해도 파이프라인
-      # 전체가 멈추는 수준은 아니라는 판단(#433).
-      sensor_processing.resolve_road_snapshot_date:
-        owner: KIMYONGJIN
-        severity: high
   current_score_pipeline:
     owner: KIMYONGJIN
     severity: high
