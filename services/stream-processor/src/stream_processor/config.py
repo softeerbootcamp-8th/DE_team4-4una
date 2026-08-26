@@ -64,9 +64,9 @@ class StreamConfig:
             max_offsets_per_trigger=int(
                 source.get("STREAM_MAX_OFFSETS_PER_TRIGGER", "1200000")
             ),
-            # 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
-            # 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
-            bronze_output_partitions=int(source.get("STREAM_BRONZE_OUTPUT_PARTITIONS", "1")),
+            # 2 vCPU 실행 환경에서는 write task를 두 개로 두면 coalesce(1)의 단일
+            # S3 writer 병목을 피하면서 파일 수가 과도하게 늘지 않는다.
+            bronze_output_partitions=int(source.get("STREAM_BRONZE_OUTPUT_PARTITIONS", "2")),
             # Spark 기본 driver heap은 1 GiB다(로컬에서 직접 확인). local[*]에서는
             # driver가 곧 executor이므로 micro-batch 전체가 이 heap 안에서 파싱된다 --
             # 위 상한과 짝이다(#482).

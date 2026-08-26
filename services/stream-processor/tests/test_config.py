@@ -47,4 +47,4 @@ def test_from_env_applies_defaults_when_missing() -> None:
     # Spark 기본값 1 GiB로는 복구 배치를 못 버틴다(#482).
     assert config.driver_memory == "4g"
     assert config.max_trigger_delay == "5m"
-    assert config.bronze_output_partitions == 1
+    assert config.bronze_output_partitions == 2
