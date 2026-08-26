@@ -13,11 +13,16 @@ from ops_agent.diagnostics import (
 )
 from ops_agent.incident_store import IncidentStore
 from ops_agent.models import Incident
+from ops_agent.notification import (
+    NotificationInput,
+    build_log_reply,
+    build_notification,
+)
 from ops_agent.owners import ServiceOwnersRegistry
 from ops_agent.policy import PolicyDecision, decide
 from ops_agent.prometheus_client import PrometheusClient, StreamProcessorStatus
 from ops_agent.remediation import RemediationResult, restart_stream_processor
-from ops_agent.slack_notifier import SlackNotifier, mention_text
+from ops_agent.slack_notifier import SlackNotifier
 from ops_agent.ssh import SshTarget
 
 logger = logging.getLogger(__name__)
@@ -48,6 +53,7 @@ class OpsAgentOrchestrator:
         cooldown_seconds: float,
         recovery_poll_interval_seconds: float = 10.0,
         recovery_wait_seconds: float = 90.0,
+        history_window_seconds: float = 7 * 24 * 3600,
         diagnose: Callable[[SshTarget], StreamProcessorDiagnostics] = collect_stream_processor_diagnostics,
         remediate: Callable[[SshTarget], RemediationResult] = restart_stream_processor,
         sleep: Callable[[float], None] = time.sleep,
@@ -61,6 +67,7 @@ class OpsAgentOrchestrator:
         self._cooldown_seconds = cooldown_seconds
         self._recovery_poll_interval_seconds = recovery_poll_interval_seconds
         self._recovery_wait_seconds = recovery_wait_seconds
+        self._history_window_seconds = history_window_seconds
         self._diagnose = diagnose
         self._remediate = remediate
         self._sleep = sleep
@@ -81,12 +88,24 @@ class OpsAgentOrchestrator:
 
         status = self._prometheus.stream_processor_status()
         if status.is_healthy:
+            # 조치하지 않더라도 알린다 — 침묵하면 Grafana의 감지 알림 뒤로 후속이 없어
+            # agent가 죽은 것인지 판단하고 넘어간 것인지 구분할 수 없다(설계 §1-1).
+            diagnostics = self._diagnose(self._ssh_target)
+            self._notify(
+                incident,
+                status,
+                diagnostics,
+                None,
+                remediation=None,
+                recovered=True,
+                extra_reason="재검증 결과 이미 정상 — Grafana alert가 stale이었던 것으로 보인다",
+            )
             return IncidentOutcome(
                 incident=incident,
                 handled=True,
                 reverified_status=status,
                 policy=None,
-                diagnostics=None,
+                diagnostics=diagnostics,
                 remediation=None,
                 recovered=True,
                 escalated=False,
@@ -135,13 +154,16 @@ class OpsAgentOrchestrator:
                 summary=f"{incident.alertname}: cooldown active, skipped remediation, escalated",
             )
 
-        self._incident_store.record_attempt(
+        event_id = self._incident_store.record_attempt(
             incident.fingerprint, incident.alertname, policy_decision.action.value
         )
         remediation_result = self._remediate(self._ssh_target)
 
         post_status = self._wait_for_recovery()
         recovered = post_status.is_healthy
+        self._incident_store.record_outcome(
+            event_id, succeeded=remediation_result.succeeded, recovered=recovered
+        )
 
         self._notify(incident, post_status, diagnostics, policy_decision, remediation=remediation_result, recovered=recovered)
 
@@ -175,29 +197,40 @@ class OpsAgentOrchestrator:
         incident: Incident,
         status: StreamProcessorStatus,
         diagnostics: StreamProcessorDiagnostics,
-        policy_decision: PolicyDecision,
+        policy_decision: PolicyDecision | None,
         *,
         remediation: RemediationResult | None,
         recovered: bool,
         extra_reason: str | None = None,
     ) -> None:
         owner = self._owners.resolve(incident.service) if incident.service else None
-        lines = [
-            f"*{incident.alertname}* ({incident.service or 'unknown service'}, severity={incident.severity or 'unknown'})",
-            (
-                f"진단: Prometheus 상태={status.label}, container={diagnostics.container_status}, "
-                f"restart_count={diagnostics.restart_count}"
-            ),
-        ]
-        if remediation is not None:
-            lines.append(f"실행한 조치: {remediation.action} (succeeded={remediation.succeeded})")
-        else:
-            reason = extra_reason or policy_decision.reason
-            lines.append(f"자동 조치 없음: {reason}")
-        lines.append(f"복구 여부: {'성공' if recovered else '실패 — 담당자 확인 필요'}")
-        lines.append(f"담당자: {mention_text(owner)}")
+        text, blocks = build_notification(
+            NotificationInput(
+                incident=incident,
+                status=status,
+                diagnostics=diagnostics,
+                policy=policy_decision,
+                remediation=remediation,
+                recovered=recovered,
+                owner=owner,
+                recent_attempts=self._incident_store.count_recent(
+                    incident.fingerprint, self._history_window_seconds
+                ),
+                extra_reason=extra_reason,
+            )
+        )
 
         try:
-            self._slack.post("\n".join(lines))
+            thread_ts = self._slack.post(text, blocks=blocks)
         except Exception:
             logger.exception("failed to post Slack notification for %s", incident.alertname)
+            return
+
+        reply = build_log_reply(diagnostics)
+        if reply is None or thread_ts is None:
+            return
+        try:
+            self._slack.post_thread_reply(thread_ts, reply)
+        except Exception:
+            # 본문은 이미 나갔으므로 답글 실패로 전체를 실패시키지 않는다.
+            logger.exception("failed to post log tail for %s", incident.alertname)
