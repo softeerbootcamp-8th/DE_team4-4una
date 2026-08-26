@@ -96,6 +96,7 @@ jobs:
             monitoring:
               - 'infra/compose/monitoring.yaml'
               - 'infra/compose/exporters.yaml'
+              - 'infra/compose/spark-exporters.yaml'
               - 'infra/monitoring/**'
               - '.github/workflows/ci.yml'
 
@@ -281,6 +282,7 @@ jobs:
           set -euo pipefail
           docker compose -f infra/compose/monitoring.yaml config --quiet
           docker compose -f infra/compose/exporters.yaml config --quiet
+          docker compose -f infra/compose/spark-exporters.yaml config --quiet
 
       # 컨테이너가 쓰는 것과 같은 버전의 promtool로 본다. 이미지 태그를 compose에서
       # 뽑아 쓰므로, Prometheus를 올려도 검사 버전이 따라간다.

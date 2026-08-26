@@ -67,6 +67,58 @@ services:
       - prometheus
     # Grafana가 de4-monitoring 네트워크 안에서 http://ops-agent:8080으로 붙으므로 ports를 publish하지 않는다.
 
+  # Monitoring EC2 자신의 host 메트릭 — 같은 monitoring 네트워크라 IP/extra_hosts 없이 Docker DNS로 scrape한다.
+  monitoring-node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: monitoring-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    networks:
+      - monitoring
+
+  # Monitoring EC2 컨테이너별 CPU/Memory — exporters.yaml의 cAdvisor 블록 재사용.
+  monitoring-cadvisor:
+    image: ghcr.io/google/cadvisor:0.55.1
+    container_name: monitoring-cadvisor
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    networks:
+      - monitoring
+
+  # Grafana/Prometheus/Ops Agent를 외부에서 HTTP로 probe해 self-health를 Prometheus에 저장한다.
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.26.0
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    volumes:
+      - ../monitoring/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+      - grafana
+      - ops-agent
+
 volumes:
   prometheus-data:
   grafana-data:

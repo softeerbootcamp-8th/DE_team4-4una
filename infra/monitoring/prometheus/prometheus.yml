@@ -17,6 +17,48 @@ scrape_configs:
       - targets:
           - project-ec2:8081
 
+  # Spark Streaming EC2 자신의 host 메트릭 — project-ec2와 같은 extra_hosts 방식.
+  - job_name: spark-node
+    static_configs:
+      - targets:
+          - spark-ec2:9100
+
+  # Monitoring EC2 자신의 host 메트릭 — 같은 네트워크라 Docker DNS로 바로 scrape.
+  - job_name: monitoring-node
+    static_configs:
+      - targets:
+          - monitoring-node-exporter:9100
+
+  # Spark Streaming EC2 컨테이너별(stream-processor 등) CPU/Memory.
+  - job_name: spark-containers
+    static_configs:
+      - targets:
+          - spark-ec2:8081
+
+  # Monitoring EC2 컨테이너별(prometheus/grafana/ops-agent 등) CPU/Memory.
+  - job_name: monitoring-containers
+    static_configs:
+      - targets:
+          - monitoring-cadvisor:8080
+
+  # Grafana/Prometheus/Ops Agent self-health probe — blackbox_exporter 표준 relabel 패턴.
+  - job_name: blackbox-self-health
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://grafana:3000/api/health
+          - http://prometheus:9090/-/ready
+          - http://ops-agent:8080/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
   - job_name: serving-api
     static_configs:
       - targets:
