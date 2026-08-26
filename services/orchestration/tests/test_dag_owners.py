@@ -25,7 +25,7 @@ _MINIMAL_YAML = textwrap.dedent(
         owner: alice
         severity: critical
         tasks:
-          sensor_processing.resolve_road_snapshot_date:
+          emr_teardown.check_idle:
             owner: bob
             severity: high
       bronze_compaction:
@@ -55,11 +55,11 @@ def test_task_level_override_wins_over_dag_default(tmp_path):
 
     owner = registry.resolve_owner(
         "standard_score_pipeline",
-        task_id="sensor_processing.resolve_road_snapshot_date",
+        task_id="emr_teardown.check_idle",
     )
     severity = registry.resolve_severity(
         "standard_score_pipeline",
-        task_id="sensor_processing.resolve_road_snapshot_date",
+        task_id="emr_teardown.check_idle",
     )
     assert owner.name == "bob"
     assert severity == "high"
@@ -69,10 +69,10 @@ def test_unregistered_task_falls_back_to_dag_default(tmp_path):
     registry = load_dag_owners_registry(_write_config(tmp_path))
 
     owner = registry.resolve_owner(
-        "standard_score_pipeline", task_id="hourly_scoring.run_hourly_scoring"
+        "standard_score_pipeline", task_id="compute_hourly_score"
     )
     severity = registry.resolve_severity(
-        "standard_score_pipeline", task_id="hourly_scoring.run_hourly_scoring"
+        "standard_score_pipeline", task_id="compute_hourly_score"
     )
     assert owner.name == "alice"
     assert severity == "critical"
@@ -80,15 +80,15 @@ def test_unregistered_task_falls_back_to_dag_default(tmp_path):
 
 def test_task_group_id_is_used_when_task_id_has_no_override(tmp_path):
     text = _MINIMAL_YAML.replace(
-        "sensor_processing.resolve_road_snapshot_date:",
-        "sensor_processing:",
+        "emr_teardown.check_idle:",
+        "emr_teardown:",
     )
     registry = load_dag_owners_registry(_write_config(tmp_path, text))
 
     owner = registry.resolve_owner(
         "standard_score_pipeline",
-        task_id="sensor_processing.run_sensor_processing",
-        task_group_id="sensor_processing",
+        task_id="emr_teardown.stop_application",
+        task_group_id="emr_teardown",
     )
     assert owner.name == "bob"
 

@@ -98,7 +98,7 @@ def test_expired_xcom_falls_back_to_job_run_name_matching(lake):
         listed=[
             {
                 "id": JOB_RUN_ID,
-                "name": "run_sensor_processing",
+                "name": "transform_sensor_readings",
                 "createdAt": datetime(2026, 8, 25, 2, 0, 25, tzinfo=UTC),
             }
         ],
@@ -139,7 +139,7 @@ def test_asset_triggered_run_records_the_wait_from_the_trigger(lake):
                 {
                     "timestamp": "2026-08-25T01:59:30Z",
                     "source_dag_id": "standard_score_pipeline",
-                    "source_task_id": "report_processing_counts",
+                    "source_task_id": "report_pipeline_counts",
                     "source_run_id": "upstream-run",
                     "created_dagruns": [{"dag_id": "current_score_pipeline", "run_id": RUN_ID}],
                 }
@@ -168,7 +168,7 @@ def test_upstream_failed_task_is_not_matched_to_someone_elses_job_run(lake):
     실제 수집에서 관측한 오탐이라 상태로 먼저 걸러야 한다.
     """
     never_ran = {
-        "task_id": "standard_score.validate_standard_score",
+        "task_id": "validate_standard_score",
         "operator": "EmrServerlessStartJobOperator",
         "state": "upstream_failed",
         "try_number": 0,

@@ -16,12 +16,12 @@ from __future__ import annotations
 # 이 매핑을 재사용해, 실패 시점까지 이미 성공한 상위 task가 있으면 그 처리 건수를
 # 실패 알림에도 넣는다(spec §7) — 아직 안 돌았으면 조용히 생략한다.
 _SUMMARY_TASK_IDS: dict[str, str] = {
-    "current_score_pipeline": "run_current_score",
-    "zone_weather_pipeline": "run_weather_collection",
+    "current_score_pipeline": "compute_current_score",
+    "zone_weather_pipeline": "collect_weather",
     "bronze_compaction": "compact_zone_weather_snapshot",
-    # report_processing_counts는 standard_score TaskGroup 밖(DAG 최상위)에 있으므로
+    # report_pipeline_counts는 standard_score TaskGroup 밖(DAG 최상위)에 있으므로
     # task_id에 TaskGroup 접두사가 붙지 않는다 — dags/standard_score_pipeline.py 참고.
-    "standard_score_pipeline": "report_processing_counts",
+    "standard_score_pipeline": "report_pipeline_counts",
     "data_quality_audit": "report_audit_counts",
 }
 

@@ -37,7 +37,7 @@ TASK_INSTANCES = [
         "duration": 5.0,
     },
     {
-        "task_id": "sensor_processing.run_sensor_processing",
+        "task_id": "transform_sensor_readings",
         "operator": "EmrServerlessStartJobOperator",
         "state": "success",
         "try_number": 1,
@@ -50,7 +50,7 @@ TASK_INSTANCES = [
 JOB_RUN = {
     "jobRunId": JOB_RUN_ID,
     "applicationId": APPLICATION_ID,
-    "name": "run_sensor_processing",
+    "name": "transform_sensor_readings",
     "state": "SUCCESS",
     "createdAt": datetime(2026, 8, 25, 2, 0, 25, tzinfo=UTC),
     "startedAt": datetime(2026, 8, 25, 2, 1, 35, tzinfo=UTC),
@@ -85,8 +85,8 @@ def build_collector(
         xcoms=xcoms
         if xcoms is not None
         else {
-            (RUN_ID, "sensor_processing.run_sensor_processing"): JOB_RUN_ID,
-            (RUN_ID, "report_processing_counts"): {"feature_count": 184213},
+            (RUN_ID, "transform_sensor_readings"): JOB_RUN_ID,
+            (RUN_ID, "report_pipeline_counts"): {"feature_count": 184213},
         },
         task_logs=task_logs
         if task_logs is not None

@@ -53,7 +53,7 @@ def _collect_latest_zone_weather(data_interval_end) -> dict:
     return result
 
 
-def _validate_weather_collection(data_interval_end) -> None:
+def _validate_weather(data_interval_end) -> None:
     # detect_changed_zones보다 앞에 둔다 — 이상 데이터로 zone이 잘못 "변경됨"으로
     # 오판되는 걸 막는다(#250). GX가 아니라 인라인 Python/SQL로 검증하는 이유는
     # jobs/weather_validation.py 모듈 docstring 참고(ADR-0004 예외).
@@ -112,6 +112,8 @@ with DAG(
     # 느려진 옛 실행과 새 실행이 겹쳐 latest_zone_weather를 역전시키는 걸 막는다(jobs/weather.py의 WHERE와 이중 방어).
     max_active_runs=1,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "LEEMINHA",
         # 15분 주기라 hourly_pipeline의 5분 재시도 간격은 너무 길다. retry_delay는 재시도 대기 시간일 뿐 실행 시간 제한이 아니다.
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),
@@ -123,16 +125,16 @@ with DAG(
         "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
-    tags=["zone-weather-pipeline"],
+    tags=["pipeline", "weather"],
 ) as dag:
-    run_weather_collection = PythonOperator(
-        task_id="run_weather_collection",
+    collect_weather = PythonOperator(
+        task_id="collect_weather",
         python_callable=_collect_latest_zone_weather,
     )
 
-    validate_weather_collection = PythonOperator(
-        task_id="validate_weather_collection",
-        python_callable=_validate_weather_collection,
+    validate_weather = PythonOperator(
+        task_id="validate_weather",
+        python_callable=_validate_weather,
     )
 
     detect_changed_zones = ShortCircuitOperator(
@@ -152,5 +154,5 @@ with DAG(
         outlets=[ZONE_WEATHER_ASSET],
     )
 
-    run_weather_collection >> validate_weather_collection >> detect_changed_zones
+    collect_weather >> validate_weather >> detect_changed_zones
     detect_changed_zones >> publish_zone_weather_asset
