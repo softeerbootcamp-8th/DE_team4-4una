@@ -23,7 +23,7 @@ contactPoints:
             State: {{ .Status }}
             {{ range .Alerts }}Alert: {{ .Labels.alertname }}
             Severity: {{ .Labels.severity }}
-            발생 시각: {{ .StartsAt }}
+            발생 시각: {{ .StartsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }})
             {{ .Annotations.summary }}
             현재 값: {{ .ValueString }}
             {{ if .DashboardURL }}Dashboard: {{ .DashboardURL }}{{ end }}
