@@ -26,9 +26,13 @@ TEST_CONFIG = ComfortScoreConfig(
     vertical_weight=ProvisionalThreshold(value=0.6, provisional=True),
     longitudinal_weight=ProvisionalThreshold(value=0.3, provisional=True),
     lateral_weight=ProvisionalThreshold(value=0.1, provisional=True),
-    min_traffic_threshold=ProvisionalThreshold(value=5.0, provisional=True),
+    evidence_saturation_trip_count=ProvisionalThreshold(value=5.0, provisional=True),
     shrinkage_k=ProvisionalThreshold(value=4.0, provisional=True),
 )
+
+
+def evidence_weight(trip_count: float, config: ComfortScoreConfig = TEST_CONFIG) -> float:
+    return min(1.0, trip_count / config.evidence_saturation_trip_count.value)
 
 HOURLY_SCHEMA = (
     "segment_id string, vehicle_profile_id int, data_period_start timestamp, "
@@ -149,7 +153,7 @@ class TestDirectionalScores:
             assert row.comfort_score == pytest.approx(weighted_sum(row), abs=1e-5)
 
     def test_comfort_score_follows_the_documented_steps(self, spark):
-        """comfort-score.md Step 1~5를 손으로 계산한 값과 일치한다.
+        """comfort-score.md Step 1~5를 손으로 계산한 값과 일치한다(evidence weighting, #566).
 
         구 segment_comfort_score 경로와 값을 비교하던 테스트였다(#227에서 그 경로를
         제거). 공식에서 직접 계산한 기대값으로 바꿔, 산출식이 바뀌면 여기서 깨지도록
@@ -160,7 +164,7 @@ class TestDirectionalScores:
                  lateral_score=70.0, sample_count=10),
             hour(segment_id="seg-y", vertical_score=10.0, longitudinal_score=80.0,
                  lateral_score=30.0, sample_count=20),
-            # T_min 미달 — 집계에서 제외돼야 한다.
+            # trip_count=1 < saturation(5) — hard cutoff 없이 evidence=0.2로 일부 인정된다.
             hour(segment_id="seg-y", vertical_score=99.0, trip_count=1, sample_count=99),
         )
 
@@ -174,18 +178,25 @@ class TestDirectionalScores:
 
         # Step 1: 방향 점수를 가중 결합
         c_x = 0.6 * 90.0 + 0.3 * 20.0 + 0.1 * 70.0
-        c_y = 0.6 * 10.0 + 0.3 * 80.0 + 0.1 * 30.0
-        # Step 4: mu_p는 프로필 1의 qualifying hour 전체 평균, N=1, k=4
-        mu = (c_x + c_y) / 2
+        c_y1 = 0.6 * 10.0 + 0.3 * 80.0 + 0.1 * 30.0
+        c_y2 = 0.6 * 99.0 + 0.3 * 0.0 + 0.1 * 0.0
+        # Step 2: evidence weight
+        e_x, e_y1, e_y2 = evidence_weight(10), evidence_weight(10), evidence_weight(1)
+        # Step 3: evidence-weighted 관측 평균
+        n_x, n_y = e_x, e_y1 + e_y2
+        c_x_obs = c_x
+        c_y_obs = (e_y1 * c_y1 + e_y2 * c_y2) / n_y
+        # Step 4: mu_p는 프로필 1의 evidence 전체를 pool한 가중 평균
+        mu = (e_x * c_x + e_y1 * c_y1 + e_y2 * c_y2) / (e_x + e_y1 + e_y2)
         k = 4.0
-        for key, c_obs in (("seg-x", c_x), ("seg-y", c_y)):
+        for key, c_obs, n in (("seg-x", c_x_obs, n_x), ("seg-y", c_y_obs, n_y)):
             row = standard[(key, 1)]
-            assert row.comfort_score == pytest.approx((c_obs + k * mu) / (1 + k), abs=1e-5)
-            # Step 5: Confidence = N / (N + k)
-            assert row.confidence_score == pytest.approx(1 / (1 + k), abs=1e-5)
+            assert row.comfort_score == pytest.approx((n * c_obs + k * mu) / (n + k), abs=1e-5)
+            # Step 5: Confidence = N_eff / (N_eff + k)
+            assert row.confidence_score == pytest.approx(n / (n + k), abs=1e-5)
 
-        # T_min 미달 행의 sample_count(99)는 합산되지 않는다
-        assert standard[("seg-y", 1)].sample_count == 20
+        # trip_count=1인 시간도 이제 evidence로 인정되므로 sample_count(99)가 합산된다(#566).
+        assert standard[("seg-y", 1)].sample_count == 20 + 99
 
     def test_vehicle_agnostic_row_also_carries_directional_scores(self, spark):
         df = hourly_df(
@@ -234,10 +245,10 @@ class TestUniverseMaterialization:
         )
 
         row = rows_by_key(result)[("seg-z", 1)]
-        # N=0 -> Step 4가 mu_p로 수렴한다. mu_p의 vertical = (100+0)/2 = 50.
+        # N_eff=0 -> Step 4가 mu_p로 수렴한다. mu_p의 vertical = (100+0)/2 = 50.
         assert row.confidence_score == pytest.approx(0.0)
         assert row.vertical_score == pytest.approx(50.0)
-        assert row.qualifying_hours == 0
+        assert row.evidence_hours == 0
         # 롤업할 qualifying hour가 없어 경계는 NULL로 나오고, 채움은 job의 책임이다.
         assert row.data_period_start is None
         assert row.data_period_end is None
@@ -247,9 +258,11 @@ class TestUniverseMaterialization:
             spark,
             hour(segment_id="seg-x", vehicle_profile_id=1, vertical_score=100.0,
                  trip_count=10),
-            # 프로필 2는 이 윈도우 전체에서 T_min 미달이라 mu_2가 정의되지 않는다.
+            # 프로필 2는 이 윈도우 전체에서 trip_count=0(evidence 없음)이라 mu_2가
+            # 정의되지 않는다 — trip_count=2처럼 낮아도 0이 아니면 evidence weight
+            # 0.4로 일부 인정되므로(#566) mu_2가 정의되려면 정확히 0이어야 한다.
             hour(segment_id="seg-y", vehicle_profile_id=2, vertical_score=0.0,
-                 trip_count=2),
+                 trip_count=0),
         )
 
         result = compute_standard_comfort_scores(

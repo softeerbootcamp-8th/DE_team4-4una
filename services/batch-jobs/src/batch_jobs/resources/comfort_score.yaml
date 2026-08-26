@@ -13,8 +13,10 @@ lateral_weight:
   value: 0.2
   provisional: true
 
-# 신뢰할 시간대로 인정할 최소 차량 통행 수 (T_min)
-min_traffic_threshold:
+# evidence weight e_h = min(1, trip_count_h / evidence_saturation_trip_count)가
+# 1.0(포화)에 도달하는 시간당 차량 통행 수 — hard cutoff(T_min) 대신 연속 가중치로
+# 반영한다(#566). trip_count가 이 값보다 적어도 0은 아닌 부분 evidence로 인정된다.
+evidence_saturation_trip_count:
   value: 5.0
   provisional: true
 
