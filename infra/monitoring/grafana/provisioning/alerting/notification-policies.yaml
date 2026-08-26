@@ -6,8 +6,7 @@ policies:
     receiver: ops-agent
     group_by: ["alertname"]
     routes:
-      # 인프라 alert는 ops-agent를 거치지 않고 Slack으로만 보낸다 -- 자동 조치
-      # 대상이 아니다(contact-points.yaml의 infra-slack 주석 참고).
+      # 인프라 alert(rules.yaml의 infrastructure 그룹)는 ops-agent를 거치지 않고 Slack으로만 보낸다.
       - receiver: infra-slack
         object_matchers:
           - ["service", "=", "infrastructure"]
