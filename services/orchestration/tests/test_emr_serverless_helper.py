@@ -19,7 +19,7 @@ from airflow.sdk import DAG
 # (test_current_score_pipeline_dag.py와 동일한 패턴).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dags"))
 
-from emr_serverless import submit_batch_jobs_command
+from emr_serverless import EMR_SERVERLESS_POOL, submit_batch_jobs_command
 
 
 def _build_operator(**kwargs):
@@ -156,6 +156,32 @@ def test_all_job_runs_persist_logs_to_s3_monitoring_configuration():
     assert log_uri == (
         f"{{{{ var.value.get('EMR_SERVERLESS_LOG_S3_URI', '{default}') or '{default}' }}}}"
     )
+
+
+def test_job_run_polling_keeps_the_twenty_five_minute_timeout_budget():
+    # provider 기본값 60초는 그대로 "이미 끝난 일을 아직 모르는 시간"이 된다 —
+    # 2026-08-26T02:00 실측에서 136.8초, DAG run 14분 57초의 15.2%였다(#528).
+    #
+    # delay만 줄이면 provider가 타임아웃을 delay x max_attempts로 계산하므로 25분이
+    # 6분 15초로 떨어지고, run_sensor_processing(실측 created -> ended 5분 44초)이
+    # 바로 걸린다. 곱이 25분 이상이어야 한다는 것이 이 테스트가 지키는 불변식이다.
+    operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
+
+    assert operator.waiter_delay == 15
+    assert operator.waiter_max_attempts == 100
+    assert operator.waiter_delay * operator.waiter_max_attempts >= 25 * 60
+
+
+def test_job_run_operator_stays_non_deferrable_so_the_pool_serialises_dags():
+    # emr_serverless pool의 DAG 간 직렬화는 "operator가 deferrable이 아니라서 job
+    # 완료까지 slot을 쥔다"는 사실에 의존한다. deferrable로 바꾸면 slot이 즉시 풀려
+    # standard_score_pipeline과 data_quality_audit의 Job Run이 겹치고, #508에서 겪은
+    # ApplicationMaxCapacityExceededException(한 job run이 10분 12초 굶음)이 재발한다.
+    operator = _build_operator(task_id="run_thing", entry_point_arguments=["cmd"])
+
+    assert operator.deferrable is False
+    assert operator.wait_for_completion is True
+    assert operator.pool == EMR_SERVERLESS_POOL
 
 
 # --- #432: 파이프라인 종료 후 Application을 명시적으로 stop시키는 task들 ---
