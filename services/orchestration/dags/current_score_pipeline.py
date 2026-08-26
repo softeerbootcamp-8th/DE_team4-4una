@@ -30,7 +30,7 @@ def _changed_zones_only(triggering_asset_events) -> bool:
     return not triggering_asset_events.get(STANDARD_SCORE_ASSET, [])
 
 
-def _run_current_score(triggering_asset_events) -> dict:
+def _compute_current_score(triggering_asset_events) -> dict:
     # dag-processor/webserver에는 마운트되지 않아 task 콜백 안에서 지연 import한다.
     from jobs.current_score import run_from_env
 
@@ -67,9 +67,9 @@ with DAG(
         "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
-    tags=["current-score-pipeline", "comfort-score"],
+    tags=["pipeline", "comfort-score"],
 ) as dag:
-    run_current_score = PythonOperator(
-        task_id="run_current_score",
-        python_callable=_run_current_score,
+    compute_current_score = PythonOperator(
+        task_id="compute_current_score",
+        python_callable=_compute_current_score,
     )

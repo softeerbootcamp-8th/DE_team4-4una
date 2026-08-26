@@ -1,6 +1,6 @@
 """Streaming aggregation of one Job Run's Spark event log (#462 L3).
 
-`run_sensor_processing` 한 건의 rolling event log가 19파일 237MB라, 전량을 메모리에
+`transform_sensor_readings` 한 건의 rolling event log가 19파일 237MB라, 전량을 메모리에
 올리는 파서는 쓸 수 없다. 여기서는 `events_<N>_<app-id>` 파일을 N 순서로 이어 읽으며
 한 줄씩 JSON으로 풀고, 필요한 `Event` 타입만 누적기에 반영한 뒤 즉시 버린다. 개별
 task 레코드는 남기지 않고 스테이지별 누적합과 분위수용 duration 표본

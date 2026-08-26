@@ -66,7 +66,7 @@ with DAG(
         "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
-    tags=["bronze-compaction"],
+    tags=["ops", "weather"],
 ) as dag:
     compact_zone_weather_snapshot = PythonOperator(
         task_id="compact_zone_weather_snapshot",

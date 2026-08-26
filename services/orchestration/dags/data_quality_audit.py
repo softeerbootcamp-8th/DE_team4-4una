@@ -17,7 +17,7 @@ batch-jobs 컨테이너를 직접 띄우던(docker-outside-of-docker) 방식에�
 
 두 audit task는 `emr_serverless` pool(slot 1)을 거쳐 순차로 제출된다. 이전에는
 의존관계 없이 병렬 제출돼 이 DAG 혼자 동시 job run 2건을 만들었고, 그 상태에서
-`audit_standard_segment_comfort_score`가 exit 137로 반복 실패했다. driver 크기도
+`audit_standard_score`가 exit 137로 반복 실패했다. driver 크기도
 `audit` 프로파일로 따로 잡는다 — 이 job은 executor를 거의 쓰지 않고 Great
 Expectations가 테이블 전량을 driver의 pandas에 올린다.
 
@@ -96,14 +96,14 @@ with DAG(
         "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
-    tags=["data-quality-audit", "comfort-score"],
+    tags=["ops", "comfort-score", "emr-serverless"],
 ) as dag:
     # 두 task를 직렬로 잇는다(#508). 병렬로 두면 이 DAG 혼자 동시 job run 2건을
     # 만들어 Application 용량을 초과한다 — 실제로 08-25 03시에 audit_standard가
     # exit 137로 두 번 연속 실패했다. 감사 결과는 서로 독립이라 순서는 상관없다.
     # outlet이 없어 이 DAG의 성공/실패는 어떤 다른 DAG도 깨우거나 막지 않는다.
-    audit_standard_segment_comfort_score = submit_batch_jobs_command(
-        task_id="audit_standard_segment_comfort_score",
+    audit_standard_score = submit_batch_jobs_command(
+        task_id="audit_standard_score",
         profile="audit",
         entry_point_arguments=[
             "audit-gold",
@@ -111,8 +111,8 @@ with DAG(
         ],
         driver_env=_audit_gold_driver_env(),
     )
-    audit_current_segment_comfort_score = submit_batch_jobs_command(
-        task_id="audit_current_segment_comfort_score",
+    audit_current_score = submit_batch_jobs_command(
+        task_id="audit_current_score",
         profile="audit",
         entry_point_arguments=[
             "audit-gold",
@@ -126,7 +126,7 @@ with DAG(
         python_callable=_report_audit_counts,
     )
     (
-        audit_standard_segment_comfort_score
-        >> audit_current_segment_comfort_score
+        audit_standard_score
+        >> audit_current_score
         >> report_audit_counts
     )
