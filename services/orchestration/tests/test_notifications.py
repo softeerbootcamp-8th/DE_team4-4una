@@ -146,6 +146,9 @@ def _fake_object_store(monkeypatch):
         "_failed_tasks_s3_root",
         lambda: notifications._DEFAULT_FAILED_TASKS_S3_ROOT,
     )
+    # 이 fake에는 read_bytes가 없어 EMR driver 로그 조회가 실패한다(진단 없음 경로).
+    # 재시도 대기까지 실제로 자면 테스트가 느려지므로 0으로 둔다.
+    monkeypatch.setattr(notifications, "_LOG_FETCH_RETRY_SECONDS", 0)
     return written
 
 
@@ -378,3 +381,196 @@ def test_failed_tasks_s3_root_falls_back_to_default_when_variable_is_empty_strin
     monkeypatch.setattr("airflow.sdk.Variable", _FakeVariable)
 
     assert notifications._failed_tasks_s3_root() == notifications._DEFAULT_FAILED_TASKS_S3_ROOT
+
+
+# --- EMR driver 로그 진단 (실패 알림에 원인 분류를 붙인다) ---
+
+
+def _emr_task_instance(task_id: str = "run_sensor_processing") -> _FakeTaskInstance:
+    from airflow.providers.amazon.aws.links.emr import EmrServerlessS3LogsLink
+
+    task_instance = _FakeTaskInstance(task_id=task_id)
+    task_instance.xcom_store[(task_id, EmrServerlessS3LogsLink.key)] = {
+        "region_name": "ap-northeast-2",
+        "aws_domain": "aws.amazon.com",
+        "log_uri": "s3://de4-observability/emr-serverless/logs/",
+        "application_id": "app-1",
+        "job_run_id": "job-1",
+    }
+    return task_instance
+
+
+@pytest.fixture
+def _fake_emr_log(monkeypatch):
+    """driver stderr.gz를 흉내 낸다. holder["text"]에 로그를, None이면 조회 실패."""
+    import gzip
+
+    holder: dict = {"text": None, "written": {}, "read_uris": []}
+
+    class _FakeObjectStore:
+        def write_bytes(self, uri, value):
+            holder["written"][uri] = value
+
+        def read_bytes(self, uri):
+            holder["read_uris"].append(uri)
+            if holder["text"] is None:
+                raise FileNotFoundError(uri)
+            return gzip.compress(holder["text"].encode("utf-8"))
+
+    monkeypatch.setattr("de4_core.ObjectStore", _FakeObjectStore)
+    monkeypatch.setattr(
+        notifications, "_failed_tasks_s3_root", lambda: notifications._DEFAULT_FAILED_TASKS_S3_ROOT
+    )
+    # 조회 실패 경로가 실제로 5초씩 잠들지 않게 한다.
+    monkeypatch.setattr(notifications, "_LOG_FETCH_RETRY_SECONDS", 0)
+
+    class _FakeVariable:
+        @staticmethod
+        def get(key, default=None):
+            return "sup3rs3cret" if key == "POSTGRES_PASSWORD" else default
+
+    monkeypatch.setattr("airflow.sdk.Variable", _FakeVariable)
+    return holder
+
+
+_EXECUTOR_OOM_LOG = (
+    "25/08/26 04:11:40 ERROR YarnScheduler: Lost executor 4: Container killed by the "
+    "framework, memory usage exceeded configured memory size\n"
+    "25/08/26 04:11:41 ERROR TaskSetManager: ExecutorLostFailure (executor 4 exited) "
+    "Reason: Container killed, exit code 137\n"
+)
+
+
+def test_failure_callback_reports_classified_cause_in_korean(_fake_slack_hook, _fake_emr_log):
+    _fake_emr_log["text"] = _EXECUTOR_OOM_LOG
+    context = _context("standard_score_pipeline", _emr_task_instance())
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "EXECUTOR_MEMORY_EXCEEDED" in text
+    assert "메모리 부족으로 종료" in text
+    assert "ExecutorLostFailure" in text  # 근거 로그 줄
+    assert "spark.executor.memoryOverhead" in text  # 확인 사항
+
+
+def test_failure_callback_reads_driver_logs_from_expected_s3_paths(
+    _fake_slack_hook, _fake_emr_log
+):
+    _fake_emr_log["text"] = _EXECUTOR_OOM_LOG
+    notifications.on_failure_callback(_context("standard_score_pipeline", _emr_task_instance()))
+
+    root = "s3://de4-observability/emr-serverless/logs/applications/app-1/jobs/job-1/"
+    assert _fake_emr_log["read_uris"] == [
+        root + "SPARK_DRIVER/stderr.gz",
+        root + "SPARK_DRIVER/stdout.gz",
+    ]
+
+
+def test_failure_callback_masks_postgres_password_from_driver_log(
+    _fake_slack_hook, _fake_emr_log
+):
+    # driver는 기동 시 자기 sparkSubmitParameters를 stderr에 그대로 찍는다.
+    _fake_emr_log["text"] = (
+        "25/08/26 04:00:00 INFO SparkSubmit: --conf "
+        "spark.emr-serverless.driverEnv.POSTGRES_PASSWORD=sup3rs3cret\n" + _EXECUTOR_OOM_LOG
+    )
+    context = _context("standard_score_pipeline", _emr_task_instance())
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "sup3rs3cret" not in text
+    for written in _fake_emr_log["written"].values():
+        assert b"sup3rs3cret" not in written
+
+
+def test_failure_callback_marks_unknown_without_inventing_a_cause(
+    _fake_slack_hook, _fake_emr_log
+):
+    _fake_emr_log["text"] = "25/08/26 09:00:05 ERROR Client: nobody has a rule for this yet\n"
+    context = _context("standard_score_pipeline", _emr_task_instance())
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "UNKNOWN_ERROR" in text
+    assert "등록된 룰에 해당하지 않습니다" in text
+    assert "nobody has a rule" in text
+    assert "확인 사항" not in text  # 지어낸 조치를 붙이지 않는다
+
+
+def test_failure_callback_records_error_type_for_unknown_ratio_tracking(
+    _fake_slack_hook, _fake_emr_log
+):
+    import json
+
+    _fake_emr_log["text"] = _EXECUTOR_OOM_LOG
+    notifications.on_failure_callback(_context("standard_score_pipeline", _emr_task_instance()))
+
+    record = json.loads(next(iter(_fake_emr_log["written"].values())))
+    assert record["error_type"] == "EXECUTOR_MEMORY_EXCEEDED"
+
+
+def test_failure_callback_still_posts_when_driver_log_is_unavailable(
+    _fake_slack_hook, _fake_emr_log
+):
+    # Job Run 직후라 아직 flush 전이거나 권한 문제인 경우. 진단 줄만 빠지고 나머지는 그대로다.
+    _fake_emr_log["text"] = None
+    context = _context(
+        "standard_score_pipeline", _emr_task_instance(), exception=ValueError("boom")
+    )
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "오류 유형" not in text
+    assert "boom" in text
+    assert "담당자" in text
+    assert "EMR Serverless 원본 로그" in text
+
+
+def test_failure_callback_skips_diagnosis_for_non_emr_task(_fake_slack_hook, _fake_emr_log):
+    _fake_emr_log["text"] = _EXECUTOR_OOM_LOG
+    context = _context(
+        "bronze_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    )
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "오류 유형" not in text
+    assert _fake_emr_log["read_uris"] == []
+
+
+def test_failure_callback_truncates_long_evidence(_fake_slack_hook, _fake_emr_log):
+    long_line = "ERROR ExecutorLostFailure " + "x" * 2000
+    _fake_emr_log["text"] = _EXECUTOR_OOM_LOG + long_line + "\n"
+    context = _context("standard_score_pipeline", _emr_task_instance())
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "이하 생략" in text
+    assert len(text) < 4000
+
+
+_EMPTY_FAILURE_LOG = (
+    "WARNING: Using incubator modules: jdk.incubator.vector\n"
+    "26/08/25 12:34:57 INFO ShutdownHookManager: Shutdown hook called\n"
+    "26/08/25 12:34:57 INFO ShutdownHookManager: Deleting directory /tmp/spark-1d11c120\n"
+)
+
+
+def test_failure_callback_says_log_has_no_error_trace_instead_of_empty_unknown(
+    _fake_slack_hook, _fake_emr_log
+):
+    # 로그는 읽혔는데 오류 흔적이 없는 경우. "UNKNOWN_ERROR, 근거 없음"만 붙이면 알림이
+    # 아무 도움도 되지 않는다 — 흔적이 없다는 사실 자체가 단서다.
+    _fake_emr_log["text"] = _EMPTY_FAILURE_LOG
+    notifications.on_failure_callback(_context("standard_score_pipeline", _emr_task_instance()))
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "driver 로그에 오류 흔적이 없습니다" in text
+    assert "SPARK_EXECUTOR" in text
+    assert "등록된 룰에 해당하지 않습니다" not in text
