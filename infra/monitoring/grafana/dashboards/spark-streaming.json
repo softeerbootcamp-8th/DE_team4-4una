@@ -122,120 +122,12 @@
       }
     },
     {
-      "id": 2,
-      "type": "stat",
-      "title": "Query Running",
-      "description": "stream_processor_query_running — 리스너의 onQueryStarted/onQueryTerminated로 갱신된다.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "stream_processor_query_running{job=\"stream-processor\"}",
-          "legendFormat": "query running",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value_and_name",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "color": { "mode": "thresholds" },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": { "text": "STOPPED", "color": "red", "index": 0 },
-                "1": { "text": "RUNNING", "color": "green", "index": 1 }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 101,
       "type": "row",
       "title": "Throughput",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 1 },
       "panels": []
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Input Rows/sec",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "stream_processor_input_rows_per_second{job=\"stream-processor\"}",
-          "legendFormat": "input rows/sec",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "rps"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Processed Rows/sec",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "stream_processor_processed_rows_per_second{job=\"stream-processor\"}",
-          "legendFormat": "processed rows/sec",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "rps"
-        },
-        "overrides": []
-      }
     },
     {
       "id": 5,
@@ -243,7 +135,7 @@
       "title": "Rows/sec over Time",
       "description": "Kafka에서 읽어들인 input rows/sec와 실제로 처리를 마친 processed rows/sec를 함께 본다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -274,7 +166,7 @@
       "type": "row",
       "title": "Batch Health",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -283,7 +175,7 @@
       "title": "Micro-batch Duration",
       "description": "stream_processor_batch_duration_seconds — durationMs.triggerExecution 기준 마이크로배치 전체 소요 시간.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -315,7 +207,7 @@
       "title": "Last Progress Age",
       "description": "마지막 onQueryProgress 이후 경과 시간. STREAM_MAX_TRIGGER_DELAY(기본 5m) 동안은 새 데이터가 없어도 정상적으로 값이 쌓일 수 있다. stream_processor_last_progress_timestamp_seconds는 progress가 한 번도 없으면 0(gauge 초기값)이라, time()과 그대로 빼면 Unix epoch(1970-01-01) 기준 나이인 수십 년짜리 값이 나온다 — timestamp가 0보다 클 때만(즉 실제 progress가 한 번이라도 있었을 때만) age를 계산하도록 and로 걸러 초기 상태에서는 No data(아직 progress 없음, 장애 아님)를 보여준다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 4 },
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -355,7 +247,7 @@
       "title": "Event-Time Lag",
       "description": "이번 micro-batch에서 처리한 가장 최신 sensor event_time과 지금 사이 초 -- Last Progress Age와 달리 쿼리가 살아서 계속 진행 중이어도 실제 데이터 자체가 오래된 경우(Kafka에 백로그가 쌓여 옛날 메시지를 계속 처리 중인 상황)까지 잡아낸다(#426 후속). observe()로 얻으며 watermark 없이도 동작한다. 빈 배치는 max_event_time이 없어 No data가 되는데(장애 아님) 이전 값을 그대로 보여준다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 41, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 33, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -395,7 +287,7 @@
       "title": "Kafka Offset Lag",
       "description": "Kafka Exporter의 현재 topic offset에서 Spark가 마지막으로 처리한 end offset을 뺀 값이다. Spark progress가 멈춰도 Kafka 입력이 계속되면 즉시 증가한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 41, "w": 12, "h": 4 },
+      "gridPos": { "x": 12, "y": 33, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -426,7 +318,7 @@
       "title": "Freshness over Time",
       "description": "Last Progress Age/Event-Time Lag와 같은 query를 시간축(range query)으로 합쳤다 — 둘 다 초 단위고 같은 330초 threshold를 쓰므로 한 그래프에 같이 둔다(Kafka Offset Lag는 단위가 달라 별도 패널). 예전엔 순간값(stat)+게이지만 있었는데, 330초 threshold에 서서히 가까워지는지 추세로 미리 볼 수 있게 그래프를 추가했다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -453,7 +345,7 @@
       "title": "Kafka Offset Lag over Time",
       "description": "위 Kafka Offset Lag stat 패널과 같은 query를 시간축(range query)으로 바꿨다. Freshness over Time과 단위(record 개수 vs 초)가 달라 별도 그래프로 뒀다 — 하나의 y축에 같이 그리면 스케일이 달라 서로를 가려버린다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 53, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -469,128 +361,12 @@
       }
     },
     {
-      "id": 104,
-      "type": "row",
-      "title": "Gauges",
-      "collapsed": false,
-      "gridPos": { "x": 0, "y": 61, "w": 24, "h": 1 },
-      "panels": []
-    },
-    {
-      "id": 21,
-      "type": "gauge",
-      "title": "Last Progress Age (Gauge)",
-      "description": "위 stat 패널과 같은 query/threshold다(#437) — threshold가 이미 정의돼 있어 Gauge 후보.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 62, "w": 12, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "(time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)",
-          "legendFormat": "age",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0,
-          "max": 600,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 60 },
-              { "color": "red", "value": 330 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 22,
-      "type": "gauge",
-      "title": "Event-Time Lag (Gauge)",
-      "description": "위 stat 패널과 같은 query/threshold다(#437) — threshold가 이미 정의돼 있어 Gauge 후보.",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 62, "w": 12, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "stream_processor_event_time_lag_seconds{job=\"stream-processor\"}",
-          "legendFormat": "event-time lag",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0,
-          "max": 600,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 60 },
-              { "color": "red", "value": 330 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 103,
       "type": "row",
       "title": "Totals",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 66, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 53, "w": 24, "h": 1 },
       "panels": []
-    },
-    {
-      "id": 8,
-      "type": "stat",
-      "title": "Total Input Rows",
-      "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 67, "w": 12, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": "Prometheus",
-          "expr": "stream_processor_input_rows_total{job=\"stream-processor\"}",
-          "legendFormat": "input rows",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
     },
     {
       "id": 9,
@@ -598,7 +374,7 @@
       "title": "Query Failures",
       "description": "stream_processor_query_failures_total — 컨테이너가 재시작되지 않고 예외로 종료된 누적 횟수.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 67, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 54, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",

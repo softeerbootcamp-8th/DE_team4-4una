@@ -830,9 +830,8 @@ ops-agent 코드는 전혀 건드리지 않았고 새 secret도 필요 없다.
 | --- | --- |
 | Target Status | `up{job="serving-api"}` |
 | Requests/sec | `sum(rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
-| 2xx / 4xx / 5xx | `sum(rate(serving_api_http_requests_total{job="serving-api", status=~"2.."}[5m]))` (4xx/5xx는 `status=~"4.."`/`"5.."`) |
-| p50 / p95 / p99 latency | `histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` (0.95/0.99는 quantile 값만 교체) |
-| Latency over Time (p50/p95/p99) | 위와 같은 query 3개를 stat이 아닌 시간축(range query) timeseries로 — 순간값만으로는 안 보이는 추세를 확인한다 |
+| Request Rate over Time | `sum(rate(serving_api_http_requests_total{job="serving-api", status=~"2.."}[5m]))` (4xx/5xx는 `status=~"4.."`/`"5.."`) — 세 status 계열을 한 그래프에 겹쳐 그린다 |
+| Latency over Time (p50/p95/p99) | `histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` (0.95/0.99는 quantile 값만 교체) |
 | Requests by Endpoint | `sum by (route) (rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
 | Latency by Endpoint (p95) | `histogram_quantile(0.95, sum by (le, route) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` |
 
@@ -932,11 +931,8 @@ metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
 | Target Status | `up{job="airflow"}` |
 | Scheduler Heartbeat | `sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job="airflow"}[5m]))` |
 | DAG Processor Last Run Age | `max(airflow_dag_processing_last_run_seconds_ago{job="airflow"})` |
-| DAG Processor Process Starts (5m) | `sum(increase(airflow_dag_processing_processes{job="airflow", action="start"}[5m])) or vector(0)` |
 | DAG Import Errors | `airflow_dag_processing_import_errors{job="airflow"}` |
-| Running DAG Runs / Scheduled / Queued / Running Tasks | `sum(airflow_scheduler_dagruns_running{job="airflow"}) or vector(0)` (나머지도 같은 형태로 `airflow_ti_scheduled`/`airflow_ti_queued`/`airflow_ti_running`) |
-| Task Success/Failure Rate | `sum(rate(airflow_ti_successes{job="airflow"}[5m])) or vector(0)` (failure는 `ti_failures`) |
-| Task Success/Failure Rate over Time | 위와 같은 query를 stat이 아닌 시간축(range query) timeseries로 — 순간값만으로는 안 보이는 추세(성공률이 떨어지는 중인지)를 확인한다 |
+| Task Success/Failure Rate over Time | `sum(rate(airflow_ti_successes{job="airflow"}[5m])) or vector(0)` (failure는 `ti_failures`) — 순간값이 아니라 시간축(range query)으로 성공률 추세를 본다 |
 | Failures by DAG | `sum by (dag_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Failures by Task | `sum by (dag_id, task_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Task/DAG Run Duration (p50/p95/p99) | `histogram_quantile(0.95, sum by (le) (rate(airflow_task_duration_seconds_bucket{job="airflow"}[5m])))` (dagrun success/failed도 같은 형태) |
@@ -954,10 +950,8 @@ metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
   scheduler나 dag-processor가 죽으면 statsd_exporter가 이 metric들을 아예
   못 받아 시계열이 사라지는데, 이걸 0으로 보정해 버리면 "정상인데 heartbeat가
   0회"인 상태와 "애초에 죽어서 metric이 안 온" 상태를 구분할 수 없게 된다.
-  반대로 `Running DAG Runs`/`Scheduled`/`Queued`/`Running Tasks`/
-  `Task Success/Failure Rate`/`DAG Processor Process Starts`는 DAG가 안
-  돌거나 재시작이 없는 것 자체가 정상적인 0이라 `or vector(0)`로 명시적인
-  0을 보여준다.
+  반대로 `Task Success/Failure Rate over Time`은 DAG가 안 도는 것 자체가
+  정상적인 0이라 `or vector(0)`로 명시적인 0을 보여준다.
 - **duration 단위는 seconds다.** Airflow는 StatsD timer(`|ms`)로 값을
   보내지만, statsd_exporter가 노출할 때 이를 seconds로 자동 변환한다 —
   그래서 mapping의 bucket도 seconds 기준으로 적었고(`[1, 5, 15, 30, ...]`),
@@ -976,10 +970,6 @@ metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
 - **DAG Processor Last Run Age의 임계값(60s/300s)은 아직 실제 운영 주기로
   검증하지 못했다.** dag-processor의 실제 파일 스캔 주기에 따라 배포 후
   조정이 필요할 수 있다.
-- **`DAG Processor Process Starts`가 높다고 곧바로 crash loop로 단정하지
-  않는다.** dag-processor는 정상적으로도 파일 파싱 subprocess를 반복
-  생성할 수 있어서, 이 패널은 최근 DAG 파일 처리 activity 정도로 보고
-  `DAG Processor Last Run Age`/`DAG Import Errors`와 함께 판단해야 한다.
 - **DogStatsD tag(즉 `dag_id`/`task_id` label)가 실제로 붙는지는 배포 후
   확인이 필요하다.** `AIRFLOW__METRICS__STATSD_DATADOG_ENABLED=True` +
   statsd_exporter의 기본 DogStatsD tag parsing으로 동작해야 하는 것을
@@ -994,10 +984,9 @@ metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
   둔다 — 기본값 자체가 이미 두 high-cardinality tag를 막아주고, 이 dashboard가
   쓰는 metric 중 `job_id`/`run_id`/`file_path` label을 가진 것도 없기
   때문이다.
-- **DAG가 아직 한 번도 안 돈 상태에서는 다음 패널이 `0`(`No data`가 아니라)인
-  게 정상이다**: `Task Success/Failure Rate`, `Running DAG Runs`/`Scheduled`/
-  `Queued`/`Running Tasks`, `DAG Processor Process Starts`. `or vector(0)`로
-  명시적인 0을 보여주도록 바꿨다. `Failures by DAG`/`Failures by Task`/
+- **DAG가 아직 한 번도 안 돈 상태에서는 `Task Success/Failure Rate over Time`이
+  `No data`가 아니라 `0`인 게 정상이다.** `or vector(0)`로 명시적인 0을
+  보여주도록 했다. `Failures by DAG`/`Failures by Task`/
   `Task Duration`/`DAG Run Success/Failed Duration`(timeseries 패널)은
   여전히 `No data`가 정상이다 — 실제로 task/dagrun이 실행돼야 값이 생기고,
   timeseries 그래프에서 빈 구간은 stat 패널의 회색 `No data`처럼 오해를
@@ -1031,19 +1020,16 @@ metric들을 갱신한다.
 | Panel | PromQL |
 | --- | --- |
 | Target Status | `up{job="stream-processor"}` |
-| Query Running | `stream_processor_query_running{job="stream-processor"}` |
-| Input Rows/sec | `stream_processor_input_rows_per_second{job="stream-processor"}` |
-| Processed Rows/sec | `stream_processor_processed_rows_per_second{job="stream-processor"}` |
+| Rows/sec over Time | `stream_processor_input_rows_per_second{job="stream-processor"}`와 `stream_processor_processed_rows_per_second{job="stream-processor"}`를 한 그래프에 겹쳐 그린다 |
 | Micro-batch Duration (p50/p95) | `histogram_quantile(0.50, sum by (le) (rate(stream_processor_batch_duration_seconds_bucket{job="stream-processor"}[5m])))` (p95는 quantile 값만 교체) |
 | Last Progress Age | `(time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}) and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)` |
 | Freshness over Time | 위 Last Progress Age + Event-Time Lag를 시간축(range query)으로 합친 그래프 — 둘 다 초 단위, 같은 330초 threshold를 써서 한 그래프에 둔다 |
 | Kafka Offset Lag over Time | Kafka Exporter의 topic offset 합에서 `stream_processor_kafka_end_offset_sum`을 뺀 live backlog를 시간축으로 표시 |
-| Total Input Rows | `stream_processor_input_rows_total{job="stream-processor"}` |
 | Query Failures | `stream_processor_query_failures_total{job="stream-processor"}` |
 
 몇 가지 명확히 해 둘 점:
 
-- **`Query Running`은 프로세스 생존 여부(`up`)와 다르다.** 컨테이너는
+- **Component Status의 `QUERY STOPPED`는 프로세스 생존 여부(`up`)와 다르다.** 컨테이너는
   떠 있지만(`up == 1`) 쿼리가 예외로 죽어 재시작 대기 중인 짧은 순간에는
   `up == 1`, `stream_processor_query_running == 0`일 수 있다.
 - **`Last Progress Age`가 `STREAM_MAX_TRIGGER_DELAY`(기본 5분/300초) 근처까지
@@ -1105,14 +1091,13 @@ application이 고정이라 두 변수 모두 실제 값(`00g85ljahc0svj2p`/
 | Metric | Statistic | Dimension | 설명 |
 | --- | --- | --- | --- |
 | `RunningJobs` / `SuccessJobs` / `FailedJobs` | Maximum | ApplicationId, ApplicationName | 이 metric의 dimension 전부라 direct query 하나로 조회한다(`matchExact: true`) — 1분마다 발행되는 상태값이라 Maximum/Average/Sum이 사실상 같다 |
-| `RunningWorkerCount` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | worker 조합별로 별도 series라 `matchExact: false`(search)+`SUM()` 식으로 합산 |
 | `CPUAllocated` / `MemoryAllocated` | Maximum | ApplicationId, ApplicationName, WorkerType, CapacityAllocationType | application에 할당된 capacity, `matchExact: false`+`SUM()`으로 합산 |
 | `WorkerCpuUsed` / `WorkerMemoryUsed` | Sum | ApplicationId, ApplicationName, JobId, WorkerType, CapacityAllocationType | AWS 문서가 CPU/Memory 실사용량 합산 시 Statistic Sum + 1분 주기를 명시적으로 권장한다, `matchExact: false`+`SUM()`으로 합산 |
 
 `RunningJobs`/`SuccessJobs`/`FailedJobs`는 ApplicationId+ApplicationName이
 dimension 전부이므로(추가 dimension 없음) direct query 하나로 충분하다. 반면
-`RunningWorkerCount`/`CPUAllocated`/`MemoryAllocated`/`WorkerCpuUsed`/
-`WorkerMemoryUsed`는 `WorkerType`/`CapacityAllocationType`(Used는 `JobId`까지)
+`CPUAllocated`/`MemoryAllocated`/`WorkerCpuUsed`/`WorkerMemoryUsed`는
+`WorkerType`/`CapacityAllocationType`(Used는 `JobId`까지)
 조합별로 별도 시계열이 발행되므로, CloudWatch 쿼리를 두 개씩 쓴다 —
 `matchExact: false`(search)로 실제 dimension 조합을 전부 찾는 숨겨진 쿼리
 하나와, 그 결과를 `SUM(...)` 수식(Metric Math)으로 더하는 쿼리 하나. 이렇게
@@ -1151,11 +1136,10 @@ dimension 전부이므로(추가 dimension 없음) direct query 하나로 충분
 - **CloudWatch datasource가 `authType: default`(EC2 IAM Role)를 쓰므로,
   Monitoring EC2에 위 [사전 준비](#emr-serverless--cloudwatch-datasource-사전-준비)의
   IAM 권한이 없으면 모든 패널이 permission 오류로 `No data`가 된다.**
-- **`RunningJobs`/`RunningWorkerCount`가 0인 것은 application이 idle 상태일 뿐
-  정상이다** — job이 없으면 0이 나오는 게 맞고, 이걸 장애로 해석하지 않는다.
-  진짜 조회 실패(`No data`)와 idle(`0`)은 서로 다른 상태다. 아래
-  [Service Status Overview dashboard](#service-status-overview-dashboard)도
-  같은 원칙으로 설계했다.
+- **`RunningJobs`가 0인 것은 application이 idle 상태일 뿐 정상이다** — job이
+  없으면 0이 나오는 게 맞고, 이걸 장애로 해석하지 않는다. 진짜 조회
+  실패(`No data`)와 idle(`0`)은 서로 다른 상태다. Component Status가
+  `IDLE`/`RUNNING`/`NO METRIC DATA`로 이 구분을 그대로 보여준다.
 
 ### 장애 원인 세분화(Component Status, #437)
 
@@ -1231,14 +1215,10 @@ Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시�
   프로젝트에 확립된 SLA가 없다. 실제 운영 기준이 정해지면 이 패널들에
   추가한다.
 
-**Gauge로 바꾼 패널** — threshold가 이미 정의돼 있는 것만 추가했다(기존
-`stat` 패널은 유지하고 Gauge를 나란히 추가했다):
-
-- Airflow: `DAG Processor Last Run Age`
-- Spark Streaming: `Last Progress Age`, `Event-Time Lag`
-
-Kafka Consumer Lag, Serving API p95 latency는 위와 같은 이유로 Gauge로
-바꾸지 않았다.
+**Gauge 패널은 두지 않는다(#586).** 한때 Airflow `DAG Processor Last Run Age`와
+Spark Streaming `Last Progress Age`/`Event-Time Lag`를 같은 query의 stat과
+나란히 Gauge로도 뒀는데, 같은 값을 두 번 보여줄 뿐이라 지웠다 — threshold는
+stat 패널에 그대로 살아 있고, 추세는 각각의 over Time 그래프에서 본다.
 
 **Multi-instance 대응.** `sum(...)`/`count(...)`처럼 label 없이 전체를
 합치던 쿼리에 `by (instance)`(topic/consumergroup 등 기존 label과 함께)를
@@ -1411,8 +1391,8 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
   3. Grafana **Connections → Data sources → CloudWatch**에서 **Save & test**를
      눌러 자격증명 자체가 유효한지 확인한다.
   4. 위가 다 정상인데 특정 metric만 `No data`라면, 그 시간대에 실제로 job이나
-     worker가 없었을 수 있다(예: `RunningJobs`/`RunningWorkerCount`는 애초에
-     실행 중인 게 없으면 0에 가까운 게 정상이다) — CloudWatch 콘솔에서 같은
+     worker가 없었을 수 있다(예: `RunningJobs`는 애초에 실행 중인 게 없으면
+     0에 가까운 게 정상이다) — CloudWatch 콘솔에서 같은
      namespace/metric/dimension을 직접 조회해 데이터 유무를 먼저 확인한다.
   5. AWS CLI로 직접 확인하려면:
 

@@ -49,7 +49,7 @@
       "id": 12,
       "type": "stat",
       "title": "Component Status",
-      "description": "Service Status Overview의 EMR Serverless 카드와 완전히 같은 query/mapping이다(#437, 판정 기준을 일치시킴). RunningJobs(최근 6시간, matchExact: true)를 IDLE(0)/RUNNING(>0)/NO METRIC DATA(값 없음)로 나눈다. RunningJobs=0은 idle이 정상이라 장애로 표시하지 않는다 — NO METRIC DATA만 실제 조회 실패(잘못된 Application ID/Name, IAM 권한 문제, 또는 오래 idle이라 auto-stop) 가능성을 뜻하고, 그마저도 auto-stop이면 정상이다.",
+      "description": "System Overview의 EMR Serverless 카드와 완전히 같은 query/mapping이다(#437, 판정 기준을 일치시킴). RunningJobs(최근 6시간, matchExact: true)를 IDLE(0)/RUNNING(>0)/NO METRIC DATA(값 없음)로 나눈다. RunningJobs=0은 idle이 정상이라 장애로 표시하지 않는다 — NO METRIC DATA만 실제 조회 실패(잘못된 Application ID/Name, IAM 권한 문제, 또는 오래 idle이라 auto-stop) 가능성을 뜻하고, 그마저도 auto-stop이면 정상이다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "timeFrom": "6h",
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
@@ -163,87 +163,12 @@
       "panels": []
     },
     {
-      "id": 1,
-      "type": "stat",
-      "title": "Running Jobs",
-      "description": "AWS/EMRServerless RunningJobs (Statistic: Maximum). ApplicationId+ApplicationName이 이 metric의 dimension 전부이므로(추가 dimension 없음) direct query(matchExact: true) 하나로 충분하다 — 예전의 hide+SUM(Metric Math) 2-target 구성은 metricQueryType/metricEditorMode가 빠져 있어 Grafana가 두 target을 기본값(Search, Code)으로 해석했고, 그 결과 실제로 Explore에서 성공한 것과 다른 쿼리가 나가 No data였다(#410).",
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-          "queryMode": "Metrics",
-          "metricQueryType": 0,
-          "metricEditorMode": 0,
-          "namespace": "AWS/EMRServerless",
-          "metricName": "RunningJobs",
-          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
-          "statistic": "Maximum",
-          "region": "default",
-          "matchExact": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Success Jobs",
-      "description": "AWS/EMRServerless SuccessJobs (Statistic: Maximum). ApplicationId+ApplicationName이 이 metric의 dimension 전부이므로 direct query(matchExact: true) 하나로 충분하다 — 예전의 hide+SUM(Metric Math) 구성이 No data였던 원인은 #410 Running Jobs 패널 설명 참고(AWS Console/Grafana Explore에서 이 metric을 이 dimension으로 직접 조회하면 정상 표시되는 것으로 확인됨).",
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 8, "y": 12, "w": 8, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-          "queryMode": "Metrics",
-          "metricQueryType": 0,
-          "metricEditorMode": 0,
-          "namespace": "AWS/EMRServerless",
-          "metricName": "SuccessJobs",
-          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
-          "statistic": "Maximum",
-          "region": "default",
-          "matchExact": true
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": { "fixedColor": "green", "mode": "fixed" }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 3,
       "type": "stat",
       "title": "Failed Jobs",
-      "description": "AWS/EMRServerless FailedJobs (Statistic: Maximum). ApplicationId+ApplicationName이 이 metric의 dimension 전부이므로 direct query(matchExact: true) 하나로 충분하다 — 예전의 hide+SUM(Metric Math) 구성이 No data였던 원인은 #410 Running Jobs 패널 설명 참고.",
+      "description": "AWS/EMRServerless FailedJobs (Statistic: Maximum). ApplicationId+ApplicationName이 이 metric의 dimension 전부이므로 direct query(matchExact: true) 하나로 충분하다 — 예전의 hide+SUM(Metric Math) 구성이 No data였던 원인은 #410 참고.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 4 },
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -419,68 +344,11 @@
       }
     },
     {
-      "id": 101,
-      "type": "row",
-      "title": "Workers",
-      "collapsed": false,
-      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 1 },
-      "panels": []
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Running Workers",
-      "description": "RunningWorkerCount 합계 (Statistic: Maximum). Jobs metric과 달리 이 metric은 ApplicationId/ApplicationName 외에 WorkerType(예: Spark_Driver/Spark_Executor)·CapacityAllocationType별로 별도 series가 발행되므로, application 전체의 실행 중 worker 수를 보려면 matchExact: false(search)로 그 조합 전체를 찾아 SUM()으로 합산해야 한다 — Jobs처럼 direct 단일 query로 단순화할 수 없다. 이 구성 자체는 맞았지만, hide된 search target과 SUM() target 둘 다 metricQueryType/metricEditorMode가 빠져 있어 Grafana가 기본값(Search, Code)으로 잘못 해석해 No data였다(#410) — 두 target에 명시적으로 채워 넣어 고쳤다.",
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-          "queryMode": "Metrics",
-          "metricQueryType": 0,
-          "metricEditorMode": 0,
-          "namespace": "AWS/EMRServerless",
-          "metricName": "RunningWorkerCount",
-          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
-          "statistic": "Maximum",
-          "region": "default",
-          "matchExact": false,
-          "id": "runningWorkers",
-          "hide": true
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-          "queryMode": "Metrics",
-          "metricQueryType": 0,
-          "metricEditorMode": 1,
-          "expression": "SUM(runningWorkers)",
-          "id": "runningWorkersTotal",
-          "region": "default"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "horizontal",
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 102,
       "type": "row",
       "title": "Capacity",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -489,7 +357,7 @@
       "title": "CPU Allocated / Used",
       "description": "Allocated: CPUAllocated(Maximum). Used: WorkerCpuUsed(Sum, AWS 권장 statistic). 두 metric 모두 ApplicationId/ApplicationName 외에 WorkerType·CapacityAllocationType(Used는 JobId까지) 조합별로 별도 series가 발행되므로 matchExact: false(search)+SUM()으로 application 전체 값을 합산한다. No data였던 원인은 이 search/SUM target들에 metricQueryType/metricEditorMode가 빠져 Grafana가 기본값(Search, Code)으로 해석했기 때문이다(#410) — 4개 target 모두에 명시적으로 채워 넣었다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -559,7 +427,7 @@
       "title": "Memory Allocated / Used",
       "description": "Allocated: MemoryAllocated(Maximum). Used: WorkerMemoryUsed(Sum). 단위 GB — AWS가 두 metric 모두 GB(10진) 단위로 발행하므로 Grafana의 decgbytes(입력값이 이미 GB라고 가정하는 단위)가 맞다, bytes 단위로 다시 스케일링하지 않는다. 두 metric 모두 WorkerType·CapacityAllocationType(Used는 JobId까지) 조합별 series라 matchExact: false+SUM()으로 합산한다. No data 원인은 CPU 패널과 동일(metricQueryType/metricEditorMode 누락, #410) — 4개 target 모두에 채워 넣었다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
