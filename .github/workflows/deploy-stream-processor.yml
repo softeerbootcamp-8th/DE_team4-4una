@@ -1,23 +1,12 @@
-# develop에 들어간 Stream Processor 이미지를 ECR에 배포하고
+# 수동 요청 시 Stream Processor 이미지를 ECR에 배포하고
 # EC2의 Spark Structured Streaming 컨테이너를 새 이미지로 교체한다.
 #
-# CI를 기다리지 않는다. develop 병합은 branch protection의 required status check
-# ("CI Passed")을 통과해야만 가능하므로, develop에 올라온 시점에 이미 검증된 커밋이다.
+# develop 병합만으로는 운영 EC2를 변경하지 않는다. 운영 스트림은 명시적인
+# workflow_dispatch 요청으로 배포한다.
 
 name: Deploy Stream Processor
 
 on:
-  # 이미지에 실제로 들어가는 경로만 본다. Dockerfile이 COPY . . 뒤에
-  # `uv sync --package stream-processor`를 하므로 산출물을 바꾸는 것은 이 서비스와
-  # 공유 코드뿐이다.
-  push:
-    branches: [develop]
-    paths:
-      - 'services/stream-processor/**'
-      - 'libs/de4-core/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - '.github/workflows/deploy-stream-processor.yml'
   workflow_dispatch:
 
 permissions:
