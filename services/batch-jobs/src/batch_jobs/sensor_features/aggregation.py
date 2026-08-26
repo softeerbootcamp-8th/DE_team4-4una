@@ -211,8 +211,8 @@ def build_hourly_segment_features(
     )
 
 
-def validate_hourly_segment_features(df: DataFrame) -> None:
-    """스키마·필수값·PK 중복·시간 구간·카운트 값이 계약을 위반하면 예외를 던진다."""
+def validate_hourly_segment_features(df: DataFrame) -> int:
+    """스키마·필수값·PK 중복·시간 구간·카운트 값이 계약을 위반하면 예외를 던지고, 통과하면 행 수를 돌려준다."""
     expected_fields = HOURLY_SEGMENT_FEATURE_SCHEMA.fields
     expected_names = [field.name for field in expected_fields]
     if df.columns != expected_names:
@@ -259,11 +259,13 @@ def validate_hourly_segment_features(df: DataFrame) -> None:
     if not already_persisted:
         df = df.cache()
     try:
-        # 행 단위 위반 3종을 개별 count() 대신 하나의 스캔으로 같이 계산한다.
+        # 행 단위 위반 3종 + 전체 행 수를 개별 count()/스캔 대신 하나의 스캔으로 같이
+        # 계산한다(#539) — 이 count를 호출부가 재사용하면 result.count()를 또 안 해도 된다.
         violations = df.select(
             F.max(null_condition.cast("int")).alias("has_null"),
             F.max(invalid_period.cast("int")).alias("has_invalid_period"),
             F.max(invalid_count.cast("int")).alias("has_invalid_count"),
+            F.count(F.lit(1)).alias("row_count"),
         ).first()
 
         if violations["has_null"]:
@@ -279,6 +281,8 @@ def validate_hourly_segment_features(df: DataFrame) -> None:
         if duplicate:
             key = {column: duplicate[0][column] for column in HOURLY_PRIMARY_KEY}
             raise ValueError(f"duplicate hourly feature primary key: {key}")
+
+        return violations["row_count"]
     finally:
         if not already_persisted:
             df.unpersist()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from pyspark import StorageLevel
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
@@ -29,6 +30,10 @@ class CleansingResult:
 
     passed: DataFrame
     quarantined: DataFrame
+    # split_duplicate_events()가 dedup Window 결과를 캐시했으면 그 참조가 담긴다.
+    # passed/quarantined 모두 여기서 갈라지므로, 호출부가 두 액션을 다 쓴 뒤
+    # 이 캐시를 unpersist해야 한다 (job.py의 cached_frames 정리 루프 참고).
+    cache_to_release: DataFrame | None = None
 
 
 def cleanse_sensor_events(
@@ -53,6 +58,7 @@ def cleanse_sensor_events(
         quarantined=required.quarantined.unionByName(ranges.quarantined).unionByName(
             duplicates.quarantined
         ),
+        cache_to_release=duplicates.cache_to_release,
     )
 
 
@@ -123,7 +129,15 @@ def split_duplicate_events(
     """
     key = config.deduplication.key
     window = Window.partitionBy(*key).orderBy(_deduplication_order(config.deduplication.priority))
-    ranked = df.withColumn(_DUPLICATE_RANK, F.row_number().over(window))
+    # passed/quarantined이 여기서 갈라져 나중에 서로 다른 action(job.py의
+    # processed_window.count()/target_quarantined.count())으로 각각 materialize된다.
+    # 캐시하지 않으면 이 row_number Window(shuffle+sort)가 그 두 action마다 매번
+    # 다시 실행된다 — 실측: 캐시 없이 두 action을 돌리면 이 Window 이전 단계가
+    # 정확히 두 배로 스캔된다(passed.count() 후 counter=N, quarantined.count() 후
+    # counter=2N). 캐시하면 두 번째 action도 캐시를 읽어 counter가 N에서 안 늘어난다.
+    ranked = df.withColumn(_DUPLICATE_RANK, F.row_number().over(window)).persist(
+        StorageLevel.MEMORY_AND_DISK
+    )
     return CleansingResult(
         passed=ranked.filter(F.col(_DUPLICATE_RANK) == 1).drop(_DUPLICATE_RANK),
         quarantined=_quarantine_rows(
@@ -137,6 +151,7 @@ def split_duplicate_events(
             run_id=run_id,
             rejected_at=rejected_at,
         ),
+        cache_to_release=ranked,
     )
 
 

@@ -50,6 +50,7 @@ def stub_feature_job(monkeypatch, captured_rows: list[dict[str, object]]) -> Non
         processed_at,
         *,
         cleansing_quarantine,
+        cleansing_quarantined_count,
         raw_record_source,
         quarantine_output_path,
     ):
@@ -60,6 +61,7 @@ def stub_feature_job(monkeypatch, captured_rows: list[dict[str, object]]) -> Non
             quarantine_output_path,
             target_hour,
             run_id,
+            expected_count=cleansing_quarantined_count,
         )
         return HourlySegmentFeatureJobSummary(
             result_count=1,

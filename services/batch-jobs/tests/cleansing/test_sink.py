@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from batch_jobs.cleansing.hourly_storage import (
     quarantine_hour_path,
     write_hourly_quarantine,
@@ -107,6 +108,51 @@ def test_caller_owned_cache_is_not_dropped_by_the_write(spark, tmp_path):
         assert quarantined.storageLevel != StorageLevel.NONE
     finally:
         quarantined.unpersist()
+
+
+def test_expected_count_skips_the_internal_count_and_cache(spark, tmp_path, monkeypatch):
+    """expected_count가 주어지면 count()도 그걸 위한 persist도 하지 않는다(#539)."""
+    from batch_jobs.cleansing import hourly_storage
+
+    bronze = write_bronze_parquet(spark, tmp_path, valid_value(), MALFORMED_VALUE)
+    quarantined = cleanse(spark, bronze).quarantined
+    original_stage = hourly_storage._stage_quarantine
+    seen: dict[str, object] = {}
+
+    def spy(spark_session, frame, *args, **kwargs):
+        seen["storage_level"] = frame.storageLevel
+        return original_stage(spark_session, frame, *args, **kwargs)
+
+    monkeypatch.setattr(hourly_storage, "_stage_quarantine", spy)
+
+    result = write_hourly_quarantine(
+        spark,
+        quarantined,
+        str(tmp_path / "quarantine"),
+        TARGET_HOUR,
+        RUN_ID,
+        expected_count=1,
+    )
+
+    assert result.row_count == 1
+    # count()를 안 했으니 write를 위한 캐시도 만들 필요가 없다.
+    assert seen["storage_level"] == StorageLevel.NONE
+
+
+def test_expected_count_mismatch_still_fails_the_readback_check(spark, tmp_path):
+    """expected_count가 실제 값과 다르면 read-back 검증이 여전히 잡아낸다(안전장치 유지)."""
+    bronze = write_bronze_parquet(spark, tmp_path, valid_value(), MALFORMED_VALUE)
+    quarantined = cleanse(spark, bronze).quarantined
+
+    with pytest.raises(ValueError, match="does not match"):
+        write_hourly_quarantine(
+            spark,
+            quarantined,
+            str(tmp_path / "quarantine"),
+            TARGET_HOUR,
+            RUN_ID,
+            expected_count=999,
+        )
 
 
 def test_quarantine_is_replaced_at_the_target_hour_path(spark, tmp_path):
