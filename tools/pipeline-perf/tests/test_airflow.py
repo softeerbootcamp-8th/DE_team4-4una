@@ -148,7 +148,7 @@ def test_task_log_content_is_flattened_into_lines():
         token="jwt",
     )
 
-    text = client.task_log("current_score_pipeline", "run", "run_current_score", 2)
+    text = client.task_log("current_score_pipeline", "run", "compute_current_score", 2)
 
     assert text.splitlines()[1].startswith("PERF ")
 

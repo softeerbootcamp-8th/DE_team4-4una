@@ -56,6 +56,8 @@ with DAG(
     # concurrent DAG run으로 같은 그룹이 중복 압축되는 걸 막는다(PR #280 리뷰).
     max_active_runs=1,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "JEONGKIJOON",
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
         "on_failure_callback": on_failure_callback,
@@ -66,7 +68,7 @@ with DAG(
         "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
-    tags=["bronze-compaction"],
+    tags=["ops", "weather"],
 ) as dag:
     compact_zone_weather_snapshot = PythonOperator(
         task_id="compact_zone_weather_snapshot",

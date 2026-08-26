@@ -59,11 +59,11 @@ def test_dag_has_a_single_python_task():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert task_ids == {"run_current_score"}
+    assert task_ids == {"compute_current_score"}
 
-    task = module.dag.get_task("run_current_score")
+    task = module.dag.get_task("compute_current_score")
     assert isinstance(task, PythonOperator)
-    assert task.python_callable is module._run_current_score
+    assert task.python_callable is module._compute_current_score
 
 
 def test_task_declares_no_outlets():
@@ -71,7 +71,7 @@ def test_task_declares_no_outlets():
 
     # current_score_pipeline은 유일한 writer이자 이 3-DAG 구조의 종착점이다 — 다른 DAG를
     # 더 트리거하지 않으므로 outlets가 없어야 한다.
-    task = module.dag.get_task("run_current_score")
+    task = module.dag.get_task("compute_current_score")
     assert task.outlets == []
 
 

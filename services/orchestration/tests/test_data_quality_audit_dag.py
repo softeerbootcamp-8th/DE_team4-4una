@@ -62,8 +62,8 @@ def test_dag_contains_one_task_per_gold_table_plus_the_count_report():
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
-        "audit_standard_segment_comfort_score",
-        "audit_current_segment_comfort_score",
+        "audit_standard_score",
+        "audit_current_score",
         "report_audit_counts",
     }
 
@@ -74,11 +74,11 @@ def test_audit_tasks_run_one_after_another():
     # 감사 결과는 서로 독립이라 순서 자체는 상관없다.
     module = _load_dag_module()
 
-    standard_task = module.dag.get_task("audit_standard_segment_comfort_score")
-    current_task = module.dag.get_task("audit_current_segment_comfort_score")
+    standard_task = module.dag.get_task("audit_standard_score")
+    current_task = module.dag.get_task("audit_current_score")
 
     assert standard_task.upstream_task_ids == set()
-    assert current_task.upstream_task_ids == {"audit_standard_segment_comfort_score"}
+    assert current_task.upstream_task_ids == {"audit_standard_score"}
 
 
 def test_report_audit_counts_runs_after_both_audits():
@@ -91,10 +91,10 @@ def test_report_audit_counts_runs_after_both_audits():
     report_task = module.dag.get_task("report_audit_counts")
     assert isinstance(report_task, PythonOperator)
     assert report_task.python_callable is module._report_audit_counts
-    assert report_task.upstream_task_ids == {"audit_current_segment_comfort_score"}
+    assert report_task.upstream_task_ids == {"audit_current_score"}
 
-    current_task = module.dag.get_task("audit_current_segment_comfort_score")
-    assert current_task.upstream_task_ids == {"audit_standard_segment_comfort_score"}
+    current_task = module.dag.get_task("audit_current_score")
+    assert current_task.upstream_task_ids == {"audit_standard_score"}
 
 
 def test_tasks_have_no_outlets():
@@ -108,8 +108,8 @@ def test_tasks_submit_to_emr_serverless_with_the_shared_variables():
     module = _load_dag_module()
 
     for task_id in (
-        "audit_standard_segment_comfort_score",
-        "audit_current_segment_comfort_score",
+        "audit_standard_score",
+        "audit_current_score",
     ):
         task = module.dag.get_task(task_id)
         assert isinstance(task, EmrServerlessStartJobOperator)
@@ -128,7 +128,7 @@ def test_audit_standard_task_targets_standard_table():
     module = _load_dag_module()
 
     args = _entry_point_arguments(
-        module.dag.get_task("audit_standard_segment_comfort_score")
+        module.dag.get_task("audit_standard_score")
     )
     assert args == ["audit-gold", "--table=standard_segment_comfort_score"]
 
@@ -137,7 +137,7 @@ def test_audit_current_task_targets_current_table():
     module = _load_dag_module()
 
     args = _entry_point_arguments(
-        module.dag.get_task("audit_current_segment_comfort_score")
+        module.dag.get_task("audit_current_score")
     )
     assert args == ["audit-gold", "--table=current_segment_comfort_score"]
 
@@ -146,8 +146,8 @@ def test_tasks_pass_postgres_and_gold_audit_bucket_via_driver_env():
     module = _load_dag_module()
 
     for task_id in (
-        "audit_standard_segment_comfort_score",
-        "audit_current_segment_comfort_score",
+        "audit_standard_score",
+        "audit_current_score",
     ):
         driver_env = _driver_env(module.dag.get_task(task_id))
         for env_var in (

@@ -1,7 +1,7 @@
 """Airflow REST API v2 client for the L1 collection layer (#462).
 
 Airflow가 아는 시간(task별 start/end/try, task 사이 gap, Asset 트리거 시각,
-`report_processing_counts`가 남긴 XCom 행 수)을 읽는다. HTTP 세션을 주입 가능하게
+`report_pipeline_counts`가 남긴 XCom 행 수)을 읽는다. HTTP 세션을 주입 가능하게
 두어 테스트에서 fake로 갈아끼운다.
 """
 
