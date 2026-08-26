@@ -13,9 +13,12 @@
 name: Deploy Serving API
 
 on:
-  # 이미지에 실제로 들어가는 경로만 본다. Dockerfile이 COPY . . 뒤에
-  # `uv sync --package serving-api`를 하므로 산출물을 바꾸는 것은 이 서비스와 공유
-  # 코드뿐이다. 공유 경로가 바뀌면 다른 서비스 배포도 함께 도는 것이 정상이다.
+  # serving-api는 de4-core를 의존하지 않는다(pyproject.toml/uv.lock 확인 완료) — Dockerfile이
+  # `uv sync --package serving-api`로 이 서비스 의존성 그래프만 설치하므로 libs/de4-core나
+  # 루트 pyproject.toml(런타임 dependencies 없음, ruff/pytest 설정뿐)은 실제 산출물에
+  # 영향이 없다. uv.lock은 워크스페이스 전체가 공유하는 파일이라, 다른 서비스(예:
+  # stream-processor)의 의존성만 바뀌어도 이 파일이 바뀌어 이 워크플로가 불필요하게
+  # 돈다(#579) — 그래서 셋 다 trigger 경로에서 뺀다. serving-api 자신의 경로 변경만 본다.
   #
   # push로 받는다. workflow_run으로 받으면 실행 컨텍스트가 기본 브랜치가 되어,
   # 브랜치로 제한한 OIDC trust policy와 어긋난다.
@@ -23,9 +26,6 @@ on:
     branches: [develop]
     paths:
       - 'services/serving-api/**'
-      - 'libs/de4-core/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
       - '.github/workflows/deploy-serving-api.yml'
   workflow_dispatch:
 

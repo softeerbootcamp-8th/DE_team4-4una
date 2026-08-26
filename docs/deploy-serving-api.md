@@ -21,13 +21,16 @@ develop에 머지 (경로 감지) → repository variables 확인
 Actions 탭에서 `Run workflow`로 수동 실행할 수도 있다.
 
 ```
-services/serving-api/**   libs/de4-core/**   pyproject.toml   uv.lock
+services/serving-api/**
 .github/workflows/deploy-serving-api.yml
 ```
 
-공유 경로(`libs/de4-core/**`, `pyproject.toml`, `uv.lock`)가 바뀌면 다른 서비스의
-배포도 함께 도는 것이 정상이다. 이미지에 실제로 들어가는 것이 이 서비스와 공유
-코드뿐이라 이 목록으로 잡는다.
+serving-api는 `de4-core`를 의존하지 않고(Dockerfile이 `uv sync --package
+serving-api`로 이 서비스 의존성 그래프만 설치), 루트 `pyproject.toml`도 런타임
+`dependencies`가 없어(ruff/pytest 설정뿐) 산출물에 영향이 없다. `uv.lock`은
+워크스페이스 전체가 공유하는 파일이라, 예전엔 이걸 trigger에 넣어서 다른 서비스
+(예: stream-processor)의 의존성만 바뀌어도 이 워크플로가 불필요하게 돌았다(#579).
+이제 serving-api 자신의 경로 변경만 본다.
 
 **CI를 기다리지 않는다.** `develop` 병합은 branch protection의 required status
 check(`CI Passed`)을 통과해야만 가능하므로, `develop`에 올라온 시점에 이미 검증된
