@@ -262,7 +262,7 @@ def test_idle_check_task_resolves_the_application_id_from_the_shared_variable():
         dag_id="test_emr_serverless_helper_stop",
         start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
     ):
-        operator = check_emr_serverless_is_idle(task_id="check_emr_serverless_idle")
+        operator = check_emr_serverless_is_idle(task_id="check_idle")
 
     assert isinstance(operator, ShortCircuitOperator)
     # op_kwargs는 템플릿 필드라 실행 시점에 Variable이 렌더링된다.
@@ -283,7 +283,7 @@ def test_stop_task_targets_the_shared_application_without_cancelling_other_jobs(
         start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
     ):
         operator = stop_emr_serverless_application(
-            task_id="stop_emr_serverless_application"
+            task_id="stop_application"
         )
 
     assert isinstance(operator, EmrServerlessStopApplicationOperator)
@@ -301,7 +301,7 @@ def test_stop_task_waits_for_the_stopped_state_within_a_bounded_window():
         start_date=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
     ):
         operator = stop_emr_serverless_application(
-            task_id="stop_emr_serverless_application"
+            task_id="stop_application"
         )
 
     assert operator.wait_for_completion is True

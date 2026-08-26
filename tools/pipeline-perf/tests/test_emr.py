@@ -22,7 +22,7 @@ def test_describe_job_run_splits_provisioning_wait_from_run_time():
         {
             "jobRunId": "00abc",
             "applicationId": "00app",
-            "name": "run_sensor_processing",
+            "name": "transform_sensor_readings",
             "state": "SUCCESS",
             "createdAt": datetime(2026, 8, 25, 2, 0, 0, tzinfo=UTC),
             "startedAt": datetime(2026, 8, 25, 2, 1, 30, tzinfo=UTC),
@@ -57,13 +57,13 @@ def test_name_match_fallback_picks_the_run_closest_to_the_task_start():
     started = datetime(2026, 8, 25, 2, 0, 0, tzinfo=UTC)
     client = FakeEmrClient(
         job_runs=[
-            {"id": "far", "name": "run_hourly_scoring", "createdAt": datetime(2026, 8, 25, 2, 6, tzinfo=UTC)},
-            {"id": "near", "name": "run_hourly_scoring", "createdAt": datetime(2026, 8, 25, 2, 1, tzinfo=UTC)},
-            {"id": "other", "name": "run_standard_score", "createdAt": started},
+            {"id": "far", "name": "compute_hourly_score", "createdAt": datetime(2026, 8, 25, 2, 6, tzinfo=UTC)},
+            {"id": "near", "name": "compute_hourly_score", "createdAt": datetime(2026, 8, 25, 2, 1, tzinfo=UTC)},
+            {"id": "other", "name": "compute_standard_score", "createdAt": started},
         ]
     )
 
-    assert find_job_run_id_by_name(client, "00app", "run_hourly_scoring", started) == "near"
+    assert find_job_run_id_by_name(client, "00app", "compute_hourly_score", started) == "near"
     assert client.list_calls[0]["applicationId"] == "00app"
 
 
