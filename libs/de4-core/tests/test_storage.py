@@ -144,7 +144,7 @@ def test_delete_objects_raises_on_partial_s3_failure() -> None:
                 "s3://test-bucket/c.parquet",
             ]
         )
-        assert False, "Expected RuntimeError for partial deletion failure"
+        raise AssertionError("Expected RuntimeError for partial deletion failure")
     except RuntimeError as e:
         assert "Failed to delete" in str(e)
         assert "b.parquet" in str(e)
