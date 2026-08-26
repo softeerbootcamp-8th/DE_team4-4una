@@ -17,7 +17,7 @@ def test_kafka_read_options_batches_by_default() -> None:
 
     # 둘은 반드시 함께 걸려야 한다. minOffsetsPerTrigger만 있으면 한산할 때 배치가 멈춘다.
     assert options["minOffsetsPerTrigger"] == "600000"
-    assert options["maxTriggerDelay"] == "5m"
+    assert options["maxTriggerDelay"] == "30s"
 
 
 def test_kafka_read_options_omits_batching_when_turned_off() -> None:
@@ -37,7 +37,7 @@ def test_kafka_read_options_caps_recovery_batch_by_default() -> None:
     options = kafka_read_options(stream_config())
 
     # 상한이 없으면 장애 후 첫 배치가 쌓인 offset 전부를 소비한다(#482).
-    assert options["maxOffsetsPerTrigger"] == "1200000"
+    assert options["maxOffsetsPerTrigger"] == "120000"
 
 
 def test_kafka_read_options_caps_recovery_batch_independently_of_the_lower_bound() -> None:
@@ -45,7 +45,7 @@ def test_kafka_read_options_caps_recovery_batch_independently_of_the_lower_bound
 
     # 하한을 껐어도 상한은 그대로 걸려야 한다 -- 둘은 서로 다른 문제를 막는다.
     assert "minOffsetsPerTrigger" not in options
-    assert options["maxOffsetsPerTrigger"] == "1200000"
+    assert options["maxOffsetsPerTrigger"] == "120000"
 
 
 def test_kafka_read_options_omits_the_recovery_cap_when_turned_off() -> None:

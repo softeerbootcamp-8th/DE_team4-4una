@@ -758,7 +758,7 @@
       "title": "Silver / Gold Freshness",
       "datasource": null,
       "gridPos": { "x": 12, "y": 17, "w": 12, "h": 4 },
-      "options": { "mode": "markdown", "content": "**아직 측정 불가 — observability gap.** Silver/Gold의 실제 적재/갱신 시각은 현재 어떤 Prometheus/StatsD metric으로도 노출되지 않는다(전체 repository grep 결과, 관련 gauge/timer emission 없음). 가장 가까운 기존 신호는 `services/batch-jobs/src/batch_jobs/gold_audit_validation.py`의 Great Expectations 감사(Gold Postgres `standard_segment_comfort_score`/`current_segment_comfort_score`, `FRESHNESS_THRESHOLD_SECONDS=10800`)인데, 이건 Airflow DAG 실행 시점에 한 번 SQL로 계산해 S3 Data Docs로만 남기는 soft-fail 감사라 Grafana가 상시 조회할 수 있는 timeseries가 아니다. Silver 단계는 이런 감사조차 없다. Postgres에 직접 조회 exporter를 붙이거나 새 custom metric을 만드는 건 이번 작업 범위(새 exporter/인프라 추가 금지) 밖이라 구현하지 않았다." }
+      "options": { "mode": "markdown", "content": "**아직 측정 불가 — observability gap.** Silver/Gold의 실제 적재/갱신 시각은 현재 어떤 Prometheus/StatsD metric으로도 노출되지 않는다(전체 repository grep 결과, 관련 gauge/timer emission 없음). 가장 가까운 기존 신호는 `services/batch-jobs/src/batch_jobs/gold_audit_validation.py`의 Great Expectations 감사(Gold Postgres `standard_segment_comfort_score`/`current_segment_comfort_score`, 두 Gold audit summary suite의 `age_seconds` expectation에 설정된 `max_value=10800`)인데, 이건 Airflow DAG 실행 시점에 한 번 SQL로 계산해 S3 Data Docs로만 남기는 soft-fail 감사라 Grafana가 상시 조회할 수 있는 timeseries가 아니다. Silver 단계는 이런 감사조차 없다. Postgres에 직접 조회 exporter를 붙이거나 새 custom metric을 만드는 건 이번 작업 범위(새 exporter/인프라 추가 금지) 밖이라 구현하지 않았다." }
     },
     {
       "id": 104,

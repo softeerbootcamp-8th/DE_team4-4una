@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Serves ride-comfort data to clients"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "de4-core",
     "fastapi>=0.136.3,<0.137.0",
     "prometheus-client>=0.21",
     "psycopg[binary,pool]>=3.3.4",

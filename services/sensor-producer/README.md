@@ -12,12 +12,17 @@ assigned vehicle profile scales those responses.
 
 ## Vehicle assignment
 
-One profile is assigned per trip at dispatch time, in one of two exclusive modes:
+One profile is assigned per trip at dispatch time, in one of two exclusive modes.
+**One of them is required** - `run` fails if neither is given.
 
 ```bash
---vehicle-profile-id 3        # 모든 trip에 한 프로필 고정 (기본값: 1)
---vehicle-mix nyc-hvfhv-v1    # trip마다 결정론적으로 배정
+--vehicle-profile-id 3        # 모든 trip에 한 프로필 고정
+--vehicle-mix nyc-hvfhv-v1    # trip마다 결정론적으로 배정 (평소 이것)
 ```
+
+기본값이 없는 이유: 예전에는 아무것도 주지 않으면 프로필 1로 고정됐고, 그 결과
+이틀치가 프로필 1만으로 적재됐다. 차량별 점수를 만드는 파이프라인에서 조용히
+한 프로필로 축소되는 기본값은 없는 것이 맞다.
 
 The mix draw is `sha256("vehicle-mix:{seed}:{trip_id}")` mapped onto cumulative
 shares - deterministic, not random. Adjusting one share moves only the trips near the
@@ -84,7 +89,8 @@ uv run --package sensor-producer sensor-producer run \
   --run-id nyc-202402-v1 \
   --sample-hz 10 \
   --hourly-event-target 10000000 \
-  --time-scale 1
+  --time-scale 1 \
+  --vehicle-mix nyc-hvfhv-v1
 ```
 
 To publish from the local machine to the EC2 Kafka broker, replace the bootstrap

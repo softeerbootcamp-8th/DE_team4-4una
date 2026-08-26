@@ -81,12 +81,11 @@ jobs:
             batch-jobs-sensor-features: *batchjobs
             batch-jobs-cleansing: *batchjobs
             batch-jobs-rest: *batchjobs
-            # tests/integration은 7개 패키지를 모두 import하므로 전체 설치가 필요하다.
+            # tests/integration은 워크스페이스 패키지를 모두 import하므로 전체 설치가 필요하다.
             # 자체 테스트가 없는 서비스는 이 job만이 import를 검증한다.
             workspace:
               - *shared
               - 'services/dashboard/**'
-              - 'services/gold-loader/**'
               - 'tests/**'
             # 바뀐 Python 파일 목록을 받기 위한 필터다. 이 목록 중 위 필터가 담당하지
             # 않는 경로가 있으면 아래 스텝이 전체 대상으로 승격한다. 여기서 '!' 제외
@@ -141,7 +140,7 @@ jobs:
           for path in $PYTHON_FILES; do
             case "$path" in
               libs/de4-core/* | tests/* | \
-              services/batch-jobs/* | services/dashboard/* | services/gold-loader/* | \
+              services/batch-jobs/* | services/dashboard/* | \
               services/ops-agent/* | services/orchestration/* | \
               services/sensor-producer/* | \
               services/serving-api/* | services/stream-processor/* | \
@@ -237,7 +236,7 @@ jobs:
           PATHS: ${{ matrix.target.paths }}
         run: uv run --package "$PKG" --group dev --frozen pytest $PATHS
 
-  # tests/integration은 7개 패키지를 모두 import하므로 전체 설치가 필요하다.
+  # tests/integration은 워크스페이스 패키지를 모두 import하므로 전체 설치가 필요하다.
   # 위 test job들과 달리 이것만 --all-packages를 쓴다.
   workspace:
     name: Workspace Imports

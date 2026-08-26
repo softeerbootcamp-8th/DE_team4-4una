@@ -105,11 +105,12 @@ S3 접근은 컨테이너가 인스턴스 role로 처리한다. AWS 자격증명
 있는데, 기본 브리지 네트워크에서는 `localhost`가 dashboard 컨테이너 자신을 가리켜
 못 붙는다. 호스트 네트워크를 쓰면 `localhost:8000`이 그대로 serving-api다.
 
-여기서 `localhost`는 **EC2 자신**이지 사용자의 브라우저가 아니다. Streamlit은 서버에서
-렌더링하고 API 호출도 서버 안의 `httpx`가 하므로, 브라우저는 이 주소를 알지 못한다.
+여기서 `localhost`는 **EC2 자신**이지 사용자의 브라우저가 아니다. dashboard 서버
+(FastAPI)가 React 정적 파일을 내려주고 serving-api 호출은 서버 안의 `httpx`가
+하므로, 브라우저는 이 주소를 알지 못한다.
 
 ```
-사용자 브라우저 ──▶ EC2:8501 (Streamlit)
+사용자 브라우저 ──▶ EC2:8501 (dashboard: FastAPI + React)
                       └──▶ localhost:8000 (serving-api)   ← EC2 안에서 일어남
 ```
 
@@ -150,8 +151,8 @@ serving-api의 8000은 외부에 열지 않아도 된다. 위 "네트워크" 참
 
 ### health check의 한계
 
-`/_stcore/health`는 Streamlit이 제공하는 엔드포인트로, **서버가 스크립트를 받을
-준비가 됐는지만** 본다. serving-api의 `/health`가 DB 접속까지 확인하는 것과 다르다.
+`/_stcore/health`는 Streamlit 시절의 경로를 dashboard FastAPI가 호환용으로 유지한
+엔드포인트로, **프로세스가 응답하는지만** 본다. serving-api의 `/health`가 DB 접속까지 확인하는 것과 다르다.
 
 S3를 못 읽거나 Serving API에 못 닿아도 health는 통과한다. 두 곳 모두 사용자가 화면을
 열 때 처음 접근하므로 기동 시점에는 판정할 수 없다. 따라서 **배포 성공이 화면이

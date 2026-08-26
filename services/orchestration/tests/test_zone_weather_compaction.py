@@ -1,4 +1,4 @@
-"""Tests for jobs/bronze_compaction.py (#271, ADR-0009)."""
+"""Tests for jobs/zone_weather_compaction.py (#271, ADR-0009)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from de4_core import ObjectStore, join_uri
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jobs.bronze_compaction import (
+from jobs.zone_weather_compaction import (
     BronzeCompactionConfig,
     BronzeCompactionRowCountMismatch,
     compact_bronze_prefix,

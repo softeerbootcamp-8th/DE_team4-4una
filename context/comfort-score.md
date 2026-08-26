@@ -1,7 +1,7 @@
 ---
 owner: analytics-team
 status: proposed
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 # Comfort Score Design
@@ -95,20 +95,21 @@ be enough.
 
 ## Standard score calculation (Segment x vehicle profile)
 
-Grain: one `(segment_id, vehicle_profile_id)` row, rolled up from every
-qualifying hour of `hourly_comfort_score` inside the scoring window (a rolling
-168-hour / 1-week window), computed on each scheduled standard run and upserted
-into `standard_segment_comfort_score` in place, so that table always holds the
-latest run's snapshot and nothing older (issues #193 and #503; see "Column
-calculation mapping" under `standard_segment_comfort_score` in
+Grain: one `(segment_id, vehicle_profile_id)` row, rolled up from every hour
+with observed traffic in `hourly_comfort_score` inside the scoring window (a
+rolling 168-hour / 1-week window), computed on each scheduled standard run and
+upserted into `standard_segment_comfort_score` in place, so that table always
+holds the latest run's snapshot and nothing older (issues #193 and #503; see
+"Column calculation mapping" under `standard_segment_comfort_score` in
 `context/data/schema-catalog.md`). Each run's snapshot is also written to S3
 Gold under its own `score_as_of`, and that is where the history lives.
 `score_as_of` is the run's fixed schedule time; it is stored separately from
 the `data_period_start`/`data_period_end` window actually rolled up into the
-score, so a run with zero qualifying hours (`N = 0`) still gets a real
-`score_as_of`-keyed row. Both period columns are `NOT NULL`: when `N = 0`
-there is no qualifying hour to roll up, so the standard job fills them with
-the batch run's own window `[as_of - window_hours, as_of)` (issue #198).
+score, so a run with zero effective observation hours (`N_eff = 0`) still gets
+a real `score_as_of`-keyed row. Both period columns are `NOT NULL`: when
+`N_eff = 0` there is no hour with evidence to roll up, so the standard job
+fills them with the batch run's own window `[as_of - window_hours, as_of)`
+(issue #198).
 This weather-unadjusted score is the input to the weather-adjusted
 current score below — it is never itself weather-adjusted.
 
@@ -118,7 +119,7 @@ applying Steps 2-5 below to each direction separately. Every step is linear,
 so this does not change `comfort_score`: combining the three shrunk
 directional scores with the Step 1 weights gives exactly the same value as
 shrinking the already-combined `c_h`. That identity holds because the
-qualifying-hour set `H` is shared across directions — Step 2 filters on
+evidence weight `e_h` is shared across directions — Step 2 weights on
 `trip_count`, which is direction-independent.
 
 ### Step 1 - Combine the three directional scores into one hourly score
@@ -133,11 +134,11 @@ rest 3:2. `c_h` is one hour's directional-combined score for one segment and
 one vehicle profile. These weights are **Proposed**, not yet **Accepted**
 (OQ-006).
 
-### Step 2 - Keep only hours with enough traffic
+### Step 2 - Weight each hour by how much traffic it saw
 
 ```
-H_{s,p} = { h : T_h >= T_min }
-N = |H_{s,p}|
+e_h = min(1, T_h / evidence_saturation_trip_count)
+N_eff = sum(e_h for h in the window)
 ```
 
 - `T_h` is the vehicle traversal count recorded for hour `h`. This is
@@ -146,51 +147,70 @@ N = |H_{s,p}|
   vehicles) - see OQ-039 for whether the Gold job joins
   `hourly_segment_features` for this or `hourly_comfort_score` grows its own
   traffic-count column.
-- `T_min` is the minimum-traffic threshold below which an hour is dropped as
-  unreliable.
-- Over a 168-hour window, `N` ranges from 0 (no qualifying hour at all) to
-  168 (traffic every hour).
+- `evidence_saturation_trip_count` is the traffic count at which an hour's
+  evidence weight saturates at 1.0 (a full hour's worth of evidence); fewer
+  traversals count for less, proportionally, rather than being dropped.
+  `T_h = 0` gives `e_h = 0` — an hour with no traffic contributes nothing.
+- `N_eff`, the effective observation-hour count, replaces the old hard-cutoff
+  hour count `N`. It is a real number, not an integer, and over a 168-hour
+  window it ranges from 0 (no traffic at all) up to 168 (every hour
+  saturated).
+- **Issue #566 replaced a hard cutoff** (`H_{s,p} = { h : T_h >= T_min }`,
+  `N = |H_{s,p}|` — an hour below `T_min` contributed nothing at all) with
+  this continuous weight, because the hard cutoff discarded real observations:
+  with `T_min = 5`, an hour with 1-4 vehicle traversals counted exactly the
+  same as an hour with zero. Measured against real data, this pushed
+  `confidence_score` to 0 for about 97.8% of `standard_segment_comfort_score`
+  rows even though a sizeable share of those had some observed traffic. The
+  formula's shape changed, so `SCORE_VERSION` moved from `1.0.0` to `2.0.0`.
 
-### Step 3 - Average the qualifying hours
+### Step 3 - Average the hours, weighted by evidence
 
 ```
-c_obs = (1 / N) * sum(c_h for h in H_{s,p})
+c_obs = sum(e_h * c_h for h in the window) / sum(e_h for h in the window)
+      = sum(e_h * c_h) / N_eff
 ```
 
-A plain average, with no additional per-hour weighting. Hourly scores are
-already traffic-normalized per vehicle at Silver time (Step 1 computes a
-per-vehicle average, not a per-vehicle-count sum), so a busy rush-hour and a
-quiet 3am hour are treated as equally informative samples once both clear the
-`T_min` filter.
+Hours with more evidence (closer to or past `evidence_saturation_trip_count`)
+pull the average more than hours with only a trickle of traffic, instead of
+every qualifying hour counting equally once it cleared a cutoff. Hourly scores
+are already traffic-normalized per vehicle at Silver time (Step 1 computes a
+per-vehicle average, not a per-vehicle-count sum), so this weighting is about
+*how much to trust* an hour's `c_h`, not renormalizing it.
 
 ### Step 4 - Shrink toward the population mean
 
 ```
-ComfortScore_{s,p} = (N * c_obs + k * mu_p) / (N + k)
+ComfortScore_{s,p} = (N_eff * c_obs + k * mu_p) / (N_eff + k)
 ```
 
-- `mu_p` is the population mean for vehicle profile `p`: the plain average of
-  every qualifying hourly `c_h` for profile `p`, pooled across **every**
-  segment in the same scoring window (not a per-segment average of averages -
-  every qualifying hour counts once, regardless of which segment it belongs
-  to). It is the value a segment falls back to when it has no evidence of its
-  own.
+- `mu_p` is the population mean for vehicle profile `p`: the same
+  evidence-weighted average as Step 3 (`sum(e_h * c_h) / sum(e_h)`), pooled
+  across **every** segment in the same scoring window (not a per-segment
+  average of averages - every hour's evidence counts once, regardless of
+  which segment it belongs to). It is the value a segment falls back to when
+  it has no evidence of its own. The vehicle-agnostic global `mu` uses the
+  identical weighting, pooled across every vehicle profile too — per-segment
+  observed, per-profile population, and global population all share one
+  evidence definition (#566).
 - `k` is the shrinkage strength, in units of "hours." Recommended estimator:
   `k = within-segment hourly variance / between-segment variance` (an
   empirical-Bayes / random-effects variance ratio), computed from realized
   data once enough of it has accumulated. The final numeric value is
   intentionally **out of scope for issue #102** (see "Open items").
-- As `N` grows, `ComfortScore` converges to the plain observed average
-  `c_obs`; as `N` shrinks toward 0, it converges to `mu_p`.
+- As `N_eff` grows, `ComfortScore` converges to the evidence-weighted observed
+  average `c_obs`; as `N_eff` shrinks toward 0, it converges to `mu_p`.
 
 ### Step 5 - Report a confidence alongside the score
 
 ```
-Confidence_{s,p} = N / (N + k)
+Confidence_{s,p} = N_eff / (N_eff + k)
 ```
 
 0 means the score is effectively borrowed from the population mean; 1 means
-it is fully evidence-based.
+it is fully evidence-based. `N_eff` being continuous (not an hour count) means
+confidence now grows smoothly with observed traffic instead of jumping from 0
+to a nonzero floor the instant an hour crosses `T_min`.
 
 ## Vehicle-agnostic per-segment score
 
@@ -204,10 +224,10 @@ c_h,s = sum_p(T_h,p * c_h,p) / sum_p(T_h,p)
 
 For hour `h` on segment `s`, if more than one vehicle profile traversed it,
 blend their per-profile `c_h,p` values weighted by each profile's traffic
-count `T_h,p`. An hour then counts once toward `N_s` regardless of how many
-profiles contributed to it. Apply Step 2's filter to `T_h = sum_p(T_h,p)`,
-then Steps 3-5 exactly as above, using a global `mu` (the same pooling as
-`mu_p`, but across every vehicle profile) in place of `mu_p`.
+count `T_h,p`. Apply Step 2's evidence weight to `T_h = sum_p(T_h,p)` (the
+pooled traffic across every profile that hour), then Steps 3-5 exactly as
+above, using a global `mu` (the same evidence-weighted pooling as `mu_p`, but
+across every vehicle profile) in place of `mu_p`.
 
 Where this vehicle-agnostic score is physically stored is resolved
 (OQ-038, accepted 2026-08-16): a sentinel `vehicle_profile_id = 0` row inside
@@ -223,7 +243,8 @@ issue #193.
 ## Handling a vehicle profile that never traversed a segment
 
 No special-case logic is needed. If a `(segment_id, vehicle_profile_id)` pair
-has zero qualifying hours, `N = 0` and Step 4 reduces exactly to:
+has zero traffic-having hours in the window (`T_h = 0` every hour, so
+`N_eff = 0`), Step 4 reduces exactly to:
 
 ```
 ComfortScore_{s,p} = mu_p
@@ -239,10 +260,10 @@ for combinations already present in `hourly_comfort_score`.
 
 **Resolved for issue #193:** the standard job materializes a row for every
 `(segment_id, vehicle_profile_id)` combination on every scheduled run,
-regardless of `N`. This is exactly why the row records `score_as_of` (the run's
-fixed schedule time) rather than leaning on `data_period_end` (the rolled-up,
-`N = 0`-nullable data window) — every scheduled run stamps its row with when it
-ran, whether or not it found qualifying data
+regardless of `N_eff`. This is exactly why the row records `score_as_of` (the
+run's fixed schedule time) rather than leaning on `data_period_end` (the
+rolled-up, `N_eff = 0`-nullable data window) — every scheduled run stamps its
+row with when it ran, whether or not it found qualifying data
 (`context/data/schema-catalog.md`). `score_as_of` was also the third
 primary-key column until issue #503 dropped it; the column and its meaning are
 unchanged, only the key is narrower.
@@ -443,7 +464,7 @@ Two rules the implementation fixes:
 ## Parameter and formula management
 
 - **Numeric parameters** (`vertical_weight`, `longitudinal_weight`,
-  `lateral_weight`, `min_traffic_threshold` / `T_min`, `shrinkage_k` / `k`) are
+  `lateral_weight`, `evidence_saturation_trip_count`, `shrinkage_k` / `k`) are
   never hardcoded. They live in
   `services/batch-jobs/src/batch_jobs/resources/comfort_score.yaml`,
   each entry shaped as `{value, provisional}`, loaded through
@@ -547,10 +568,9 @@ path in the repository.
 These are not resolved by this document; see `context/open-questions.md` for
 the full record:
 
-- **OQ-006**: formal acceptance of the direction, weights, and `T_min`/`k`
-  proposed here.
-- **OQ-039**: source of the traffic count `T_h` used for the minimum-traffic
-  filter.
+- **OQ-006**: formal acceptance of the direction, weights, and
+  `evidence_saturation_trip_count`/`k` proposed here.
+- **OQ-039**: source of the traffic count `T_h` used for the evidence weight.
 - The final numeric value of `k` (to be computed from real data once enough
   has accumulated - explicitly out of scope for issue #102).
 - **Whether the three directional weights move to `libs/de4-core`** instead of

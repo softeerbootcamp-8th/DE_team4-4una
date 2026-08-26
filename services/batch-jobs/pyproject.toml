@@ -17,6 +17,9 @@ dependencies = [
     "pyspark==4.0.2",
     "pyyaml>=6.0,<7.0",
     "shapely>=2.1.2",
+    # pandas는 tzdata를 Windows/emscripten에서만 요구해서 Linux 이미지에는 tz DB가 없다.
+    # pyarrow가 tz-aware timestamp를 pandas로 바꿀 때 필요하므로 직접 선언한다(#582).
+    "tzdata>=2026.3",
 ]
 
 [dependency-groups]

@@ -1,6 +1,6 @@
 """Bronze 계층 zone_weather_snapshot 소파일 정리 DAG (#271, ADR-0009).
 
-sensor-events는 범위에서 제외됐다 — jobs/bronze_compaction.py 모듈 docstring과
+sensor-events는 범위에서 제외됐다 — jobs/zone_weather_compaction.py 모듈 docstring과
 ADR-0009 대안 참고(Spark FileStreamSink의 `_spark_metadata` 커밋 로그 때문에
 제자리 압축이 안전하지 않음). `data_quality_audit`(#253, ADR-0004)와 같은
 성격의 완전히 독립된 저빈도 유지보수 DAG다 — outlet이 없어 다른 DAG를 깨우거나
@@ -11,7 +11,7 @@ standard_score_pipeline이 매시 정각(`0 * * * *`)에 Bronze를 읽으므로,
 리더가 겹칠 확률을 줄이기 위함이다(완전한 동시성 보장은 아님 — ADR-0009 결과
 참고).
 
-jobs.bronze_compaction은 pyarrow+boto3만 쓰고 Spark가 필요 없어, zone_weather_pipeline과
+jobs.zone_weather_compaction은 pyarrow+boto3만 쓰고 Spark가 필요 없어, zone_weather_pipeline과
 같은 방식으로 docker-outside-of-docker 없이 이 컨테이너(airflow-scheduler) 안에서
 바로 PythonOperator로 실행한다.
 """
@@ -31,7 +31,7 @@ from notifications import (
 
 
 def _compact_zone_weather_snapshot(data_interval_end) -> dict:
-    from jobs.bronze_compaction import (
+    from jobs.zone_weather_compaction import (
         BronzeCompactionConfig,
         run_zone_weather_snapshot_compaction,
     )
@@ -48,7 +48,7 @@ def _compact_zone_weather_snapshot(data_interval_end) -> dict:
 
 
 with DAG(
-    dag_id="bronze_compaction",
+    dag_id="zone_weather_compaction",
     description="Bronze(zone_weather_snapshot) 소파일 정리 — 매일 1회, soft fail",
     schedule="17 4 * * *",
     start_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),

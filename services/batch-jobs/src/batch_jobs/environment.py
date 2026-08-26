@@ -249,10 +249,6 @@ def property_value(properties: dict[str, object], *names: str) -> object | None:
     return None
 
 
-def string_property(properties: dict[str, object], *names: str) -> str:
-    return str(property_value(properties, *names) or "").strip()
-
-
 def float_property(properties: dict[str, object], *names: str) -> float | None:
     value = property_value(properties, *names)
     if value is None or str(value).strip() == "":

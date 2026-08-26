@@ -391,7 +391,7 @@ def classify_weather_state(reading: Mapping[str, float | int | None]) -> str:
 # 1개로 남긴다. 같은 weather_time으로 재실행되면 같은 object URI를 덮어써서 중복
 # snapshot이 생기지 않는다. snapshot_root는 local path/file:// URI/s3:// URI를 모두
 # 받는다(#400) — 운영에서는 bronze/weather-snapshots를 가리키는 s3:// URI가 들어오고,
-# bronze_compaction(#271)이 이 root를 그대로 압축 대상으로 재사용한다. 실제 저장은
+# zone_weather_compaction(#271)이 이 root를 그대로 압축 대상으로 재사용한다. 실제 저장은
 # de4_core.ObjectStore에 위임해 S3 접근 로직을 중복 구현하지 않는다.
 def write_zone_weather_snapshot(
     snapshot_root: str,

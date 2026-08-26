@@ -2,7 +2,7 @@ import dataclasses
 import math
 import os
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 
 import numpy as np
 import pandas as pd
@@ -43,9 +43,11 @@ from pyspark.sql.types import (
     BinaryType,
     DateType,
     DoubleType,
+    LongType,
     StringType,
     StructField,
     StructType,
+    TimestampType,
 )
 from shapely import STRtree
 from shapely.geometry import LineString
@@ -1322,3 +1324,167 @@ class TestBroadcastPayloadFieldReduction:
 
         assert not hasattr(payload.records[0], "from_node_id")
         assert not hasattr(payload.records[0], "to_node_id")
+
+
+# #560: 매칭 결과를 event_id로 되붙이는 self-join을 없애기 위해 센서 컬럼을 그대로 통과시킨다.
+
+PASSTHROUGH_SENSOR_SCHEMA = StructType(
+    [
+        StructField("event_id", StringType(), nullable=False),
+        StructField("trip_id", StringType(), nullable=True),
+        StructField("trip_seq", LongType(), nullable=True),
+        StructField("event_time", TimestampType(), nullable=True),
+        StructField("event_date", DateType(), nullable=True),
+        StructField("latitude", DoubleType(), nullable=True),
+        StructField("longitude", DoubleType(), nullable=True),
+        StructField("heading", DoubleType(), nullable=True),
+        StructField("speed_mps", DoubleType(), nullable=True),
+        StructField("steering_angle", DoubleType(), nullable=True),
+        StructField("_processed_at", TimestampType(), nullable=True),
+    ]
+)
+
+
+def passthrough_sensor_row(
+    event_id: str,
+    latitude: float,
+    longitude: float,
+    heading: float,
+    *,
+    event_time: datetime = datetime(2026, 8, 11, 3, 14, 15, 926535, tzinfo=UTC),
+    processed_at: datetime = datetime(2026, 8, 11, 4, 0, 0, 1, tzinfo=UTC),
+) -> tuple:
+    return (
+        event_id,
+        "t1",
+        0,
+        event_time,
+        date(2026, 8, 11),
+        latitude,
+        longitude,
+        heading,
+        12.5,
+        -3.25,
+        processed_at,
+    )
+
+
+_PASSTHROUGH_ROAD_ROWS = [road_segment_row("S1", offset_line(10.0, 0.0))]
+
+
+class TestMatchSegmentCandidatesPassesSensorColumnsThrough:
+    """센서 컬럼을 통과시켜 되붙이는 조인을 없앤다(#560)."""
+
+    def sensor_frame(self, spark, rows: list[tuple]):
+        return spark.createDataFrame(rows, PASSTHROUGH_SENSOR_SCHEMA)
+
+    def road_frame(self, spark):
+        return spark.createDataFrame(_PASSTHROUGH_ROAD_ROWS, ROAD_SEGMENT_COLUMNS)
+
+    def test_result_keeps_every_sensor_column_value(self, spark) -> None:
+        rows = [
+            passthrough_sensor_row("e1", BASE_LAT, BASE_LON, 0.0),
+            passthrough_sensor_row("e2", BASE_LAT, BASE_LON, 90.0),
+            # 후보가 없는 이벤트도 센서 컬럼은 그대로 살아 있어야 한다.
+            passthrough_sensor_row("e3", BASE_LAT + 1.0, BASE_LON, 180.0),
+        ]
+        sensor_df = self.sensor_frame(spark, rows)
+
+        result = match_segment_candidates(sensor_df, self.road_frame(spark), 30.0, 0.7, 0.3)
+
+        assert set(sensor_df.columns) <= set(result.columns)
+        actual = {row["event_id"]: row.asDict() for row in result.collect()}
+        expected = {row["event_id"]: row.asDict() for row in sensor_df.collect()}
+        assert set(actual) == set(expected)
+        for event_id, source_row in expected.items():
+            for column, value in source_row.items():
+                assert actual[event_id][column] == value, (event_id, column)
+
+    def test_result_still_carries_the_match_columns(self, spark) -> None:
+        rows = [passthrough_sensor_row("e1", BASE_LAT, BASE_LON, 0.0)]
+
+        result = match_segment_candidates(
+            self.sensor_frame(spark, rows), self.road_frame(spark), 30.0, 0.7, 0.3
+        ).collect()
+
+        assert len(result) == 1
+        assert result[0]["segment_id"] == "S1"
+        assert result[0]["map_match_status"] == "matched"
+        assert result[0]["road_snapshot_date"] == SNAPSHOT
+
+    def test_timestamp_and_date_values_survive_the_arrow_round_trip(self, spark) -> None:
+        # Arrow -> pandas datetime64[ns] -> Arrow 왕복에서 마이크로초/자정/연말 경계가 어긋나면 안 된다.
+        rows = [
+            passthrough_sensor_row(
+                "midnight",
+                BASE_LAT,
+                BASE_LON,
+                0.0,
+                event_time=datetime(2026, 1, 1, 0, 0, 0, 0, tzinfo=UTC),
+                processed_at=datetime(2026, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
+            ),
+            passthrough_sensor_row(
+                "microsecond",
+                BASE_LAT,
+                BASE_LON,
+                0.0,
+                event_time=datetime(2026, 8, 11, 3, 14, 15, 926535, tzinfo=UTC),
+                processed_at=datetime(2026, 2, 28, 12, 0, 0, 1, tzinfo=UTC),
+            ),
+        ]
+        sensor_df = self.sensor_frame(spark, rows)
+
+        result = match_segment_candidates(sensor_df, self.road_frame(spark), 30.0, 0.7, 0.3)
+
+        actual = {row["event_id"]: row.asDict() for row in result.collect()}
+        expected = {row["event_id"]: row.asDict() for row in sensor_df.collect()}
+        for event_id, source_row in expected.items():
+            assert actual[event_id]["event_time"] == source_row["event_time"], event_id
+            assert actual[event_id]["_processed_at"] == source_row["_processed_at"], event_id
+            assert actual[event_id]["event_date"] == source_row["event_date"], event_id
+
+    def test_empty_input_keeps_the_output_schema(self, spark) -> None:
+        sensor_df = self.sensor_frame(spark, [])
+
+        result = match_segment_candidates(sensor_df, self.road_frame(spark), 30.0, 0.7, 0.3)
+
+        assert set(sensor_df.columns) <= set(result.columns)
+        assert result.count() == 0
+
+    def test_conflicting_match_column_name_fails_loudly(self, spark) -> None:
+        # sensor_df에 segment_id가 이미 있으면 어느 쪽 값인지 알 수 없으므로 즉시 실패해야 한다.
+        conflicting_schema = StructType(
+            [*PASSTHROUGH_SENSOR_SCHEMA.fields, StructField("segment_id", StringType())]
+        )
+        sensor_df = spark.createDataFrame([], conflicting_schema)
+
+        with pytest.raises(ValueError, match="segment_id"):
+            match_segment_candidates(sensor_df, self.road_frame(spark), 30.0, 0.7, 0.3)
+
+    def test_missing_required_column_fails_loudly(self, spark) -> None:
+        # 통과시킬 컬럼이 늘어도 매칭에 꼭 필요한 4개가 없으면 즉시 실패해야 한다.
+        sensor_df = spark.createDataFrame([], SENSOR_HEADING_SCHEMA)
+
+        with pytest.raises(ValueError, match="latitude"):
+            match_segment_candidates(sensor_df, self.road_frame(spark), 30.0, 0.7, 0.3)
+
+    def test_attach_match_results_ignores_the_pandas_index(self) -> None:
+        # 아직 없는 헬퍼라 모듈 최상단이 아니라 여기서 import한다(다른 테스트는 계속 수집되어야 한다).
+        from batch_jobs.map_matching.matching import attach_match_results
+
+        # pandas는 대입/concat을 인덱스로 정렬한다. 배치 인덱스가 0..n-1이 아니어도 행이 어긋나면 안 된다.
+        batch = pd.DataFrame(
+            {"event_id": ["e1", "e2", "e3"], "speed_mps": [1.0, 2.0, 3.0]}, index=[7, 3, 11]
+        )
+        result = pd.DataFrame(
+            {"event_id": ["e1", "e2", "e3"], "segment_id": ["A", "B", None]}, index=[0, 1, 2]
+        )
+
+        attached = attach_match_results(batch, result)
+
+        assert attached["event_id"].tolist() == ["e1", "e2", "e3"]
+        assert attached["speed_mps"].tolist() == [1.0, 2.0, 3.0]
+        # None/NaN 중 무엇으로 담기는지는 pandas 표현 문제고 Spark에서는 둘 다 null이다.
+        # 여기서 확인할 것은 값이 제자리에 붙었는지다.
+        assert attached["segment_id"].tolist()[:2] == ["A", "B"]
+        assert pd.isna(attached["segment_id"].iloc[2])

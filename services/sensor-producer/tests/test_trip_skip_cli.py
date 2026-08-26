@@ -66,6 +66,27 @@ def test_run_requires_all_local_parquet_inputs() -> None:
         build_parser().parse_args(["run"])
 
 
+def test_run_requires_an_explicit_vehicle_assignment(tmp_path: Path) -> None:
+    # 기본값으로 프로필 1이 되면 전 구간이 한 프로필 데이터가 되어 조용히 망가진다.
+    paths = [
+        tmp_path / name for name in ("trips.parquet", "roads.parquet", "zones.parquet")
+    ]
+    for path in paths:
+        path.touch()
+    base = [
+        "run",
+        "--trips-path", str(paths[0]),
+        "--road-environment-path", str(paths[1]),
+        "--taxi-zone-path", str(paths[2]),
+    ]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(base)
+
+    assert build_parser().parse_args([*base, "--vehicle-mix", "nyc-hvfhv-v1"]).vehicle_mix
+    assert build_parser().parse_args([*base, "--vehicle-profile-id", "3"]).vehicle_profile_id == 3
+
+
 def test_run_defaults_to_the_hourly_event_budget(
     tmp_path: Path,
 ) -> None:
@@ -84,6 +105,8 @@ def test_run_defaults_to_the_hourly_event_budget(
             str(paths[1]),
             "--taxi-zone-path",
             str(paths[2]),
+            "--vehicle-mix",
+            "nyc-hvfhv-v1",
         ]
     )
 

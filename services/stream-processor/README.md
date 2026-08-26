@@ -19,21 +19,23 @@ docker compose -f infra/compose/kafka.yaml exec kafka \
 export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 export KAFKA_SENSOR_TOPIC=sensor-events
 export KAFKA_STARTING_OFFSETS=earliest
-export STREAM_TRIGGER_INTERVAL_SECONDS=5
+export STREAM_TRIGGER_INTERVAL_SECONDS=30
 export STREAM_BRONZE_OUTPUT_PATH=data/local-lake/bronze/sensor-events
 export STREAM_BRONZE_CHECKPOINT_LOCATION=checkpoints/bronze-sensor-events
 # Kafka에 이만큼(전체 partition 합계) 모일 때까지 배치를 미뤄 Bronze 파일을 크게 만든다.
 # 기본값 600000은 parquet 약 128MB다(우리 Bronze 실측으로 디스크에서 행당 223B).
 # 데이터가 적은 스모크 테스트에서는 0으로 꺼라. 켜 둔 채로 몇백 건만 넣으면
-# STREAM_MAX_TRIGGER_DELAY만큼(기본 5분) 기다린 뒤에야 파일이 생겨서, 스트림이
+# STREAM_MAX_TRIGGER_DELAY만큼(기본 30초) 기다린 뒤에야 파일이 생겨서, 스트림이
 # 멈춘 것처럼 보인다.
 export STREAM_MIN_OFFSETS_PER_TRIGGER=600000
 # 위 조건과 항상 같이 걸린다. 양이 모자라도 이 시간이 지나면 배치를 실행한다.
 # 이게 없으면 한산할 때 배치가 아예 돌지 않아 멈춘 것처럼 보인다.
-export STREAM_MAX_TRIGGER_DELAY=5m
-# 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
-# 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
-export STREAM_BRONZE_OUTPUT_PARTITIONS=1
+export STREAM_MAX_TRIGGER_DELAY=30s
+# 복구 backlog가 한 번에 커지지 않도록 30초 batch를 12만 건으로 제한한다.
+export STREAM_MAX_OFFSETS_PER_TRIGGER=120000
+# 배치 한 번이 남길 파일 수. 2 vCPU Spark 런타임에서는 두 writer task가
+# coalesce(1)의 단일 S3 writer 병목을 피하면서 파일 수를 제한한다.
+export STREAM_BRONZE_OUTPUT_PARTITIONS=2
 
 SPARK_LOCAL_IP=127.0.0.1 uv run --package stream-processor stream-processor
 ```
@@ -91,3 +93,30 @@ docker run --rm --network host \
 
 스모크 테스트에서는 `STREAM_MIN_OFFSETS_PER_TRIGGER=0`을 사용합니다. 운영값은
 실측 이벤트 크기와 허용 지연시간을 기준으로 조정합니다.
+
+## 30초 Bronze freshness canary
+
+기본값은 `processingTime=30s`, `maxTriggerDelay=30s`,
+`maxOffsetsPerTrigger=120000`이다. 센서 `event_time`이 04:00인 이벤트는
+다음 batch에서 읽혀도 `event_date=.../hour=04`에 기록된다.
+
+실제 EC2 canary에서는 Spark Streaming dashboard로 연속 15분 이상 다음을 확인한다.
+
+- p95 `stream_processor_batch_duration_seconds` < 30초
+- `processedRowsPerSecond` > `inputRowsPerSecond`
+- Kafka lag가 장기적으로 커지지 않음
+- 시간 경계 이벤트가 올바른 `event_date/hour` 파티션에 기록됨
+
+## Bronze writer canary
+
+`STREAM_BRONZE_OUTPUT_PARTITIONS=2` 는 2 vCPU Spark Streaming 런타임의
+초기 canary 값이다. 적용 전후에 다음을 같은 Kafka offset 범위에서 비교한다.
+
+- `stream_processor_processed_rows_per_second`와
+  `stream_processor_batch_duration_seconds`
+- batch당 Parquet 파일 수와 평균 파일 크기
+- Bronze의 `(topic, partition, offset)`과 value 내 `event_id` 중복/누락
+
+이 값이 2 vCPU에서 가장 빠르다는 결론을 미리 뜻하지는 않는다. batch duration이
+trigger interval을 넘거나 Kafka lag가 지속적으로 커지면 1개와 3개도 같은
+방법으로 재검증한다.

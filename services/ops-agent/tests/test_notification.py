@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-from conftest import down_status, executed, fake_diagnose, grafana_alert, healthy_status
 from ops_agent.diagnostics import ContainerDiagnostics
 from ops_agent.models import Incident
 from ops_agent.notification import (
@@ -15,6 +14,13 @@ from ops_agent.owners import ServiceOwner
 from ops_agent.policy import PolicyDecision, RemediationAction
 from ops_agent.remediation import RemediationResult
 from ops_agent.ssh import CommandKind
+from ops_agent_test_support import (
+    down_status,
+    executed,
+    fake_diagnose,
+    grafana_alert,
+    healthy_status,
+)
 
 OWNER = ServiceOwner(name="bob", email=None, slack_id="U0456GHIJKL", severity="high")
 

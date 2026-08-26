@@ -24,6 +24,7 @@ LAST_PROGRESS_TIMESTAMP_METRIC_NAME = "stream_processor_last_progress_timestamp_
 QUERY_FAILURES_TOTAL_METRIC_NAME = "stream_processor_query_failures_total"
 EVENT_TIME_LAG_METRIC_NAME = "stream_processor_event_time_lag_seconds"
 KAFKA_OFFSET_LAG_METRIC_NAME = "stream_processor_kafka_offset_lag"
+KAFKA_END_OFFSET_SUM_METRIC_NAME = "stream_processor_kafka_end_offset_sum"
 
 # progress.durationMs는 addBatch/queryPlanning/walCommit 등 여러 세부 항목을 담고 있는데,
 # 마이크로배치 전체 소요 시간은 이 키 하나로 대표된다.
@@ -87,6 +88,11 @@ class StreamMetrics:
             "Kafka topic, from the most recent micro-batch",
             registry=self.registry,
         )
+        self.kafka_end_offset_sum = Gauge(
+            KAFKA_END_OFFSET_SUM_METRIC_NAME,
+            "Sum of Kafka end offsets committed by the most recent micro-batch",
+            registry=self.registry,
+        )
 
     def observe_started(self) -> None:
         self.query_running.set(1)
@@ -106,9 +112,11 @@ class StreamMetrics:
         if event_time_lag is not None:
             self.event_time_lag_seconds.set(event_time_lag)
 
-        offset_lag = _kafka_offset_lag(progress)
-        if offset_lag is not None:
+        offset_stats = _kafka_offset_stats(progress)
+        if offset_stats is not None:
+            offset_lag, end_offset_sum = offset_stats
             self.kafka_offset_lag.set(offset_lag)
+            self.kafka_end_offset_sum.set(end_offset_sum)
 
     def observe_terminated(self, exception: str | None) -> None:
         self.query_running.set(0)
@@ -159,6 +167,16 @@ def _kafka_offset_lag(progress) -> int | None:
     형식이 다른 source이거나 아직 값이 없다는 뜻이라 조용히 None을 돌려 gauge를
     갱신하지 않는다(직전 값 유지, 예외로 전체 metric 갱신을 막지 않는다).
     """
+    stats = _kafka_offset_stats(progress)
+    return stats[0] if stats is not None else None
+
+
+def _kafka_offset_stats(progress) -> tuple[int, int] | None:
+    """Return current-batch lag and the sum of offsets committed by Spark.
+
+    end offset 합계를 별도로 노출하면 Spark progress가 멈춘 동안에도 Kafka Exporter의
+    현재 offset과 비교해 backlog 증가를 계산할 수 있다
+    """
     sources = getattr(progress, "sources", None)
     if not sources:
         return None
@@ -172,8 +190,11 @@ def _kafka_offset_lag(progress) -> int | None:
     if not isinstance(end_offsets, dict) or not isinstance(latest_offsets, dict):
         return None
     lag = 0
+    end_offset_sum = 0
     for topic, partitions in latest_offsets.items():
         end_partitions = end_offsets.get(topic, {})
         for partition, latest in partitions.items():
-            lag += latest - end_partitions.get(partition, 0)
-    return lag
+            end = end_partitions.get(partition, 0)
+            lag += latest - end
+            end_offset_sum += end
+    return lag, end_offset_sum

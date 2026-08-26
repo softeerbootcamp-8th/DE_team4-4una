@@ -20,9 +20,15 @@ contactPoints:
           recipient: $GRAFANA_SLACK_ALERT_CHANNEL
           title: '🚨 {{ .CommonLabels.service }} 알림 감지'
           text: |
-            Alert: {{ .CommonLabels.alertname }}
-            Severity: {{ .CommonLabels.severity }}
-            Ops Agent가 재검증 후 진단/조치를 진행합니다.
+            State: {{ .Status }}
+            {{ range .Alerts }}Alert: {{ .Labels.alertname }}
+            Severity: {{ .Labels.severity }}
+            발생 시각: {{ .StartsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }})
+            {{ .Annotations.summary }}
+            현재 값: {{ .ValueString }}
+            {{ if .DashboardURL }}Dashboard: {{ .DashboardURL }}{{ end }}
+            {{ end }}
+            Ops Agent가 재검증 후 진단과 조치 여부를 판단합니다.
 
   # 인프라 alert 전용(#504). ops-agent contact point를 재사용하지 않는 이유는 두 가지다.
   #   1. 그쪽 Slack 문구가 "Ops Agent가 재검증 후 진단/조치를 진행합니다"인데

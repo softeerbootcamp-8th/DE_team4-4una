@@ -498,6 +498,7 @@ dependencies = [
     { name = "pyspark" },
     { name = "pyyaml" },
     { name = "shapely" },
+    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -520,6 +521,7 @@ requires-dist = [
     { name = "pyspark", specifier = "==4.0.2" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "shapely", specifier = ">=2.1.2" },
+    { name = "tzdata", specifier = ">=2026.3" },
 ]
 
 [package.metadata.requires-dev]
@@ -759,7 +761,6 @@ version = "0.1.0"
 source = { editable = "services/dashboard" }
 dependencies = [
     { name = "boto3" },
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pyarrow" },
@@ -776,7 +777,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.40,<2.0" },
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.120.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -1665,7 +1665,6 @@ name = "ops-agent"
 version = "0.1.0"
 source = { editable = "services/ops-agent" }
 dependencies = [
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -1681,7 +1680,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.136.3,<0.137.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32,<3.0" },
@@ -2588,7 +2586,6 @@ name = "serving-api"
 version = "0.1.0"
 source = { editable = "services/serving-api" }
 dependencies = [
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary", "pool"] },
@@ -2603,7 +2600,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.136.3,<0.137.0" },
     { name = "prometheus-client", specifier = ">=0.21" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.3.4" },

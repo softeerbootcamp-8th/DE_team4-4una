@@ -219,7 +219,38 @@
 
 ---
 
-## 5. 팀원
+## 5. 한계와 향후 개선
+
+현재 프로토타입이 알고 있는 한계와, 이어서 진행할 개선 방향입니다.
+
+**데이터와 점수**
+
+- Comfort Score는 시뮬레이션 데이터 기반입니다. 파이프라인은 내부 일관성을 검증하지만,
+  실제 승차감과의 일치(실차 캘리브레이션)는 검증 범위 밖입니다
+  ([context/comfort-score.md](context/comfort-score.md)의 Evaluation strategy).
+- 점수 산식(방향·가중치·최소 통행량 필터)은 구현되어 있으나 정식 승인 대기 상태입니다
+  ([context/open-questions.md](context/open-questions.md) OQ-006).
+
+**파이프라인**
+
+- standard 점수는 매시 168시간 윈도우 전체를 다시 읽어 계산합니다. 증분 계산이 없어
+  데이터가 늘면 계산량이 선형으로 증가합니다.
+- Bronze `sensor-events`의 스트리밍 소파일 백로그는 아직 정리 경로가 없습니다
+  ([ADR-0009](docs/adr/0009-bronze-compaction-dag.md)에서 범위 제외, 후속 과제).
+- quarantine으로 격리된 데이터를 재처리하는 경로는 아직 없습니다. 격리는 되지만
+  복구는 수동입니다.
+
+**운영**
+
+- AWS 리소스는 수동으로 생성합니다. IaC(Terraform 등) 도입은 향후 과제입니다.
+- EMR Job Run에 전달하는 서빙 DB 자격증명은 임시 방편이며, Secrets Manager 또는
+  IAM DB 인증으로 교체할 예정입니다.
+- Airflow는 단일 EC2의 LocalExecutor로 동작하며, DAG·태스크 수준 execution timeout은
+  아직 설정하지 않았습니다.
+
+---
+
+## 6. 팀원
 
 <table align="center">
   <tr>

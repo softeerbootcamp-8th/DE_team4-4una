@@ -238,7 +238,7 @@ class TestClassifyWeatherState:
 
 
 class FakeS3Client:
-    """put_object/get_object만 갖춘 최소 in-memory S3 — bronze_compaction 테스트와 같은 패턴."""
+    """put_object/get_object만 갖춘 최소 in-memory S3 — zone_weather_compaction 테스트와 같은 패턴."""
 
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
@@ -671,10 +671,10 @@ class TestWriteZoneWeatherSnapshot:
                 store=FailingObjectStore(),
             )
 
-    def test_bronze_compaction_finds_the_snapshot_under_the_same_root(self, tmp_path):
-        # weather.py가 쓰는 root와 bronze_compaction이 읽는 root가 같은 값을 가리키면
+    def test_zone_weather_compaction_finds_the_snapshot_under_the_same_root(self, tmp_path):
+        # weather.py가 쓰는 root와 zone_weather_compaction이 읽는 root가 같은 값을 가리키면
         # 그대로 발견돼야 한다 — 두 job이 같은 S3 root를 바라보는 계약을 지킨다(#400).
-        from jobs.bronze_compaction import compact_bronze_prefix
+        from jobs.zone_weather_compaction import compact_bronze_prefix
 
         root = str(tmp_path / "zone_weather_snapshot")
         store = ObjectStore()

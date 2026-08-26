@@ -92,7 +92,7 @@ def _registry(monkeypatch, tmp_path):
             slack_id: U0456GHIJKL
 
         dags:
-          bronze_compaction:
+          zone_weather_compaction:
             owner: bob
             severity: low
           standard_score_pipeline:
@@ -138,6 +138,11 @@ def _fake_object_store(monkeypatch):
         def write_bytes(self, uri, value):
             written[uri] = value
 
+        def read_bytes(self, uri):
+            if uri not in written:
+                raise FileNotFoundError(uri)
+            return written[uri]
+
     monkeypatch.setattr("de4_core.ObjectStore", _FakeObjectStore)
     # _failed_tasks_s3_root()는 airflow.sdk.Variable.get()을 호출하는데, 이건 실제
     # Airflow DB/API 연결이 필요해 단위 테스트에서 그대로 두면 실패하거나 멈춘다.
@@ -155,7 +160,7 @@ def _fake_object_store(monkeypatch):
 
 def test_failure_callback_mentions_slack_id_owner_directly(_fake_slack_hook, _fake_object_store):
     context = _context(
-        "bronze_compaction",
+        "zone_weather_compaction",
         _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
         exception=ValueError("boom"),
     )
@@ -210,7 +215,7 @@ def test_failure_callback_includes_emr_s3_logs_link_when_xcom_present(_fake_slac
         "application_id": "app-1",
         "job_run_id": "job-1",
     }
-    context = _context("bronze_compaction", task_instance)
+    context = _context("zone_weather_compaction", task_instance)
 
     notifications.on_failure_callback(context)
 
@@ -220,7 +225,7 @@ def test_failure_callback_includes_emr_s3_logs_link_when_xcom_present(_fake_slac
 
 
 def test_failure_callback_omits_emr_link_when_not_an_emr_task(_fake_slack_hook, _fake_object_store):
-    context = _context("bronze_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot"))
+    context = _context("zone_weather_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot"))
 
     notifications.on_failure_callback(context)
 
@@ -232,7 +237,7 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
     import json
 
     context = _context(
-        "bronze_compaction",
+        "zone_weather_compaction",
         _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
         exception=ValueError("boom"),
     )
@@ -243,10 +248,10 @@ def test_failure_callback_writes_structured_json_record_to_s3(_fake_slack_hook, 
     written_uri, written_bytes = next(iter(_fake_object_store.items()))
     assert written_uri.startswith(
         "s3://de4-observability-473551908409-ap-northeast-2-an/airflow/failed-tasks/"
-        "bronze_compaction/compact_zone_weather_snapshot/"
+        "zone_weather_compaction/compact_zone_weather_snapshot/"
     )
     record = json.loads(written_bytes)
-    assert record["dag_id"] == "bronze_compaction"
+    assert record["dag_id"] == "zone_weather_compaction"
     assert record["task_id"] == "compact_zone_weather_snapshot"
     assert record["exception"] == "boom"
     assert record["owner"] == "bob"
@@ -266,7 +271,7 @@ def test_failure_callback_handles_missing_logical_date(_fake_slack_hook, _fake_o
     # 자체가 없다 — EC2 검증 중 KeyError로 실제 발견(#409). 이 경우에도 Slack
     # 알림 자체는 반드시 나가야 한다.
     context = _context(
-        "bronze_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+        "zone_weather_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
     )
     del context["logical_date"]
 
@@ -318,8 +323,8 @@ def test_success_callback_posts_summary_from_mapped_task(_fake_slack_hook):
 
 def test_success_callback_without_summary_task_still_posts(_fake_slack_hook):
     context = {
-        "dag": _FakeDag("bronze_compaction"),
-        "dag_run": _FakeDagRun(dag_id="bronze_compaction"),
+        "dag": _FakeDag("zone_weather_compaction"),
+        "dag_run": _FakeDagRun(dag_id="zone_weather_compaction"),
         "task_instance": _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
     }
 
@@ -354,7 +359,7 @@ def test_failure_callback_still_posts_when_s3_record_write_fails(_fake_slack_hoo
 
     monkeypatch.setattr(notifications, "_write_failure_record", _boom)
     context = _context(
-        "bronze_compaction",
+        "zone_weather_compaction",
         _FakeTaskInstance(task_id="compact_zone_weather_snapshot"),
         exception=ValueError("boom"),
     )
@@ -413,6 +418,10 @@ def _fake_emr_log(monkeypatch):
             holder["written"][uri] = value
 
         def read_bytes(self, uri):
+            if uri.endswith(notifications._ALERT_THREAD_TS_SUFFIX):
+                if uri not in holder["written"]:
+                    raise FileNotFoundError(uri)
+                return holder["written"][uri]
             holder["read_uris"].append(uri)
             if holder["text"] is None:
                 raise FileNotFoundError(uri)
@@ -534,7 +543,7 @@ def test_failure_callback_still_posts_when_driver_log_is_unavailable(
 def test_failure_callback_skips_diagnosis_for_non_emr_task(_fake_slack_hook, _fake_emr_log):
     _fake_emr_log["text"] = _EXECUTOR_OOM_LOG
     context = _context(
-        "bronze_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+        "zone_weather_compaction", _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
     )
 
     notifications.on_failure_callback(context)
@@ -589,6 +598,10 @@ class _FakeRetryTask:
     retry_delay: object = datetime.timedelta(minutes=5)
 
 
+def _store_thread_ts(written, context, ts):
+    written[notifications._thread_ts_uri(context)] = ts.encode("utf-8")
+
+
 def _retry_context(dag_id, task_instance, *, try_number, retries=1, exception=None):
     context = _context(dag_id, task_instance, exception=exception)
     context["task"] = _FakeRetryTask(retries=retries)
@@ -600,7 +613,7 @@ def test_retry_callback_posts_first_failure_to_channel_with_mention(
     _fake_slack_hook, _fake_object_store
 ):
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=1)
 
     notifications.on_retry_callback(context)
 
@@ -615,10 +628,8 @@ def test_retry_callback_posts_later_attempt_into_the_thread_without_mention(
     _fake_slack_hook, _fake_object_store
 ):
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    task_instance.xcom_store[
-        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
-    ] = "1724650000.000100"
-    context = _retry_context("bronze_compaction", task_instance, try_number=2, retries=2)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=2, retries=2)
+    _store_thread_ts(_fake_object_store, context, "1724650000.000100")
 
     notifications.on_retry_callback(context)
 
@@ -632,10 +643,8 @@ def test_final_failure_goes_into_the_same_thread_and_mentions_again(
     _fake_slack_hook, _fake_object_store
 ):
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    task_instance.xcom_store[
-        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
-    ] = "1724650000.000100"
-    context = _retry_context("bronze_compaction", task_instance, try_number=2)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=2)
+    _store_thread_ts(_fake_object_store, context, "1724650000.000100")
 
     notifications.on_failure_callback(context)
 
@@ -647,28 +656,50 @@ def test_final_failure_goes_into_the_same_thread_and_mentions_again(
 
 
 def test_first_failure_alert_remembers_its_thread_ts(_fake_slack_hook, _fake_object_store):
-    pushed = {}
+    # XCom은 재시도 시 지워져 2차 콜백이 ts를 못 찾았다 — 재시도를 넘겨 남는 S3에 둔다.
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    task_instance.xcom_push = lambda key, value: pushed.__setitem__(key, value)
     _fake_slack_hook.client.chat_postMessage.return_value = {"ts": "1724650000.000100"}
-    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=1)
 
     notifications.on_retry_callback(context)
 
-    assert pushed[notifications._ALERT_THREAD_TS_XCOM_KEY] == "1724650000.000100"
+    assert _fake_object_store[notifications._thread_ts_uri(context)] == b"1724650000.000100"
 
 
-def test_alert_still_posts_when_thread_ts_cannot_be_stored(_fake_slack_hook, _fake_object_store):
-    # 콜백에서 xcom_push가 막히면 스레드만 포기하고 알림은 그대로 나가야 한다.
-    def _boom(key, value):
-        raise RuntimeError("xcom_push not allowed in callback")
-
+def test_thread_ts_survives_into_the_next_attempt(_fake_slack_hook, _fake_object_store):
+    # 이 이슈의 핵심: 1차에서 남긴 ts를 다음 시도의 콜백이 읽어 같은 스레드에 붙어야 한다.
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    task_instance.xcom_push = _boom
+    _fake_slack_hook.client.chat_postMessage.return_value = {"ts": "1724650000.000100"}
+    notifications.on_retry_callback(
+        _retry_context("zone_weather_compaction", task_instance, try_number=1, retries=2)
+    )
+
+    notifications.on_failure_callback(
+        _retry_context("zone_weather_compaction", task_instance, try_number=3, retries=2)
+    )
+
+    kwargs = _fake_slack_hook.client.chat_postMessage.call_args.kwargs
+    assert kwargs["thread_ts"] == "1724650000.000100"
+
+
+def test_alert_still_posts_when_thread_ts_cannot_be_stored(_fake_slack_hook, monkeypatch):
+    # ts 저장이 실패하면 스레드만 포기하고 알림은 그대로 나가야 한다.
+    class _BrokenStore:
+        def write_bytes(self, uri, value):
+            raise RuntimeError("bucket misconfigured")
+
+        def read_bytes(self, uri):
+            raise FileNotFoundError(uri)
+
+    monkeypatch.setattr("de4_core.ObjectStore", _BrokenStore)
+    monkeypatch.setattr(
+        notifications, "_failed_tasks_s3_root", lambda: notifications._DEFAULT_FAILED_TASKS_S3_ROOT
+    )
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
     _fake_slack_hook.client.chat_postMessage.return_value = {"ts": "1724650000.000100"}
 
     notifications.on_retry_callback(
-        _retry_context("bronze_compaction", task_instance, try_number=1)
+        _retry_context("zone_weather_compaction", task_instance, try_number=1)
     )
 
     assert "1차 실패" in _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
@@ -678,10 +709,8 @@ def test_task_success_callback_reports_recovery_only_after_a_retry(
     _fake_slack_hook, _fake_object_store
 ):
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    task_instance.xcom_store[
-        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
-    ] = "1724650000.000100"
-    context = _retry_context("bronze_compaction", task_instance, try_number=2)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=2)
+    _store_thread_ts(_fake_object_store, context, "1724650000.000100")
 
     notifications.on_task_success_callback(context)
 
@@ -694,7 +723,7 @@ def test_task_success_callback_is_silent_when_the_task_never_retried(
     _fake_slack_hook, _fake_object_store
 ):
     task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
-    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+    context = _retry_context("zone_weather_compaction", task_instance, try_number=1)
 
     notifications.on_task_success_callback(context)
 

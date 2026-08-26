@@ -180,12 +180,13 @@ def _next_message(
             ]
             if failed:
                 names = ", ".join(process.name for process in failed)
+                # Empty는 결과 폴링 타임아웃일 뿐 실패 원인이 아니므로 예외 체인을 끊는다.
                 raise RuntimeError(
                     f"parallel replay workers exited unexpectedly: {names}"
-                )
+                ) from None
             if any(process.is_alive() for process in processes):
                 continue
-            raise RuntimeError("parallel replay workers exited without a result")
+            raise RuntimeError("parallel replay workers exited without a result") from None
 
 
 def _merge_results(results: list[ReplayResult]) -> ReplayResult:

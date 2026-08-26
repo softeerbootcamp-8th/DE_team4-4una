@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 # Target Architecture
@@ -93,8 +93,9 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 
 ### Road comfort map dashboard
 
-The implemented Streamlit dashboard (issue #376) reads one configured
-`road_segment` snapshot Parquet object from S3 through the AWS default
+The implemented dashboard — a FastAPI backend serving a React frontend
+(issue #435, replacing the issue #376 Streamlit prototype) — reads one
+configured `road_segment` snapshot Parquet object from S3 through the AWS default
 credential chain and converts the stored `EPSG:32118` WKB geometry to
 `EPSG:4326`. A borough selection narrows candidates first (issue #407); the
 map viewport narrows further to what is actually rendered (issue #414), and
@@ -128,7 +129,11 @@ artifacts have been copied to the producer machine.
 Kafka decouples replay from persistence. The stream processor validates shared
 contracts, handles duplicates according to the accepted idempotency key, and
 writes raw events to S3 without discarding variables that may be useful to later
-scoring experiments.
+scoring experiments. Its default Bronze collection policy attempts a micro-batch
+at most every 30 seconds and caps a batch at 120,000 records, so a recovery
+backlog is drained incrementally rather than turning one retry into an
+unbounded S3 write. S3 partitions still use sensor `event_time`, not the time
+at which a batch happens to commit.
 
 ### Hourly cleansing-to-feature execution
 
@@ -208,7 +213,7 @@ monthly result.
 ### Bronze compaction
 
 Bronze `zone_weather_snapshot` accumulates small files from its 15-minute writer. An
-independent, low-frequency `bronze_compaction` DAG (no outlets, does not block or gate
+independent, low-frequency `zone_weather_compaction` DAG (no outlets, does not block or gate
 other DAGs) merges same-partition objects once they are old enough that no further
 writes are expected, verifying row counts before discarding the originals.
 `sensor-events` was dropped from this DAG's scope after discovering that in-place
@@ -255,6 +260,13 @@ dedicated Spark Streaming EC2). Every dashboard JSON is the
 source of truth (`allowUiUpdates: false` in `dashboards.yml`); manual Grafana
 UI edits are not persisted.
 
+Spark Streaming alerts distinguish process failure from data-flow degradation.
+Target/query failure is critical, while a Bronze progress stall or growing
+Kafka/event-time lag during active Kafka ingress is warning-only and never opts
+into automatic remediation. The traffic condition prevents an idle topic from
+being reported as an S3 ingestion failure. Slack notifications include the
+observed state and lag values and link back to the Spark Streaming dashboard.
+
 Kafka is an EC2-hosted infrastructure service managed from
 `infra/compose/kafka.yaml`. Automatic CD reconciles that Compose definition and
 the `sensor-events` topic, while Sensor Producer replay runs locally rather than
@@ -283,6 +295,3 @@ dependencies. A small `statsd_exporter` mapping
 (`infra/monitoring/statsd/airflow-mapping.yml`) converts exactly the three
 Airflow timer metrics the dashboard uses into Prometheus histograms, because
 the exporter's default (a fixed-quantile Summary) can't produce a p95.
-
-Alerting and metrics for the remaining services (Spark) remain outside this
-scope.

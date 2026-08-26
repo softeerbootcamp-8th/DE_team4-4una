@@ -253,7 +253,7 @@ def submit_batch_jobs_command(
 def emr_serverless_has_no_running_jobs(application_id: str) -> bool:
     """Application에 아직 끝나지 않은 Job Run이 하나도 없으면 True를 돌려준다(#432).
 
-    `standard_score_pipeline`(hourly)과 `data_quality_audit`(daily 03:00 UTC)이
+    `standard_score_pipeline`(hourly)과 `data_quality_audit`(daily 08:40 UTC)이
     같은 Application을 공유하므로, hourly가 끝났다고 무조건 stop을 걸면 audit의
     Job Run을 건드릴 수 있다. EMR Serverless의 StopApplication은
     "All scheduled and running jobs must be completed or cancelled before

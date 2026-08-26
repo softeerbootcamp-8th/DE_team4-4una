@@ -35,7 +35,7 @@ dags:
   data_quality_audit:
     owner: JEONGKIJOON
     severity: medium
-  bronze_compaction:
+  zone_weather_compaction:
     owner: JEONGKIJOON
     severity: low
   bronze_sensor_events_compaction:

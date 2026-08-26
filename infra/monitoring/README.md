@@ -497,6 +497,33 @@ Grafana UI에서 수정할 수 없다 — 변경은 이 파일들을 고쳐 배�
 | `contact-points.yaml` | `ops-agent`(webhook+Slack), `infra-slack`(Slack 전용) |
 | `notification-policies.yaml` | 기본 `ops-agent`, `service=infrastructure`는 `infra-slack` |
 
+Spark Streaming의 Bronze 적재는 세 종류로 나눠 감지한다.
+
+| Alert | 조건 | Severity | 자동 조치 |
+| --- | --- | --- | --- |
+| `StreamProcessorDown` | Prometheus target 또는 Spark query가 중단된 상태가 1분 지속 | CRITICAL | 기존 Ops Agent 재검증·재시작 대상 |
+| `BronzeIngestionStalled` | Kafka 입력이 있는데 마지막 성공 progress가 90초 넘게 없음 | WARNING | 없음 |
+| `BronzeIngestionLagGrowing` | Kafka 입력 중 event-time lag가 90초를 넘거나 2분 동안 live offset lag가 증가 | WARNING | 없음 |
+
+`BronzeIngestionStalled`은 Kafka message rate가 0이면 시계열을 반환하지 않고
+`noDataState=OK`로 처리한다. 따라서 차량 입력이 없는 정상 상태를 적재 장애로 오인하지
+않는다. 여기서 마지막 progress는 sink commit까지 끝난 `QueryProgressEvent`이므로 S3
+적재 성공을 나타내는 proxy로 사용한다.
+
+Stream Processor가 보고하는 `stream_processor_kafka_offset_lag`는 micro-batch 종료
+시에만 갱신돼 query가 멈추면 값도 멈춘다. 그래서 lag 증가 alert는 Spark가 마지막으로
+commit한 end offset 합(`stream_processor_kafka_end_offset_sum`)을 Kafka Exporter의
+현재 topic offset 합에서 빼 live backlog를 계산한다.
+
+두 WARNING은 `auto_remediate` 라벨이 없어 컨테이너를 재시작하지 않는다. 기존
+`ops-agent` contact point를 통해 Slack에 summary, query/lag 현재 값과 Spark Streaming
+dashboard 링크를 보내 사람이 원인을 확인한다.
+
+90초 기준은 `STREAM_MAX_TRIGGER_DELAY`를 30초로 줄이는 #557과 함께 배포하는 것을
+전제로 한다. 현재 기본값 5분을 유지한 채 이 규칙만 먼저 배포하면 입력량이
+`STREAM_MIN_OFFSETS_PER_TRIGGER`에 도달하지 않은 정상 대기 중에도 경고할 수 있으므로,
+#557 배포 전에는 이 규칙을 운영에 적용하지 않는다.
+
 `infrastructure` 그룹은 원래 `ProjectDiskPressure`(#504) 하나였다. 이번에 EC2 3대
 공통 host alert와 monitoring self-health alert를 이 그룹에 합치면서
 `ProjectDiskPressure`는 지웠다 — 아래 [Infrastructure Alert](#infrastructure-alert)의
@@ -731,7 +758,7 @@ stream-processor 상태를 재검증하도록 만들어져 있다(#447 설계, s
 Prometheus 상태=..." 메시지가 Slack에 나간다 — 둘 다 기존 ops-agent 동작을
 깨뜨리지 않으면서 새 alert를 제대로 다루는 방법이 아니다. `infra-slack`은
 webhook 없는 Slack 전용 contact point라 이 문제 자체가 생기지 않는다. 기존
-`StreamProcessorDown`/`StreamProcessorStale`은 `service: infrastructure` 라벨이
+`StreamProcessorDown`과 Bronze 적재 경고들은 `service: infrastructure` 라벨이
 없어 그대로 default(`ops-agent`) route로 간다 — **동작 변화 없음**.
 
 Slack Bot Token/채널은 새로 만들지 않고 기존 `$GRAFANA_SLACK_BOT_TOKEN`/
@@ -1014,6 +1041,9 @@ metric들을 갱신한다.
 | `stream_processor_batch_duration_seconds` | Histogram | `durationMs.triggerExecution` 기준 배치 전체 소요 시간(초) |
 | `stream_processor_last_progress_timestamp_seconds` | Gauge | 마지막 progress 이벤트의 Unix epoch 초 |
 | `stream_processor_query_failures_total` | Counter | 예외로 종료된 횟수(`QueryTerminatedEvent.exception`이 있을 때만 증가) |
+| `stream_processor_event_time_lag_seconds` | Gauge | 최근 배치의 최신 event time과 현재 시각 차이(초) |
+| `stream_processor_kafka_offset_lag` | Gauge | 최근 micro-batch progress가 보고한 Kafka offset lag |
+| `stream_processor_kafka_end_offset_sum` | Gauge | 최근 성공한 micro-batch가 commit한 Kafka end offset의 partition 합 |
 
 패널별 PromQL:
 
@@ -1026,7 +1056,7 @@ metric들을 갱신한다.
 | Micro-batch Duration (p50/p95) | `histogram_quantile(0.50, sum by (le) (rate(stream_processor_batch_duration_seconds_bucket{job="stream-processor"}[5m])))` (p95는 quantile 값만 교체) |
 | Last Progress Age | `(time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}) and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)` |
 | Freshness over Time | 위 Last Progress Age + Event-Time Lag를 시간축(range query)으로 합친 그래프 — 둘 다 초 단위, 같은 330초 threshold를 써서 한 그래프에 둔다 |
-| Kafka Offset Lag over Time | `stream_processor_kafka_offset_lag{job="stream-processor"}`를 시간축으로 — record 개수 단위라 Freshness(초 단위)와 축이 달라 별도 그래프로 뒀다 |
+| Kafka Offset Lag over Time | Kafka Exporter의 topic offset 합에서 `stream_processor_kafka_end_offset_sum`을 뺀 live backlog를 시간축으로 표시 |
 | Total Input Rows | `stream_processor_input_rows_total{job="stream-processor"}` |
 | Query Failures | `stream_processor_query_failures_total{job="stream-processor"}` |
 
@@ -1243,8 +1273,9 @@ range query로 그대로 재사용한다(instant 제거).
 
 - Kafka `HIGH LAG`: `kafka_consumergroup_lag`에 정상 범위로 합의된 기준이
   없다. Consumer Lag 패널도 threshold 없이 raw 값만 보여준다.
-- Spark `KAFKA BACKLOG`: `stream_processor_kafka_offset_lag`도 같은 이유로
-  threshold가 없다(#426에서 추가할 때부터 명시).
+- Spark `KAFKA BACKLOG` 절대값: 정상 backlog 크기로 합의한 기준이 없어
+  임의 threshold를 두지 않는다. 대신 Kafka 입력 중 2분 연속으로
+  backlog가 커지는 추세를 `BronzeIngestionLagGrowing`으로 감지한다.
 - Serving API `HIGH 5XX`/`HIGH LATENCY`: 5xx rate와 p95 latency 모두 이
   프로젝트에 확립된 SLA가 없다. 실제 운영 기준이 정해지면 이 패널들에
   추가한다.

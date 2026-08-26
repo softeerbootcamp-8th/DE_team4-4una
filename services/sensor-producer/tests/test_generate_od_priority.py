@@ -63,7 +63,7 @@ def test_filter_valid_od_drops_null_and_excluded_locations_but_keeps_same_zone()
 
     valid = filter_valid_od(total)
 
-    assert set(zip(valid["pu_location_id"], valid["do_location_id"])) == {(236, 161), (236, 236)}
+    assert set(zip(valid["pu_location_id"], valid["do_location_id"], strict=True)) == {(236, 161), (236, 236)}
     assert not valid["pu_location_id"].isin(EXCLUDED_LOCATION_IDS).any()
     assert not valid["do_location_id"].isin(EXCLUDED_LOCATION_IDS).any()
 
@@ -120,7 +120,7 @@ def test_select_top_od_breaks_ties_deterministically():
 
     top = select_top_od(scored, top_n=2)
 
-    assert list(zip(top["pu_location_id"], top["do_location_id"])) == [(300, 400), (161, 87)]
+    assert list(zip(top["pu_location_id"], top["do_location_id"], strict=True)) == [(300, 400), (161, 87)]
     assert list(top["priority_rank"]) == [1, 2]
 
 

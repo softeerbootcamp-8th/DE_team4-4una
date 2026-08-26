@@ -18,7 +18,7 @@ from __future__ import annotations
 _SUMMARY_TASK_IDS: dict[str, str] = {
     "current_score_pipeline": "compute_current_score",
     "zone_weather_pipeline": "collect_weather",
-    "bronze_compaction": "compact_zone_weather_snapshot",
+    "zone_weather_compaction": "compact_zone_weather_snapshot",
     "bronze_sensor_events_compaction": "compact_sensor_events",
     # report_pipeline_counts는 quality_validation TaskGroup 안에 있어 접두사가 붙는다
     # — dags/standard_score_pipeline.py 참고.
@@ -55,9 +55,14 @@ _MAX_EVIDENCE_CHARS = 1200
 # 알림 시점에 조회할 Variable 이름.
 _SECRET_VARIABLE_NAMES = ("POSTGRES_PASSWORD",)
 
-# 첫 실패 알림의 Slack 메시지 ts를 이 키로 XCom에 남긴다. 이후 재시도/최종 실패/복구
+# 첫 실패 알림의 Slack 메시지 ts를 이 확장자로 S3에 남긴다. 이후 재시도/최종 실패/복구
 # 알림이 같은 스레드에 붙어, 채널에는 실패한 task당 메시지가 1개만 남는다.
-_ALERT_THREAD_TS_XCOM_KEY = "slack_alert_thread_ts"
+#
+# XCom에 두었더니 실제 실행에서 스레드가 묶이지 않았다 — Airflow가 재시도 시 그 task
+# instance의 XCom을 지워서 2차 콜백이 ts를 찾지 못했다. 재시도를 넘겨 살아남아야 하므로
+# _write_failure_record와 같은 S3 경로(dag_id/task_id/run_id)에 둔다. 키가 이 DAG Run의
+# 이 task 하나에 정확히 대응해 경합도 없다.
+_ALERT_THREAD_TS_SUFFIX = ".thread"
 
 # 레지스트리에 dag_id가 없어 조회가 깨져도 알림은 나가야 한다 — 실패했는데 알림이 오지
 # 않는 것이 가장 알아채기 어려운 형태다.
@@ -276,18 +281,24 @@ def _resolve_owner_and_severity(dag_id: str, task_id: str, task_group_id: str | 
         )
 
 
+def _thread_ts_uri(context: dict) -> str:
+    from de4_core import join_uri
+
+    return join_uri(
+        _failed_tasks_s3_root(),
+        context["dag"].dag_id,
+        context["task_instance"].task_id,
+        f"{context['run_id']}{_ALERT_THREAD_TS_SUFFIX}",
+    )
+
+
 def _pull_thread_ts(context: dict) -> str | None:
-    task_instance = context.get("task_instance")
-    if task_instance is None:
-        return None
+    from de4_core import ObjectStore
+
     try:
-        return (
-            task_instance.xcom_pull(
-                task_ids=task_instance.task_id, key=_ALERT_THREAD_TS_XCOM_KEY
-            )
-            or None
-        )
+        return ObjectStore().read_bytes(_thread_ts_uri(context)).decode("utf-8").strip() or None
     except Exception:  # noqa: BLE001
+        # 첫 실패라 아직 없거나(정상), 조회가 실패한 경우. 채널에 새 메시지로 보낸다.
         return None
 
 
@@ -300,7 +311,9 @@ def _remember_thread_ts(context: dict, response) -> None:
     if not ts:
         return
     try:
-        context["task_instance"].xcom_push(key=_ALERT_THREAD_TS_XCOM_KEY, value=ts)
+        from de4_core import ObjectStore
+
+        ObjectStore().write_bytes(_thread_ts_uri(context), str(ts).encode("utf-8"))
     except Exception:  # noqa: BLE001
         return
 
