@@ -27,7 +27,7 @@ Grafana Alert
   -> Incident로 변환 (Grafana raw payload에 직접 결합하지 않음)
   -> firing이 아니면 종료
   -> Prometheus 재검증 (Grafana가 stale할 수 있어 그대로 믿지 않음)
-     -> 이미 정상이면 종료
+     -> 이미 정상이면 Slack 알림 후 종료 (조치 없음 — 침묵하지 않는다)
   -> 진단 수집 (컨테이너 상태 / 재시작 횟수 / 최근 로그, SSH)
   -> 조치 허용 여부 판정 (policy.py의 allowlist, auto_remediate 라벨)
      -> 허용 안 됨 -> Slack 알림 + 담당자 escalation, 조치 없음
@@ -35,16 +35,22 @@ Grafana Alert
      -> cooldown 중 -> Slack 알림 + escalation, 조치 없음
   -> 허용된 조치 실행 (고정된 argv만 SSH로 실행, 임의 쉘 문자열 없음)
   -> 복구 대기하며 폴링 (docker restart 직후는 아직 안 뜬 상태라 즉시 판정하지 않음)
-  -> Slack 알림 (성공/실패 모두, 실패 시 담당자 멘션)
+  -> Slack 알림 (성공/실패 모두, 실패 시에만 담당자 멘션)
+     실행한 명령이 읽기/변경으로 나뉘어 원문 그대로 실린다.
+     로그 tail은 본문이 아니라 스레드 답글로 분리된다.
+  -> 조치 이력을 append-only로 누적 (알림에 최근 7일 실행 횟수가 함께 나간다)
 ```
 
 각 단계는 별도 모듈이 책임집니다: `models.py`(파싱), `prometheus_client.py`(재검증),
-`diagnostics.py`(진단), `policy.py`(허용 판정), `incident_store.py`(중복 방지),
-`remediation.py`(조치 실행), `owners.py`/`slack_notifier.py`(알림),
-`orchestrator.py`(위 전체를 순서대로 엮음).
+`diagnostics.py`(진단), `policy.py`(허용 판정), `incident_store.py`(중복 방지 + 실행 이력),
+`remediation.py`(조치 실행), `owners.py`/`slack_notifier.py`(전송),
+`notification.py`(알림 본문 조립), `orchestrator.py`(위 전체를 순서대로 엮음).
 
 ## 자동 조치 가능 범위 / 의도적으로 자동화하지 않은 범위
 
+- 무엇을 자동 실행해도 되는지의 판정 기준은
+  [ADR-0013](../../docs/adr/0013-immediate-remediation-without-slack-approval.md)에 있다.
+  Slack 예/아니오 승인 게이트를 두지 않기로 한 근거도 같은 문서에 있다.
 - 현재 구현된 조치는 `restart_stream_processor` (`docker restart stream-processor`)
   뿐입니다. `RemediationAction`에 `RESTART_SERVING_API`, `RESTART_AIRFLOW_SCHEDULER`가
   이미 정의돼 있지만 `IMPLEMENTED_ACTIONS`에는 포함되지 않아 실제로는 항상

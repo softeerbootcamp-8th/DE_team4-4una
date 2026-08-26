@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ops_agent.ssh import SshTarget, run_remote_command
+from ops_agent.ssh import CommandKind, ExecutedCommand, SshTarget, run_remote_command
 
 # deploy-stream-processor.yml의 `CONTAINER: stream-processor`와 반드시 같아야 한다.
 STREAM_PROCESSOR_CONTAINER_NAME = "stream-processor"
@@ -17,6 +17,7 @@ class StreamProcessorDiagnostics:
     container_status: str
     restart_count: int | None
     recent_logs: str
+    commands: tuple[ExecutedCommand, ...]
 
 
 def collect_stream_processor_diagnostics(target: SshTarget) -> StreamProcessorDiagnostics:
@@ -29,12 +30,14 @@ def collect_stream_processor_diagnostics(target: SshTarget) -> StreamProcessorDi
             "{{.State.Status}}|{{.RestartCount}}",
             STREAM_PROCESSOR_CONTAINER_NAME,
         ],
+        kind=CommandKind.READ,
     )
     if not inspect.ok:
         return StreamProcessorDiagnostics(
             container_status="not found",
             restart_count=None,
             recent_logs=inspect.stderr.strip(),
+            commands=(inspect.command,),
         )
 
     status_field, _, restart_field = inspect.stdout.strip().partition("|")
@@ -46,9 +49,11 @@ def collect_stream_processor_diagnostics(target: SshTarget) -> StreamProcessorDi
     logs = run_remote_command(
         target,
         ["docker", "logs", "--tail", str(_LOG_TAIL_LINES), STREAM_PROCESSOR_CONTAINER_NAME],
+        kind=CommandKind.READ,
     )
     return StreamProcessorDiagnostics(
         container_status=status_field or "unknown",
         restart_count=restart_count,
         recent_logs=(logs.stdout + logs.stderr).strip(),
+        commands=(inspect.command, logs.command),
     )
