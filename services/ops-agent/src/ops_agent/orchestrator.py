@@ -17,7 +17,7 @@ from ops_agent.notification import (
     build_notification,
 )
 from ops_agent.owners import ServiceOwnersRegistry
-from ops_agent.policy import PolicyDecision, decide
+from ops_agent.policy import ACTION_SPECS, PolicyDecision, decide
 from ops_agent.prometheus_client import (
     STREAM_PROCESSOR_HEALTH,
     PrometheusClient,
@@ -128,7 +128,7 @@ class OpsAgentOrchestrator:
                 ),
             )
 
-        policy_decision = decide(incident)
+        policy_decision = decide(incident, ACTION_SPECS.get(incident.alertname))
         self._log_stage(
             "policy", incident, allowed=policy_decision.allowed, reason=policy_decision.reason
         )

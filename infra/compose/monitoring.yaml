@@ -54,12 +54,17 @@ services:
       STREAM_PROCESSOR_SSH_HOST: ${STREAM_PROCESSOR_SSH_HOST:?STREAM_PROCESSOR_SSH_HOST is required}
       STREAM_PROCESSOR_SSH_USER: ${STREAM_PROCESSOR_SSH_USER:-ec2-user}
       STREAM_PROCESSOR_SSH_KEY_PATH: /run/ops-agent/stream_processor.pem
+      # serving-api / node-exporter restart 대상(#547). 위와 같은 이유로 기본값을 두지 않는다.
+      PROJECT_SSH_HOST: ${PROJECT_SSH_HOST:?PROJECT_SSH_HOST is required}
+      PROJECT_SSH_USER: ${PROJECT_SSH_USER:-ec2-user}
+      PROJECT_SSH_KEY_PATH: /run/ops-agent/project.pem
       DAG_OWNERS_CONFIG_PATH: /etc/de4/dag_owners.yaml
       OPS_AGENT_INCIDENT_STORE_PATH: /data/ops_agent_incidents.sqlite3
     volumes:
       - ../../config/dag_owners.yaml:/etc/de4/dag_owners.yaml:ro
       # 커밋되지 않는 파일이다(.gitignore의 *.pem) — Monitoring EC2에 직접 준비해야 한다.
       - ../monitoring/ops-agent/stream_processor.pem:/run/ops-agent/stream_processor.pem:ro
+      - ../monitoring/ops-agent/project.pem:/run/ops-agent/project.pem:ro
       - ops-agent-data:/data
     networks:
       - monitoring
