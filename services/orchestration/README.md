@@ -110,7 +110,7 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
   쓴다.
 - `ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`, `BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI`
   — `zone_weather_pipeline`(`jobs/weather.py`)이 15분마다 쓰는 Bronze
-  `zone_weather_snapshot` 이력의 root와, `bronze_compaction`(`jobs/bronze_compaction.py`,
+  `zone_weather_snapshot` 이력의 root와, `zone_weather_compaction`(`jobs/zone_weather_compaction.py`,
   #271)이 그 소파일을 압축할 때 읽는 root다(#400). **두 값은 항상 같은 root를
   가리켜야 한다** — 하나만 바꾸면 compaction이 새 파일을 못 찾는다. 로컬에서는
   비워 두면 `infra/compose/airflow.yaml`이 둘 다 같은 로컬 기본값
@@ -131,7 +131,7 @@ PostgreSQL에 없다. `road_segment`/`zone_master`는 reference S3 버킷에서 
   `target_time`으로 재실행되면 같은 object 키(`weather_date=D/weather_time=T.parquet`)를
   덮어써 중복 snapshot이 생기지 않는 기존 계약을 그대로 유지한다. S3를 쓰려면
   Airflow(Project) EC2의 IAM Role에 **Data Lake 버킷**에 대한 `s3:GetObject`,
-  `s3:PutObject`, `s3:DeleteObject`(`bronze_compaction`이 병합 후 원본을 지우는 데
+  `s3:PutObject`, `s3:DeleteObject`(`zone_weather_compaction`이 병합 후 원본을 지우는 데
   필요), `s3:ListBucket` 권한이 미리 부여돼 있어야 한다 — reference 버킷과 권한
   요구사항이 다르다(reference는 읽기 전용, 이 버킷은 읽기/쓰기/삭제).
 - `AIRFLOW_VAR_POSTGRES_HOST` 등 `AIRFLOW_VAR_POSTGRES_*` 5개 키,
@@ -468,11 +468,11 @@ path/`file://`/`s3://` URI를 모두 받고, 반환값도 항상 URI다. 운영�
 `ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`를 `bronze/weather-snapshots`를 가리키는
 `s3://...`로 채운다 — 이 project의 Data Lake 계약상 zone_weather_snapshot은
 가공 전 raw collection history이므로 Silver가 아니라 **Bronze**다. `de4-core`는
-`bronze_compaction`(#271)이 처음 쓴 이래로 이미 이 컨테이너에 볼륨 마운트 +
+`zone_weather_compaction`(#271)이 처음 쓴 이래로 이미 이 컨테이너에 볼륨 마운트 +
 `PYTHONPATH`로 들어와 있다(공식 이미지에 설치돼 있는 게 아니다 — 위 compose
 주석 참고) — 새 boto3 코드를 여기에 추가하지 않았다.
 
-`bronze_compaction`(#271, `jobs.bronze_compaction`)은 이 `zone_weather_snapshot`을
+`zone_weather_compaction`(#271, `jobs.zone_weather_compaction`)은 이 `zone_weather_snapshot`을
 날짜 파티션별로 소파일 병합하는 job이다 — `BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI`가
 `ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI`와 **항상 같은 root**를 가리켜야 이 job이 weather
 수집이 방금 쓴 파일을 찾는다. 두 값 다 비우면 같은 로컬 기본 경로를 쓰므로 로컬에서는
@@ -686,7 +686,7 @@ docker stop de4-airflow-backfill-scheduler
 ## DAG 실행 결과 Slack 알림 + 담당자 레지스트리 (#409)
 
 `standard_score_pipeline`, `current_score_pipeline`, `zone_weather_pipeline`,
-`data_quality_audit`, `bronze_compaction` 5개 DAG(`hello_world` 제외)는
+`data_quality_audit`, `zone_weather_compaction` 5개 DAG(`hello_world` 제외)는
 `dags/notifications.py`의 공용 콜백을 쓴다. task가 재시도까지 소진하고
 최종 실패하면 담당자 멘션·심각도·처리 일자·처리 건수(이미 성공한 상위
 task가 있을 때만, 없으면 정직하게 "집계되지 않음")·Task Instance URL을

@@ -213,7 +213,7 @@ monthly result.
 ### Bronze compaction
 
 Bronze `zone_weather_snapshot` accumulates small files from its 15-minute writer. An
-independent, low-frequency `bronze_compaction` DAG (no outlets, does not block or gate
+independent, low-frequency `zone_weather_compaction` DAG (no outlets, does not block or gate
 other DAGs) merges same-partition objects once they are old enough that no further
 writes are expected, verifying row counts before discarding the originals.
 `sensor-events` was dropped from this DAG's scope after discovering that in-place
