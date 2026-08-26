@@ -133,8 +133,9 @@ def run_hourly_segment_feature_job(
     _require_matching_road_snapshot_date(road_segment_df, road_snapshot_date)
 
     search_radius_m = matching_config.candidate_search_radius_m.value
-    # candidate expansion/Window 없이 mapInPandas 안에서 검색부터 선택까지 끝내 event당 결과 1행만 반환한다(#479).
-    selected = match_segment_candidates(
+    # candidate expansion/Window 없이 mapInPandas 안에서 검색부터 선택까지 끝내 event당 결과 1행만
+    # 반환하고(#479), 센서 컬럼도 함께 통과시켜 되붙이는 조인 없이 바로 쓴다(#560).
+    matched = match_segment_candidates(
         sensor_df,
         road_segment_df,
         search_radius_m,
@@ -147,10 +148,10 @@ def run_hourly_segment_feature_job(
     # 자유 형식 로그에 실었는데, pipeline-perf가 PERF 줄만 파싱해 리포트에 들어오지
     # 않았다. 아래 phase는 모두 이미 있던 count()/write 경계에 붙어, 시간을 재려고
     # 액션을 새로 강제하지 않는다.
+    # 조인 경계가 사라져도 phase 경계는 그대로 둔다 — 여전히 matched 프레임을 materialize하는
+    # 시간을 재므로 #560 전후 비교가 성립한다.
     with perf_phase(logger, "sensor_processing.map_matching") as map_matching_fields:
-        matched_df = sensor_df.join(selected, on="event_id", how="left").persist(
-            StorageLevel.MEMORY_AND_DISK
-        )
+        matched_df = matched.persist(StorageLevel.MEMORY_AND_DISK)
         matched_count = matched_df.count()
         map_matching_fields["rows"] = matched_count
     try:
