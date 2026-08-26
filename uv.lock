@@ -759,7 +759,6 @@ version = "0.1.0"
 source = { editable = "services/dashboard" }
 dependencies = [
     { name = "boto3" },
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pyarrow" },
@@ -776,7 +775,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.40,<2.0" },
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.120.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -1114,8 +1112,8 @@ name = "httpcore2"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/83/a896fc59940fc5a6e2aff3a4be1d92fa890112936803b331cae75a993c34/httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc", size = 67427, upload-time = "2026-08-09T09:11:32.123Z" }
 wheels = [
@@ -1665,7 +1663,6 @@ name = "ops-agent"
 version = "0.1.0"
 source = { editable = "services/ops-agent" }
 dependencies = [
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -1681,7 +1678,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.136.3,<0.137.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32,<3.0" },
@@ -2588,7 +2584,6 @@ name = "serving-api"
 version = "0.1.0"
 source = { editable = "services/serving-api" }
 dependencies = [
-    { name = "de4-core" },
     { name = "fastapi" },
     { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary", "pool"] },
@@ -2603,7 +2598,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "de4-core", editable = "libs/de4-core" },
     { name = "fastapi", specifier = ">=0.136.3,<0.137.0" },
     { name = "prometheus-client", specifier = ">=0.21" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.3.4" },
