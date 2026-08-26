@@ -30,3 +30,27 @@ members = [
     "services/*",
     "tools/*",
 ]
+
+# docs/code-style.md의 "한 줄 99자" 규칙을 도구 설정으로 고정한다.
+[tool.ruff]
+line-length = 99
+
+[tool.ruff.lint]
+# 기본(E4/E7/E9/F)에 더해:
+#   W   공백·개행 위생
+#   B   bugbear — 실수하기 쉬운 패턴(raise-from 누락, strict 없는 zip 등)
+#   C4  불필요한 comprehension/자료형 변환 정리
+#   BLE 블라인드 except 금지 — 예외를 흡수하는 곳은 noqa: BLE001로 근거를 남긴 경우만 허용
+select = ["E", "F", "W", "B", "C4", "BLE"]
+# E501(줄 길이)은 기존 위반 310건을 정리하기 전까지 보류한다(후속 이슈로 추적).
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# DAG 테스트는 DagBag의 sys.path 주입을 수동 재현한 뒤에야 import할 수 있어
+# E402(모듈 상단 import)가 구조상 불가피하다.
+"**/tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+# 루트 실행(make test)에서 docs/infra 등 테스트 없는 트리 스캔을 피한다.
+# CI는 pytest에 경로 인자를 항상 명시하므로 이 설정의 영향을 받지 않는다.
+testpaths = ["libs", "services", "tools", "tests"]
