@@ -135,7 +135,9 @@ class OpsAgentOrchestrator:
                 summary=f"{incident.alertname}: cooldown active, skipped remediation, escalated",
             )
 
-        self._incident_store.record_attempt(incident.fingerprint, policy_decision.action.value)
+        self._incident_store.record_attempt(
+            incident.fingerprint, incident.alertname, policy_decision.action.value
+        )
         remediation_result = self._remediate(self._ssh_target)
 
         post_status = self._wait_for_recovery()
