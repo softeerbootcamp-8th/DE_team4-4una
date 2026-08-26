@@ -45,22 +45,36 @@
       "id": 8,
       "type": "stat",
       "title": "Pipeline Health",
-      "description": "5개 핵심 경로(Project EC2/Host, Kafka, Airflow scheduler, Spark Streaming, Serving API)가 하나라도 DOWN이면 FAILED. 전부 UP인데 부가 신호(Airflow DAG Import Errors>0 또는 Serving API 5xx>0)가 있으면 DEGRADED. 둘 다 아니면 HEALTHY. 각 신호는 Component Status/Key Metrics 패널과 같은 query를 그대로 재사용한다(A=EC2 up, B=Kafka up bool, C=Airflow heartbeat bool, D=Spark query_running, E=Serving API up, F=Airflow import errors>0 bool, G=Serving API 5xx rate>0 bool). EMR Serverless는 의도적으로 이 판정에서 제외했다 — RunningJobs=0은 정상 idle이라 장애 신호로 못 쓰고, Prometheus(A~G)와 CloudWatch(EMR)를 하나의 Grafana expression에서 결합하는 건 현재 버전(12.4.8)에서 동작이 보장된다고 확신할 수 없어 억지로 만들지 않았다 — EMR 상태는 별도 Component Status/Key Metrics 카드로 확인한다. 입력 metric이 no-data가 되면(exporter 자체가 죽는 등) 이 패널도 no-data로 표시되어 장애가 HEALTHY로 숨겨지지 않는다.",
+      "description": "5개 핵심 경로(Project EC2/Host, Kafka, Airflow scheduler, Spark Streaming, Serving API) 중 하나라도 확인된 DOWN이면 UNHEALTHY. DOWN은 아닌데 그중 하나라도 metric 자체가 없으면(exporter가 죽어 scrape가 안 되는 등, absent) UNKNOWN — NO DATA를 곧바로 장애로 표시하지 않기 위해 DOWN과 분리했다. 다섯 경로 모두 확인 가능하고 정상인데 부가 신호(Airflow DAG Import Errors>0 또는 Serving API 5xx>0)가 있으면 DEGRADED. 그 외엔 HEALTHY. 각 신호는 Component Status/Key Metrics 패널과 같은 query를 그대로 재사용한다(A=EC2 up, B=Kafka up bool, C=Airflow heartbeat bool, D=Spark query_running, E=Serving API up, F=Airflow import errors>0 bool, G=Serving API 5xx rate>0 bool). A~E는 각각 `or vector(2)`로 감싸 metric이 없을 때 UNKNOWN을 뜻하는 값 2를 강제로 채운다 — PromQL의 `or`는 왼쪽에 이미 결과가 있으면 오른쪽을 무시하는 성질을 이용한 것이라, 실제로 값이 있을 때는 원래 쿼리 결과가 그대로 쓰인다. I=down_count(0인 신호 개수), J=unknown_count(2인 신호 개수)는 최종 판정(H)을 읽기 쉽게 나누기 위한 중간 계산이다. EMR Serverless는 의도적으로 이 판정에서 제외했다 — RunningJobs=0은 정상 idle이라 장애 신호로 못 쓰고, Prometheus(A~G)와 CloudWatch(EMR)를 하나의 Grafana expression에서 결합하는 건 현재 버전(12.4.8)에서 동작이 보장된다고 확신할 수 없어 억지로 만들지 않았다 — EMR 상태는 별도 Component Status/Key Metrics 카드로 확인한다. 이 패널 자체가 no-data로 보이는 경우는 Prometheus datasource 자체에 문제가 있을 때뿐이다(개별 서비스의 metric 부재는 이제 UNKNOWN으로 명시적으로 표시된다).",
       "datasource": { "type": "datasource", "uid": "-- Mixed --" },
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "min(up{job=~\"project-node|project-containers\"})", "legendFormat": "ec2-up", "instant": true, "hide": true },
-        { "refId": "B", "datasource": "Prometheus", "expr": "kafka_brokers{job=\"kafka\"} > bool 0", "legendFormat": "kafka-up", "instant": true, "hide": true },
-        { "refId": "C", "datasource": "Prometheus", "expr": "sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) > bool 0", "legendFormat": "airflow-up", "instant": true, "hide": true },
-        { "refId": "D", "datasource": "Prometheus", "expr": "stream_processor_query_running{job=\"stream-processor\"}", "legendFormat": "spark-running", "instant": true, "hide": true },
-        { "refId": "E", "datasource": "Prometheus", "expr": "up{job=\"serving-api\"}", "legendFormat": "servingapi-up", "instant": true, "hide": true },
-        { "refId": "F", "datasource": "Prometheus", "expr": "airflow_dag_processing_import_errors{job=\"airflow\"} > bool 0", "legendFormat": "airflow-import-errors", "instant": true, "hide": true },
+        { "refId": "A", "datasource": "Prometheus", "expr": "(min(up{job=~\"project-node|project-containers\"})) or vector(2)", "legendFormat": "ec2-up", "instant": true, "hide": true },
+        { "refId": "B", "datasource": "Prometheus", "expr": "(kafka_brokers{job=\"kafka\"} > bool 0) or vector(2)", "legendFormat": "kafka-up", "instant": true, "hide": true },
+        { "refId": "C", "datasource": "Prometheus", "expr": "(sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) > bool 0) or vector(2)", "legendFormat": "airflow-up", "instant": true, "hide": true },
+        { "refId": "D", "datasource": "Prometheus", "expr": "(stream_processor_query_running{job=\"stream-processor\"}) or vector(2)", "legendFormat": "spark-running", "instant": true, "hide": true },
+        { "refId": "E", "datasource": "Prometheus", "expr": "(up{job=\"serving-api\"}) or vector(2)", "legendFormat": "servingapi-up", "instant": true, "hide": true },
+        { "refId": "F", "datasource": "Prometheus", "expr": "(airflow_dag_processing_import_errors{job=\"airflow\"} > bool 0) or vector(0)", "legendFormat": "airflow-import-errors", "instant": true, "hide": true },
         { "refId": "G", "datasource": "Prometheus", "expr": "(sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)) > bool 0", "legendFormat": "servingapi-5xx", "instant": true, "hide": true },
+        {
+          "refId": "I",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "hide": true,
+          "expression": "($A==0)+($B==0)+($C==0)+($D==0)+($E==0)"
+        },
+        {
+          "refId": "J",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "hide": true,
+          "expression": "($A==2)+($B==2)+($C==2)+($D==2)+($E==2)"
+        },
         {
           "refId": "H",
           "datasource": { "type": "__expr__", "uid": "__expr__" },
           "type": "math",
-          "expression": "(((1-$A)+(1-$B)+(1-$C)+(1-$D)+(1-$E)) > 0) * 2 + ((((1-$A)+(1-$B)+(1-$C)+(1-$D)+(1-$E)) == 0) && (($F+$G) > 0)) * 1"
+          "expression": "($I>0)*3 + (($I==0)&&($J>0))*2 + (($I==0)&&($J==0)&&(($F+$G)>0))*1"
         }
       ],
       "options": {
@@ -86,7 +100,8 @@
               "options": {
                 "0": { "text": "HEALTHY", "color": "green", "index": 0 },
                 "1": { "text": "DEGRADED", "color": "orange", "index": 1 },
-                "2": { "text": "FAILED", "color": "red", "index": 2 }
+                "2": { "text": "UNKNOWN", "color": "blue", "index": 2 },
+                "3": { "text": "UNHEALTHY", "color": "red", "index": 3 }
               }
             }
           ],
@@ -95,7 +110,8 @@
             "steps": [
               { "color": "green", "value": null },
               { "color": "orange", "value": 1 },
-              { "color": "red", "value": 2 }
+              { "color": "blue", "value": 2 },
+              { "color": "red", "value": 3 }
             ]
           }
         },
@@ -458,7 +474,7 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 12, "w": 5, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(kafka_topic_partition_current_offset{job=\"kafka\", topic!~\"__.*\"}[5m]))", "legendFormat": "message rate", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(kafka_topic_partition_current_offset{job=\"kafka\", topic!~\"__.*\"}[5m]))", "legendFormat": "message rate" }
       ],
       "options": {
         "reduceOptions": {
@@ -485,7 +501,7 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 5, "y": 12, "w": 5, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_processed_rows_per_second{job=\"stream-processor\"}", "legendFormat": "processed rows/sec", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_processed_rows_per_second{job=\"stream-processor\"}", "legendFormat": "processed rows/sec" }
       ],
       "options": {
         "reduceOptions": {
@@ -512,7 +528,7 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 10, "y": 12, "w": 4, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))", "legendFormat": "p95", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job=\"serving-api\"}[5m])))", "legendFormat": "p95" }
       ],
       "options": {
         "reduceOptions": {
@@ -523,7 +539,7 @@
         "orientation": "horizontal",
         "textMode": "value",
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto"
       },
       "fieldConfig": {
@@ -539,7 +555,7 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 14, "y": 12, "w": 4, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)", "legendFormat": "5xx", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)", "legendFormat": "5xx" }
       ],
       "options": {
         "reduceOptions": {
@@ -550,7 +566,7 @@
         "orientation": "horizontal",
         "textMode": "value",
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto"
       },
       "fieldConfig": {
@@ -569,7 +585,7 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 18, "y": 12, "w": 3, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "airflow_dag_processing_import_errors{job=\"airflow\"}", "legendFormat": "import errors", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "airflow_dag_processing_import_errors{job=\"airflow\"}", "legendFormat": "import errors" }
       ],
       "options": {
         "reduceOptions": {
@@ -580,7 +596,7 @@
         "orientation": "horizontal",
         "textMode": "value",
         "colorMode": "background",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto"
       },
       "fieldConfig": {
@@ -656,7 +672,7 @@
         "orientation": "horizontal",
         "textMode": "value_and_name",
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto"
       },
       "fieldConfig": {
@@ -705,8 +721,8 @@
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 17, "w": 12, "h": 4 },
       "targets": [
-        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_event_time_lag_seconds{job=\"stream-processor\"}", "legendFormat": "event-time lag", "instant": true },
-        { "refId": "B", "datasource": "Prometheus", "expr": "(time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)", "legendFormat": "last progress age", "instant": true }
+        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_event_time_lag_seconds{job=\"stream-processor\"}", "legendFormat": "event-time lag" },
+        { "refId": "B", "datasource": "Prometheus", "expr": "(time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)", "legendFormat": "last progress age" }
       ],
       "options": {
         "reduceOptions": {
@@ -717,7 +733,7 @@
         "orientation": "horizontal",
         "textMode": "value",
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto"
       },
       "fieldConfig": {

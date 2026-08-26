@@ -1,10 +1,4 @@
-# 모니터링 설정을 두 EC2에 배포한다.
-#
-# 배포 호스트가 둘로 갈리므로 아래 select job이 변경 경로를 보고 필요한 쪽만 돌린다.
-#   exporters  -> Project EC2    (node-exporter, cAdvisor)
-#   monitoring -> Monitoring EC2 (Prometheus, Grafana)
-#
-# Prometheus/Grafana는 서드파티 이미지, ops-agent(#447)만 예외로 Monitoring EC2에서 저장소를 통째로 받아 직접 docker build한다(ECR 불필요).
+# 모니터링 설정을 세 EC2(Project/Spark Streaming/Monitoring)에 배포한다 — ops-agent(#447)만 Monitoring EC2에서 저장소 전체를 docker build한다(ECR 불필요), 나머지는 서드파티 이미지.
 name: Deploy Monitoring
 
 on:
@@ -17,8 +11,10 @@ on:
     paths:
       - 'infra/compose/monitoring.yaml'
       - 'infra/compose/exporters.yaml'
+      - 'infra/compose/spark-exporters.yaml'
       - 'infra/monitoring/prometheus/**'
       - 'infra/monitoring/grafana/**'
+      - 'infra/monitoring/blackbox/**'
       - 'services/ops-agent/**'
       - 'libs/de4-core/**'
       - 'pyproject.toml'
@@ -29,6 +25,10 @@ on:
     inputs:
       deploy-exporters:
         description: Project EC2의 exporter를 배포한다
+        type: boolean
+        default: true
+      deploy-spark-exporters:
+        description: Spark Streaming EC2의 exporter를 배포한다
         type: boolean
         default: true
       deploy-monitoring-stack:
@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       exporters: ${{ steps.select.outputs.exporters }}
+      spark-exporters: ${{ steps.select.outputs.spark-exporters }}
       monitoring-stack: ${{ steps.select.outputs.monitoring-stack }}
     steps:
       - uses: actions/checkout@v4
@@ -55,13 +56,13 @@ jobs:
         id: filter
         if: github.event_name != 'workflow_dispatch'
         with:
-          # 워크플로 자신이 양쪽에 다 들어간 것은, 워크플로를 고쳤으면 두 배포가 다
-          # 돌아야 그 변경이 검증되기 때문이다.
+          # 워크플로 자신이 세 군데 다 들어간 것은 고치면 세 배포가 다 돌아야 검증되기 때문이다.
           filters: |
             monitoring-stack:
               - 'infra/compose/monitoring.yaml'
               - 'infra/monitoring/prometheus/**'
               - 'infra/monitoring/grafana/**'
+              - 'infra/monitoring/blackbox/**'
               - 'services/ops-agent/**'
               - 'libs/de4-core/**'
               - 'pyproject.toml'
@@ -70,29 +71,37 @@ jobs:
             exporters:
               - 'infra/compose/exporters.yaml'
               - '.github/workflows/deploy-monitoring.yml'
+            spark-exporters:
+              - 'infra/compose/spark-exporters.yaml'
+              - '.github/workflows/deploy-monitoring.yml'
 
       - name: Resolve targets
         id: select
         env:
           EVENT: ${{ github.event_name }}
           FILTER_EXPORTERS: ${{ steps.filter.outputs.exporters }}
+          FILTER_SPARK_EXPORTERS: ${{ steps.filter.outputs.spark-exporters }}
           FILTER_STACK: ${{ steps.filter.outputs.monitoring-stack }}
           INPUT_EXPORTERS: ${{ inputs.deploy-exporters }}
+          INPUT_SPARK_EXPORTERS: ${{ inputs.deploy-spark-exporters }}
           INPUT_STACK: ${{ inputs.deploy-monitoring-stack }}
         run: |
           set -euo pipefail
 
           if [ "$EVENT" = "workflow_dispatch" ]; then
             exporters="$INPUT_EXPORTERS"
+            spark_exporters="$INPUT_SPARK_EXPORTERS"
             stack="$INPUT_STACK"
           else
             exporters="$FILTER_EXPORTERS"
+            spark_exporters="$FILTER_SPARK_EXPORTERS"
             stack="$FILTER_STACK"
           fi
 
           echo "exporters=$exporters" >> "$GITHUB_OUTPUT"
+          echo "spark-exporters=$spark_exporters" >> "$GITHUB_OUTPUT"
           echo "monitoring-stack=$stack" >> "$GITHUB_OUTPUT"
-          echo "배포 대상 — exporters: $exporters, monitoring-stack: $stack"
+          echo "배포 대상 — exporters: $exporters, spark-exporters: $spark_exporters, monitoring-stack: $stack"
 
   exporters:
     name: Exporters (Project EC2)
@@ -218,6 +227,127 @@ jobs:
             echo "| 결과 | $JOB_STATUS |"
             echo "| commit | \`${{ github.sha }}\` |"
             echo "| host | \`${EC2_USER}@${EC2_HOST:-(미설정)}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  spark-exporters:
+    name: Exporters (Spark Streaming EC2)
+    needs: select
+    if: needs.select.outputs.spark-exporters == 'true'
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: deploy-monitoring-spark-exporters
+      cancel-in-progress: false
+    env:
+      # Spark Streaming EC2가 Project EC2와 같은 인스턴스인지 미확정이라(#447) 전용 변수를 쓴다.
+      SPARK_EC2_USER: ${{ vars.SPARK_EC2_USER || 'ec2-user' }}
+      TARGET_DIR: ${{ vars.MONITORING_TARGET_DIR || '/home/ec2-user/de4-monitoring' }}
+      HEALTH_TIMEOUT: "60"
+    steps:
+      - name: Check required variables
+        env:
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SPARK_EC2_SSH_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in SPARK_EC2_HOST SSH_PRIVATE_KEY; do
+            eval "value=\${$name}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::필수 설정값이 비어 있습니다:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SPARK_EC2_SSH_PRIVATE_KEY }}
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$SPARK_EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync compose file
+        env:
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${SPARK_EC2_USER}@${SPARK_EC2_HOST}" "mkdir -p '$TARGET_DIR/infra/compose'"
+
+          # 볼륨이 전부 호스트 절대 경로(/proc, /sys, ...)라 이 파일 하나만 있으면 동작한다.
+          rsync -az \
+            -e 'ssh -o StrictHostKeyChecking=yes' \
+            infra/compose/spark-exporters.yaml \
+            "${SPARK_EC2_USER}@${SPARK_EC2_HOST}:${TARGET_DIR}/infra/compose/"
+
+      - name: Start exporters
+        env:
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${SPARK_EC2_USER}@${SPARK_EC2_HOST}" \
+            "cd '$TARGET_DIR' \
+            && docker compose -f infra/compose/spark-exporters.yaml up -d"
+
+      # compose 명령이 성공했다고 컨테이너가 살아 있는 것은 아니다. 실제로 메트릭을
+      # 내놓는지 확인해야 "정상 기동"을 검증한 것이 된다.
+      - name: Wait for exporters
+        env:
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${SPARK_EC2_USER}@${SPARK_EC2_HOST}" "HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
+          set -euo pipefail
+
+          wait_for() {
+            name="$1"
+            url="$2"
+            interval=3
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
+                printf '[health] %s 정상\n' "$name"
+                return 0
+              fi
+              sleep "$interval"
+            done
+
+            printf '[health] %s 실패 (%s)\n' "$name" "$url"
+            docker logs --tail 30 "$name" 2>&1 || true
+            return 1
+          }
+
+          wait_for node-exporter http://localhost:9100/metrics
+          EOF
+
+      - name: Job summary
+        if: always()
+        env:
+          SPARK_EC2_HOST: ${{ vars.SPARK_EC2_HOST }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Exporters 배포 (Spark Streaming EC2)"
+            echo
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 결과 | $JOB_STATUS |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| host | \`${SPARK_EC2_USER}@${SPARK_EC2_HOST:-(미설정)}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   monitoring:
@@ -386,8 +516,9 @@ jobs:
 
           wait_for prometheus http://localhost:9090/-/ready
           wait_for grafana http://localhost:3000/api/health
+          wait_for monitoring-node-exporter http://localhost:9100/metrics
 
-          # ops-agent(#447)는 포트 미공개라 curl로 확인 못 하므로 컨테이너 running 상태만 본다.
+          # ops-agent(#447)/blackbox-exporter는 포트 미공개라 curl로 확인 못 하므로 컨테이너 running 상태만 본다.
           wait_for_running() {
             name="$1"
             interval=3
@@ -408,6 +539,7 @@ jobs:
           }
 
           wait_for_running ops-agent
+          wait_for_running blackbox-exporter
           EOF
 
       # 그래프에 "여기서 배포됨" 선을 찍어 지표 변화와 배포 시점을 바로 연관짓는다.

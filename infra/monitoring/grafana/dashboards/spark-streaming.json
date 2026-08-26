@@ -98,6 +98,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
+          "custom": { "lineWidth": 1, "fillOpacity": 90 },
           "mappings": [
             {
               "type": "value",
@@ -115,7 +116,8 @@
       },
       "options": {
         "mergeValues": true,
-        "showValue": "auto",
+        "showValue": "always",
+        "rowHeight": 0.8,
         "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
@@ -419,11 +421,59 @@
       }
     },
     {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Freshness over Time",
+      "description": "Last Progress Age/Event-Time Lag와 같은 query를 시간축(range query)으로 합쳤다 — 둘 다 초 단위고 같은 330초 threshold를 쓰므로 한 그래프에 같이 둔다(Kafka Offset Lag는 단위가 달라 별도 패널). 예전엔 순간값(stat)+게이지만 있었는데, 330초 threshold에 서서히 가까워지는지 추세로 미리 볼 수 있게 그래프를 추가했다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "(time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)",
+          "legendFormat": "Last Progress Age"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "stream_processor_event_time_lag_seconds{job=\"stream-processor\"}",
+          "legendFormat": "Event-Time Lag"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Kafka Offset Lag over Time",
+      "description": "위 Kafka Offset Lag stat 패널과 같은 query를 시간축(range query)으로 바꿨다. Freshness over Time과 단위(record 개수 vs 초)가 달라 별도 그래프로 뒀다 — 하나의 y축에 같이 그리면 스케일이 달라 서로를 가려버린다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 53, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "stream_processor_kafka_offset_lag{job=\"stream-processor\"}",
+          "legendFormat": "offset lag"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 104,
       "type": "row",
       "title": "Gauges",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 61, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -432,7 +482,7 @@
       "title": "Last Progress Age (Gauge)",
       "description": "위 stat 패널과 같은 query/threshold다(#437) — threshold가 이미 정의돼 있어 Gauge 후보.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 46, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 62, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -471,7 +521,7 @@
       "title": "Event-Time Lag (Gauge)",
       "description": "위 stat 패널과 같은 query/threshold다(#437) — threshold가 이미 정의돼 있어 Gauge 후보.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 46, "w": 12, "h": 4 },
+      "gridPos": { "x": 12, "y": 62, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -509,7 +559,7 @@
       "type": "row",
       "title": "Totals",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 50, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 66, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -517,7 +567,7 @@
       "type": "stat",
       "title": "Total Input Rows",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 51, "w": 12, "h": 4 },
+      "gridPos": { "x": 0, "y": 67, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -548,7 +598,7 @@
       "title": "Query Failures",
       "description": "stream_processor_query_failures_total — 컨테이너가 재시작되지 않고 예외로 종료된 누적 횟수.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 51, "w": 12, "h": 4 },
+      "gridPos": { "x": 12, "y": 67, "w": 12, "h": 4 },
       "targets": [
         {
           "refId": "A",

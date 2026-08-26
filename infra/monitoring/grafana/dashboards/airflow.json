@@ -98,6 +98,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
+          "custom": { "lineWidth": 1, "fillOpacity": 90 },
           "mappings": [
             {
               "type": "value",
@@ -115,7 +116,8 @@
       },
       "options": {
         "mergeValues": true,
-        "showValue": "auto",
+        "showValue": "always",
+        "rowHeight": 0.8,
         "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
@@ -481,11 +483,44 @@
       }
     },
     {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Task Success/Failure Rate over Time",
+      "description": "위 Task Success Rate/Task Failure Rate와 같은 query를 시간축(range query)으로 합쳤다 — 순간값(stat)만으로는 알기 어려운 추세(성공률이 떨어지는 중인지)를 여기서 본다. task가 아직 한 번도 안 끝났으면 0/sec가 정상이다 — or vector(0)로 명시한다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(airflow_ti_successes{job=\"airflow\"}[5m])) or vector(0)",
+          "legendFormat": "successes/sec"
+        },
+        {
+          "refId": "B",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(airflow_ti_failures{job=\"airflow\"}[5m])) or vector(0)",
+          "legendFormat": "failures/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "successes/sec" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "failures/sec" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 11,
       "type": "timeseries",
       "title": "Failures by DAG",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -505,7 +540,7 @@
       "type": "timeseries",
       "title": "Failures by Task",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -525,7 +560,7 @@
       "type": "row",
       "title": "Duration",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 53, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -534,7 +569,7 @@
       "title": "Task Duration",
       "description": "airflow_task_duration_seconds는 statsd/airflow-mapping.yml로 histogram으로 바꾼 metric이다(기본값은 Summary라 p95를 못 구함). Airflow는 StatsD timer(|ms)로 보내지만 statsd_exporter가 노출 시 seconds로 자동 변환한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 46, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 54, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -567,7 +602,7 @@
       "title": "DAG Run Success Duration",
       "description": "성공한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 54, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 62, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -600,7 +635,7 @@
       "title": "DAG Run Failed Duration",
       "description": "실패한 DAG run의 소요 시간(p50/p95/p99). 단위는 seconds.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 62, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 70, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",

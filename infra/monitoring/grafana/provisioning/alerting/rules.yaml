@@ -91,16 +91,14 @@ groups:
         annotations:
           summary: "stream-processor Component Status가 EVENT DATA STALE 또는 PROGRESS STALE 상태로 2분 이상 지속됨 (자동 조치 없음, 확인 필요)"
 
-  # Project EC2 루트 볼륨은 Kafka·Airflow·serving-api·dashboard·Docker 이미지가 공유한다.
-  # 가득 차면 broker만 죽는 게 아니라 scheduler와 API까지 함께 멈춘다(실제로 두 번 발생).
-  # 자동 조치는 붙이지 않는다 -- 디스크 정리는 삭제 동작이라 사람이 판단해야 한다.
+  # EC2 host + self-health alert 그룹 — project-disk-pressure는 DiskWarning의 상위 호환이라 지우고 여기 흡수했다.
   - orgId: 1
     name: infrastructure
     folder: Ops Agent
     interval: 1m
     rules:
-      - uid: project-disk-pressure
-        title: ProjectDiskPressure
+      - uid: infra-node-down
+        title: NodeDown
         condition: C
         data:
           - refId: A
@@ -110,12 +108,113 @@ groups:
               to: 0
             model:
               editorMode: code
-              # node_exporter는 --path.rootfs=/rootfs로 뜨지만 mountpoint 라벨은 "/"로
-              # 그대로 노출된다(실측 확인). device/fstype은 인스턴스 교체 시 바뀔 수
-              # 있어 매칭에 쓰지 않는다.
+              expr: up{job=~"project-node|spark-node|monitoring-node"}
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        labels:
+          service: infrastructure
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }}({{ $labels.instance }})의 node_exporter가 2분 이상 scrape되지 않음"
+
+      - uid: infra-high-cpu
+        title: HighCPU
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
               expr: >-
-                100 * (1 - node_filesystem_avail_bytes{job="project-node",mountpoint="/"}
-                         / node_filesystem_size_bytes{job="project-node",mountpoint="/"})
+                100 - (avg by (instance, job) (rate(node_cpu_seconds_total{job=~"project-node|spark-node|monitoring-node", mode="idle"}[5m])) * 100)
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [85]
+        noDataState: NoData
+        execErrState: Error
+        for: 10m
+        labels:
+          service: infrastructure
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}({{ $labels.instance }}) CPU 사용률이 85%를 10분 이상 초과함"
+
+      - uid: infra-high-memory
+        title: HighMemory
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                100 * (1 - (avg by (instance, job) (node_memory_MemAvailable_bytes{job=~"project-node|spark-node|monitoring-node"}) / avg by (instance, job) (node_memory_MemTotal_bytes{job=~"project-node|spark-node|monitoring-node"})))
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [85]
+        noDataState: NoData
+        execErrState: Error
+        for: 10m
+        labels:
+          service: infrastructure
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}({{ $labels.instance }}) Memory 사용률이 85%를 10분 이상 초과함"
+
+      # mountpoint="/"로 매칭한다(device/fstype은 인스턴스 교체 시 바뀔 수 있어 안 씀).
+      - uid: infra-disk-warning
+        title: DiskWarning
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                100 * (1 - node_filesystem_avail_bytes{job=~"project-node|spark-node|monitoring-node", mountpoint="/"} / node_filesystem_size_bytes{job=~"project-node|spark-node|monitoring-node", mountpoint="/"})
               instant: true
               range: false
               refId: A
@@ -131,11 +230,116 @@ groups:
                     params: [80]
         noDataState: NoData
         execErrState: Error
-        # 대량 segment 삭제나 이미지 pull 중 순간적으로 튀는 것에 반응하지 않게 한다.
+        # 대량 segment 삭제나 이미지 pull 중 순간적으로 튀는 것에 반응하지 않게 한다(project-disk-pressure와 동일 근거).
         for: 10m
+        labels:
+          service: infrastructure
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}({{ $labels.instance }}) root filesystem 사용률이 80%를 10분 이상 초과함"
+
+      - uid: infra-disk-critical
+        title: DiskCritical
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: >-
+                100 * (1 - node_filesystem_avail_bytes{job=~"project-node|spark-node|monitoring-node", mountpoint="/"} / node_filesystem_size_bytes{job=~"project-node|spark-node|monitoring-node", mountpoint="/"})
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [90]
+        noDataState: NoData
+        execErrState: Error
+        # DiskWarning보다 짧게 잡았다 — 디스크가 가득 차기 직전이라 더 빨리 반응해야 한다.
+        for: 5m
+        labels:
+          service: infrastructure
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }}({{ $labels.instance }}) root filesystem 사용률이 90%를 5분 이상 초과함 — 곧 디스크가 가득 참"
+
+      # Grafana 자신의 죽음은 다루지 않는다 — Grafana가 죽으면 Alerting도 같이 죽는 순환 의존이라(README 참고).
+      - uid: self-health-prometheus-unreachable
+        title: PrometheusUnreachable
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: up{job="prometheus"}
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        # Prometheus가 완전히 죽어 쿼리가 실패/no-data여도 장애로 취급해 알림이 나가게 한다.
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        labels:
+          service: infrastructure
+          severity: critical
+        annotations:
+          summary: "Prometheus가 자기 자신을 2분 이상 scrape하지 못함 — 쿼리 실패/no-data도 장애로 간주"
+
+      - uid: self-health-ops-agent-unreachable
+        title: OpsAgentUnreachable
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: probe_success{instance="http://ops-agent:8080/health"}
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
         labels:
           service: infrastructure
           severity: high
         annotations:
-          summary: "Project EC2 루트 디스크 사용률 80% 초과 (Kafka·Airflow·serving-api 공유 볼륨)"
-
+          summary: "blackbox_exporter가 ops-agent /health를 2분 이상 probe하지 못함 — Grafana의 최초 장애 Slack 알림은 계속 동작하지만 ops-agent의 재검증/조치/escalation은 멈춘 상태일 수 있음"

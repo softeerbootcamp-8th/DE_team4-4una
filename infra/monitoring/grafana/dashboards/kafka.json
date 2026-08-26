@@ -97,6 +97,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
+          "custom": { "lineWidth": 1, "fillOpacity": 90 },
           "mappings": [
             {
               "type": "value",
@@ -113,7 +114,8 @@
       },
       "options": {
         "mergeValues": true,
-        "showValue": "auto",
+        "showValue": "always",
+        "rowHeight": 0.8,
         "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
@@ -249,12 +251,36 @@
       }
     },
     {
+      "id": 13,
+      "type": "table",
+      "title": "Under Replicated Partitions",
+      "description": "위 Under Replicated 패널은 개수만 보여준다 — 이 표는 정확히 어느 topic/partition이 under-replicated 상태인지 직접 나열한다(#437 판정이 쓰는 것과 같은 raw metric). 0개면 표가 비어 있는 게 정상이다(장애 아님).",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "kafka_topic_partition_under_replicated_partition{job=\"kafka\"} > 0",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
       "id": 6,
       "type": "timeseries",
       "title": "Message Rate over Time (offset increase, approx.)",
       "description": "kafka_topic_partition_current_offset의 증가율로 근사한 topic별 message rate다. Kafka broker의 byte throughput(Bytes In/Out) JMX metric이 아니다 — 이번 작업 범위에서 제외했다. 내부 토픽은 제외한다. instance도 legend에 포함한다(#437) — exporter가 여러 개가 되면 어느 instance가 보고한 값인지 구분해야 한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -279,8 +305,19 @@
       "type": "row",
       "title": "Consumers",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 1 },
       "panels": []
+    },
+    {
+      "id": 11,
+      "type": "text",
+      "title": "이 프로젝트의 Kafka consumer는 Spark Streaming이다",
+      "description": "",
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "이 프로젝트에서 `sensor-events` 토픽의 consumer는 **Spark Streaming(stream-processor)** 하나뿐이다. 아래 Consumer Lag가 계속 증가한다는 것은 Spark Streaming이 producer가 넣는 속도를 못 따라간다는 뜻이고, 이는 곧 파이프라인 지연(latency)이 커지고 있다는 신호다 — **Consumer Lag Trend** 패널이 이 증가/감소 추세를 직접 보여준다. Spark Streaming dashboard의 `Last Progress Age`/`Event-Time Lag`와 함께 보면 지연이 Kafka 쪽(consumer가 못 따라감)인지 Spark 쪽(마이크로배치 자체가 멈춤)인지 구분하는 데 도움이 된다."
+      }
     },
     {
       "id": 7,
@@ -288,7 +325,7 @@
       "title": "Consumer Lag",
       "description": "consumer group이 아직 하나도 없으면 kafka_consumergroup_lag 자체가 없어 이 패널은 No data다 — 장애가 아니다. README의 Troubleshooting 참고. instance별로 묶는다(#437). Gauge로 바꾸지 않은 이유: 정상 범위에 대한 확립된 기준이 없어 임의 threshold를 만들 수 없다(#437) — 실제 운영 데이터로 기준을 잡은 뒤 검토한다.",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 4 },
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -314,12 +351,42 @@
       }
     },
     {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Consumer Lag Trend (increasing = falling behind)",
+      "description": "kafka_consumergroup_lag_sum(모든 partition 합산, consumergroup별)의 10분 구간 변화율(deriv)이다. 양수면 lag가 계속 쌓이는 중(Spark Streaming이 producer 속도를 못 따라감), 음수면 줄어드는 중(따라잡는 중), 0 근처면 안정 상태다 — 절대값(Consumer Lag)만으로는 알기 어려운 '처리 상태(catching up vs falling behind)'를 직접 보여준다. consumer group이 없으면 No data다(장애 아님, 위 Consumer Lag과 동일).",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 37, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "deriv(sum by (instance, consumergroup) (kafka_consumergroup_lag_sum{job=\"kafka\"})[10m:1m])",
+          "legendFormat": "{{instance}} / {{consumergroup}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 8,
       "type": "timeseries",
       "title": "Consumer Lag by Topic",
       "description": "kafka_consumergroup_lag_sum(모든 partition 합산)을 topic별로 더한다. consumer group이 없으면 No data다. instance도 legend에 포함한다(#437).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 8 },
+      "gridPos": { "x": 12, "y": 37, "w": 12, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -345,7 +412,7 @@
       "title": "Consumer Group Members",
       "description": "consumer group이 없으면 No data다. instance도 legend에 포함한다(#437).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 45, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",

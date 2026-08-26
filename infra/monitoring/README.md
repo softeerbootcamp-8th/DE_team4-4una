@@ -11,14 +11,16 @@ Prometheus/Grafana 모니터링 구성이다.
 - cAdvisor         :8081  --- private VPC --->     127.0.0.1:9090 (host 내부 전용)
 - Serving API      :8000                         - Grafana :3000 (Prometheus/CloudWatch를
 - API metrics      :9101  --- private VPC --->                    datasource로 사용)
-- Kafka            :9092  (Project EC2 안에서만 접근)
-- Kafka Exporter   :9308  --- private VPC --->
-- Airflow (scheduler/dag-processor/api-server)
-    ↓ StatsD UDP 9125 (de4-local 네트워크 내부)
-- StatsD Exporter  :9102  --- private VPC --->
-
-[Spark Streaming EC2]
-- Stream Processor metrics :9103 --- private VPC --->
+- Kafka            :9092  (Project EC2 안에서만 접근)                ↑
+- Kafka Exporter   :9308  --- private VPC --->                     |
+- Airflow (scheduler/dag-processor/api-server)                     | (Docker network 내부)
+    ↓ StatsD UDP 9125 (de4-local 네트워크 내부)                    |
+- StatsD Exporter  :9102  --- private VPC --->     - monitoring-node-exporter :9100
+                                                    - monitoring-cadvisor      :8081
+[Spark Streaming EC2]                              - blackbox-exporter :9115 (Grafana
+- node_exporter            :9100 --- private VPC --->  /api/health, Prometheus /-/ready,
+- cAdvisor                 :8081 --- private VPC --->  ops-agent /health를 외부 probe)
+- Stream Processor metrics :9103 --- private VPC --->  - ops-agent :8080 (webhook)
 
 [EMR Serverless] --- CloudWatch API (AWS) ---> Grafana (CloudWatch datasource, IAM Role)
 ```
@@ -26,8 +28,20 @@ Prometheus/Grafana 모니터링 구성이다.
 - Prometheus는 Project EC2의 private IP를 통해 node_exporter(9100),
   cAdvisor(8081), Serving API 애플리케이션 metrics(9101), Kafka Exporter
   metrics(9308), StatsD Exporter를 통한 Airflow metrics(9102)를 scrape한다.
-- Stream Processor(Spark Structured Streaming) metrics(9103)는 전용 Spark
-  Streaming EC2의 private IP에서 별도로 scrape한다.
+- Stream Processor(Spark Structured Streaming) metrics(9103), Spark Streaming
+  EC2 자신의 host 메트릭(node_exporter, 9100), 그 위에서 뜨는 컨테이너별
+  CPU/Memory(cAdvisor, 8081)는 전용 Spark Streaming EC2의 private IP에서 별도로
+  scrape한다.
+- Monitoring EC2 자신의 host 메트릭(node_exporter)과 그 위에서 뜨는 컨테이너별
+  CPU/Memory(`monitoring-cadvisor`, `infra/compose/monitoring.yaml`)도 수집한다.
+  Prometheus/Grafana와 같은 EC2/Docker 네트워크에서 뜨므로 private IP나
+  `extra_hosts` 없이 Docker DNS(`monitoring-node-exporter:9100`,
+  `monitoring-cadvisor:8080`)로 바로 scrape한다.
+- `blackbox-exporter`는 Grafana(`/api/health`)/Prometheus(`/-/ready`)/Ops
+  Agent(`/health`)를 외부에서 HTTP로 probe해 Prometheus에 저장한다 — 세 서비스
+  모두 자신의 죽음을 스스로 보고할 방법이 마땅치 않아(특히 Grafana는 Alerting
+  엔진 자체가 자기 프로세스 안에서 돎) 외부에서 관찰하는 방식을 택했다. 자세한
+  내용은 아래 [Monitoring self-health](#monitoring-self-health) 참고.
 - EMR Serverless는 Project EC2와 별개로 AWS가 관리하는 서비스라 scrape 대상이
   아니다. Grafana가 CloudWatch datasource로 CloudWatch API를 직접 조회한다.
   자세한 내용은 아래 [EMR Serverless dashboard 지표](#emr-serverless-dashboard-지표)
@@ -44,13 +58,22 @@ Prometheus/Grafana 모니터링 구성이다.
   [Airflow dashboard 지표](#airflow-dashboard-지표) 참고.
 - Grafana는 같은 Docker network에서 `http://prometheus:9090`으로 Prometheus에
   접근한다. Datasource는 [grafana/provisioning/datasources/prometheus.yml](grafana/provisioning/datasources/prometheus.yml)로
-  자동 등록되고, `Project Infrastructure`, `Serving API`, `Kafka`, `Airflow`
-  dashboard도 provisioning으로 자동 생성된다. 자세한 내용은 아래
-  [Grafana Dashboard](#grafana-dashboard) 참고.
+  자동 등록되고, `System Overview`, `Project Infrastructure`, `Serving API`,
+  `Kafka`, `Airflow` dashboard도 provisioning으로 자동 생성된다. 자세한 내용은
+  아래 [Grafana Dashboard](#grafana-dashboard) 참고.
 - `prometheus.yml`에는 실제 AWS private IP를 하드코딩하지 않는다. 대신
   `PROJECT_EC2_PRIVATE_IP`와 `SPARK_EC2_PRIVATE_IP`를 compose의
   `extra_hosts`로 넘겨 Prometheus 컨테이너 안에서 각각 `project-ec2`와
-  `spark-ec2` hostname으로 매핑한다.
+  `spark-ec2` hostname으로 매핑한다. Monitoring EC2 자신은 같은 Docker network
+  안이라 이 매핑조차 필요 없다(위 참고).
+- Prometheus job 이름은 역할별로 구분한다 — `project-node`/`spark-node`/
+  `monitoring-node`(각 EC2의 node_exporter), `project-containers`/
+  `spark-containers`/`monitoring-containers`(각 EC2의 cAdvisor, 컨테이너별
+  CPU/Memory). EC2 3대 공통 alert(`infrastructure` rule group, 아래
+  [Infrastructure Alert](#infrastructure-alert) 참고)는 host 3개 job을 정규식
+  (`project-node|spark-node|monitoring-node`)으로 한 번에 평가한다. System
+  Overview의 Container CPU/Memory Usage 패널도 같은 방식으로 컨테이너 job
+  3개를 정규식으로 합친다.
 
 ## AWS prerequisite
 
@@ -73,6 +96,8 @@ Spark Streaming EC2 Security Group (inbound):
 
 | Port | Protocol | Source |
 | --- | --- | --- |
+| 9100 | TCP | Monitoring EC2 Security Group |
+| 8081 | TCP | Monitoring EC2 Security Group |
 | 9103 | TCP | Monitoring EC2 Security Group |
 
 Kafka broker(9092)는 Monitoring EC2에 새로 공개할 필요가 없다 — Kafka
@@ -228,6 +253,15 @@ STATSD_DATADOG_ENABLED가 공통 env(모든 Airflow 컴포넌트 공유)에 있�
 
 ## Spark Streaming EC2 확인 방법
 
+node_exporter/cAdvisor 실행(host 메트릭 + 컨테이너별 CPU/Memory,
+`infra/compose/spark-exporters.yaml`):
+
+```bash
+docker compose -f infra/compose/spark-exporters.yaml up -d
+curl http://localhost:9100/metrics
+curl http://localhost:8081/metrics
+```
+
 Stream Processor metrics 확인:
 
 ```bash
@@ -281,13 +315,15 @@ docker compose \
 | 바뀐 경로 | 배포 대상 |
 | --- | --- |
 | `infra/compose/exporters.yaml` | Project EC2 |
+| `infra/compose/spark-exporters.yaml` | Spark Streaming EC2 |
 | `infra/compose/monitoring.yaml` | Monitoring EC2 |
 | `infra/monitoring/prometheus/**` | Monitoring EC2 |
 | `infra/monitoring/grafana/**` | Monitoring EC2 |
+| `infra/monitoring/blackbox/**` | Monitoring EC2 |
 | `infra/monitoring/statsd/**` | Project EC2 — orchestration 배포가 담당 |
 
-빌드하는 이미지가 없다. 모두 서드파티 이미지를 그대로 쓰므로 ECR과 AWS 자격증명을
-사용하지 않고, 설정 파일을 전달한 뒤 compose로 반영하는 것이 전부다.
+빌드하는 이미지가 없다(ops-agent 제외). 모두 서드파티 이미지를 그대로 쓰므로 ECR과
+AWS 자격증명을 사용하지 않고, 설정 파일을 전달한 뒤 compose로 반영하는 것이 전부다.
 
 배포 대상 디렉터리는 `MONITORING_TARGET_DIR`(기본
 `/home/ec2-user/de4-monitoring`)이다. `deploy-orchestration`이 저장소 전체를
@@ -299,11 +335,23 @@ docker compose \
 | --- | --- | --- |
 | Variables | `MONITORING_EC2_HOST` | Monitoring EC2의 퍼블릭 IP 또는 DNS |
 | Secrets | `MONITORING_EC2_SSH_PRIVATE_KEY` | Monitoring EC2 키페어의 개인키 전문 |
+| Variables | `SPARK_EC2_HOST` | Spark Streaming EC2의 퍼블릭 IP 또는 DNS(exporter 배포용) |
+| Secrets | `SPARK_EC2_SSH_PRIVATE_KEY` | Spark Streaming EC2 키페어의 개인키 전문 |
 
 Project EC2와 키페어가 다르므로 secret을 따로 둔다. `EC2_SSH_PRIVATE_KEY`로 대체하면
 `Permission denied (publickey)`만 나와 원인을 찾기 어렵다.
 
-선택 항목은 `MONITORING_EC2_USER`(기본 `ec2-user`), `MONITORING_TARGET_DIR`이다.
+`SPARK_EC2_HOST`/`SPARK_EC2_SSH_PRIVATE_KEY`를 `EC2_HOST`/`EC2_SSH_PRIVATE_KEY`와
+별도로 둔 이유: `deploy-stream-processor.yml`은 Spark Streaming EC2 배포에 Project
+EC2와 같은 `EC2_HOST`/`EC2_SSH_PRIVATE_KEY`를 쓰고 있는데,
+`context/architecture.md`는 둘을 별도 인스턴스로 설명한다 — 이 불일치는 아직
+해결되지 않았다(`services/ops-agent/README.md`가 이미 문서화한 known issue). 실제로
+같은 EC2로 확인되면 `SPARK_EC2_HOST`/`SPARK_EC2_SSH_PRIVATE_KEY` 값을
+`EC2_HOST`/`EC2_SSH_PRIVATE_KEY`와 동일하게 채우면 되고, 그렇지 않다면 별도 값을
+채운다 — 어느 쪽이든 이 워크플로 코드는 바꿀 필요가 없다.
+
+선택 항목은 `MONITORING_EC2_USER`(기본 `ec2-user`), `SPARK_EC2_USER`(기본
+`ec2-user`), `MONITORING_TARGET_DIR`이다.
 
 ### 최초 1회 준비
 
@@ -391,10 +439,18 @@ Prometheus Targets(`http://localhost:9090/targets`)에서 다음 job이 모두
 - `prometheus`
 - `project-node`
 - `project-containers`
+- `spark-node`
+- `spark-containers`
+- `monitoring-node`
+- `monitoring-containers`
 - `serving-api`
 - `kafka`
 - `airflow`
 - `stream-processor`
+- `blackbox-self-health`(3개 target 모두 `UP` — target 자체는 항상 UP이다.
+  Grafana/Prometheus/Ops Agent가 실제로 정상인지는 `UP` 여부가 아니라 target
+  값(`probe_success`)이 1인지로 판단한다 — 아래 [Monitoring
+  self-health](#monitoring-self-health) 참고)
 
 Monitoring EC2에서 각 애플리케이션 metrics endpoint에 직접 접근되는지
 확인하려면(문제가 생겼을 때만 필요):
@@ -441,27 +497,15 @@ Grafana UI에서 수정할 수 없다 — 변경은 이 파일들을 고쳐 배�
 | `contact-points.yaml` | `ops-agent`(webhook+Slack), `infra-slack`(Slack 전용) |
 | `notification-policies.yaml` | 기본 `ops-agent`, `service=infrastructure`는 `infra-slack` |
 
-### ProjectDiskPressure (#495)
+`infrastructure` 그룹은 원래 `ProjectDiskPressure`(#504) 하나였다. 이번에 EC2 3대
+공통 host alert와 monitoring self-health alert를 이 그룹에 합치면서
+`ProjectDiskPressure`는 지웠다 — 아래 [Infrastructure Alert](#infrastructure-alert)의
+`DiskWarning`이 정확히 같은 조건(job=project-node, mountpoint="/", >80%, for 10m)을
+포함하는 상위 호환이라, 그대로 두면 Project EC2 disk가 80%를 넘을 때 두 alert가
+동시에 울리기 때문이다. 자세한 rule 목록/threshold는 아래
+[Infrastructure Alert](#infrastructure-alert) 참고.
 
-Project EC2 루트 볼륨 사용률이 **80%를 10분 이상** 넘으면 Slack으로 알린다.
-
-```promql
-100 * (1 - node_filesystem_avail_bytes{job="project-node",mountpoint="/"}
-         / node_filesystem_size_bytes{job="project-node",mountpoint="/"})
-```
-
-이 볼륨은 Kafka·Airflow·serving-api·dashboard·Docker 이미지가 공유한다. 가득 차면
-broker만 죽는 것이 아니라 scheduler와 API까지 함께 멈춘다(`no space left on device`
-2회 발생). 그래서 대상이 Kafka가 아니라 **호스트 디스크**다.
-
-`for: 10m`은 대량 segment 삭제나 이미지 pull 중의 순간적인 상승에 반응하지 않기
-위한 것이다. `device`/`fstype`은 인스턴스를 교체하면 바뀔 수 있어 매칭에 쓰지 않는다.
-
-**자동 조치를 붙이지 않는다.** 디스크 정리는 삭제 동작이라 무엇을 지울지 사람이
-판단해야 한다. `auto_remediate` 라벨이 없으므로 ops-agent는 이 alert에 반응하지 않고,
-`infra-slack` route가 ops-agent webhook 자체를 건너뛴다.
-
-발화 시 확인 순서는 다음과 같다.
+발화 시 확인 순서(디스크 alert 기준)는 다음과 같다.
 
 ```bash
 df -h /
@@ -470,17 +514,37 @@ docker exec de4-kafka-kafka-1 du -sh /var/lib/kafka/data
 du -sh ~/DE_team4-4una/logs 2>/dev/null   # Airflow 로그
 ```
 
-### 임계값 검증 방법
-
 `for: 10m` + 80% 조건은 평상시(약 50%) 발화하지 않는다. 실제 Slack 수신을 확인하려면
-`rules.yaml`의 `params: [80]`을 현재 사용률 아래로 잠시 낮춰 배포하고, 확인 후 원복한다.
-Grafana UI의 Alert rules에서 룰이 `Provisioned`로 보이는지도 함께 확인한다.
+`rules.yaml`의 해당 rule의 `params: [80]`을 현재 사용률 아래로 잠시 낮춰 배포하고,
+확인 후 원복한다. Grafana UI의 Alert rules에서 룰이 `Provisioned`로 보이는지도
+함께 확인한다.
+
+### CI에서의 자동 검증
+
+`infra/monitoring/**` 또는 `infra/compose/{monitoring,exporters,spark-exporters}.yaml`이
+바뀐 PR에서는 `.github/workflows/ci.yml`의 `monitoring-config` job이 아래를
+순서대로 검사한다 — 실제 EC2 없이 GitHub Actions 러너 안에서 전부 재현한다.
+
+1. `docker compose config`로 세 compose 파일 문법/필수 변수 검사(placeholder 값 사용)
+2. `promtool check config`로 `prometheus.yml` 문법 검사
+3. provisioning YAML/dashboard JSON 파싱 + provider가 가리키는 마운트 경로 검사
+4. **placeholder 값으로 Prometheus/Grafana를 실제로 띄우고 `/-/ready`,
+   `/api/health`가 응답할 때까지 대기**(최근 datasource provisioning 오류로
+   Grafana가 기동 실패한 적이 있어 추가함 — 위 1~3번은 문법/정합성만 보고
+   기동 자체가 되는지는 못 잡는다) — ops-agent는 저장소 전체를 build context로
+   직접 빌드해야 해서 비용이 크고 이 검증과 무관하므로 제외한다(`depends_on`은
+   시작 순서일 뿐이라 서비스 이름을 지정하면 그것만 뜬다)
+5. Grafana 로그에서 `logger=provisioning`이면서 `level=error`인 줄이 있는지 검사
+   (`/api/health`가 200이어도 개별 alert rule 등 일부 provisioning 실패는 로그에만
+   남을 수 있어 별도로 본다)
+6. `docker compose down -v`로 정리(CI 러너 안의 임시 컨테이너/볼륨만 삭제 — 운영
+   Grafana volume과 무관)
 
 ## Grafana Dashboard
 
-Grafana가 기동되면 별도 UI 설정 없이 `Project Infrastructure`, `Serving API`,
-`Kafka`, `Airflow`, `Spark Streaming`, `EMR Serverless`, `Service Status
-Overview` dashboard가 자동으로 provisioning된다. 일곱 dashboard 모두 같은
+Grafana가 기동되면 별도 UI 설정 없이 `System Overview`, `Project Infrastructure`,
+`Serving API`, `Kafka`, `Airflow`, `Spark Streaming`, `EMR Serverless`, `Service
+Status Overview` dashboard가 자동으로 provisioning된다. 여덟 dashboard 모두 같은
 provider(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`)가 디렉터리
 전체를 읽어서 등록하므로, dashboard를 추가할 때 provider(`dashboards.yml`)를
 새로 만들 필요는 없다 — JSON 파일만 그 디렉터리에 추가하면 된다. Datasource는
@@ -489,9 +553,9 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
 자동 등록된다.
 
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
-- 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → Project Infrastructure**
-  / **Serving API** / **Kafka** / **Airflow** / **Spark Streaming** /
-  **EMR Serverless** / **Service Status Overview**
+- 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → System Overview** /
+  **Project Infrastructure** / **Serving API** / **Kafka** / **Airflow** /
+  **Spark Streaming** / **EMR Serverless** / **Service Status Overview**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
@@ -501,8 +565,17 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
   - `infra/monitoring/grafana/provisioning/datasources/cloudwatch.yml` — CloudWatch
     datasource 정의(`authType: default`로 EC2 IAM Role만 사용, Access/Secret Key
     없음)
-  - `infra/monitoring/grafana/dashboards/project-infrastructure.json` — host/
-    container dashboard 본문(패널, PromQL, 임계값)
+  - `infra/monitoring/grafana/dashboards/system-overview.json` — EC2 3대(Project/
+    Spark Streaming/Monitoring)와 Kafka/Airflow/Spark Streaming/Serving API/
+    EMR Serverless/Prometheus/Grafana/Ops Agent 상태를 한 화면에서 보는
+    dashboard 본문. 자세한 내용은 아래
+    [System Overview dashboard](#system-overview-dashboard) 참고.
+  - `infra/monitoring/grafana/dashboards/project-infrastructure.json` — Project
+    EC2 host/container dashboard 본문(패널, PromQL, 임계값). CPU/Memory Usage
+    over Time과 짝을 맞춰 `Disk Usage over Time` 그래프도 있다 — Disk %
+    stat 패널과 같은 query를 시간축으로 보여줘, DiskWarning(80%)/
+    DiskCritical(90%) alert가 왜 울렸는지(또는 서서히 가까워지는지) 추세로
+    미리 볼 수 있다.
   - `infra/monitoring/grafana/dashboards/serving-api.json` — Serving API
     dashboard 본문
   - `infra/monitoring/grafana/dashboards/kafka.json` — Kafka dashboard 본문
@@ -518,6 +591,206 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
     참고.
   - `infra/monitoring/statsd/airflow-mapping.yml` — Airflow timer metric
     3개를 Prometheus histogram으로 바꾸는 statsd_exporter 매핑 설정
+  - `infra/monitoring/blackbox/blackbox.yml` — Grafana/Prometheus/Ops Agent
+    self-health probe에 쓰는 blackbox_exporter 모듈 설정
+
+### System Overview dashboard
+
+`infra/monitoring/grafana/dashboards/system-overview.json`. "지금 어디가
+문제인지 한눈에 보는 화면"이 목적이라 상세 분석용 패널까지 전부 옮기지는
+않는다 — 대신 아래 **Trends** row에 서비스별로 가장 핵심적인 그래프 하나씩만
+가져와 상태(Service Status)뿐 아니라 추세도 한 화면에서 볼 수 있게 했다. 더
+자세히 보려면 각 패널의 링크를 눌러 해당 dashboard(Kafka/Airflow/Spark
+Streaming/Serving API/Project Infrastructure)로 이동해 확인한다.
+
+- **Active Alerts**: Grafana 내장 `alertlist` 패널로, 지금 firing/pending인
+  alert를 전부 목록으로 보여준다. Overall System Health가 DEGRADED/UNHEALTHY일
+  때 "그래서 정확히 뭐가 문제인지"를 바로 이어서 확인할 수 있다 — 요약값
+  하나만으로는 원인을 알 수 없다는 피드백을 반영해 추가했다. 이 dashboard
+  전용 alert가 아니라 이 Grafana 인스턴스의 모든 alert rule(`spark-streaming`/
+  `infrastructure` 그룹)이 대상이다.
+- **Host Trends**: EC2 3대의 CPU/Memory/Disk 사용률을 시간 축으로 보여준다.
+  위 EC2 Instances의 Gauge는 "지금 값"만 보여주는데, 이 그래프는 "서서히
+  차오르는 중인지, 순간 스파이크였는지"를 구분하는 데 쓴다 — 특히 Disk는
+  DiskWarning/DiskCritical alert가 왜 울렸는지(또는 곧 울릴지) 미리 보는
+  용도로 유용하다. PromQL은 project-infrastructure.json의 CPU Usage over Time
+  패널과 동일한 공식을 job 정규식으로 3대 EC2에 확장한 것이다.
+- **Overall System Health**: EC2 3대(Project/Spark Streaming/Monitoring)와
+  Kafka/Airflow/Spark Streaming/Serving API 4개 서비스를 하나로 합친
+  HEALTHY/DEGRADED/UNHEALTHY/UNKNOWN 4단계 상태다. 판정 로직은 아래 [Pipeline
+  Health 4단계화](#pipeline-health-4단계화)와 완전히 같은 원칙(우선순위:
+  UNHEALTHY > UNKNOWN > DEGRADED > HEALTHY)을 쓴다 — 차이는 Pipeline
+  Health(`service-status-overview.json`)가 EC2는 1대(Project)만 보는 반면 이
+  패널은 EC2 3대를 모두 포함한다는 점이다.
+- **EC2 Instances**: Project/Spark Streaming/Monitoring EC2별로 Status(UP/
+  DOWN), CPU/Memory/Disk Gauge, Load, Uptime, Network RX/TX를 보여준다.
+  CPU/Memory/Disk의 PromQL과 threshold(70/90, 70/90, 80/90)는
+  `project-infrastructure.json`의 CPU %/Memory %/Disk % 패널과 완전히 같다 —
+  `job` label만 `project-node`/`spark-node`/`monitoring-node`로 바꿨다.
+- **Service Status**: Kafka/Airflow/Spark Streaming/Serving API는 각 상세
+  dashboard의 Component Status 패널과 완전히 같은 query/mapping을 재사용한다
+  (판정 기준 일치). EMR Serverless는 `service-status-overview.json`/
+  `emr-serverless.json`의 Running Jobs 패널과 완전히 같은 CloudWatch direct
+  query(`RunningJobs`, `matchExact: true`, #410)를 재사용해 IDLE/RUNNING/NO
+  METRIC DATA로 보여준다 — RunningJobs=0은 정상 idle이라 DOWN으로 취급하지
+  않는다. `application_id`/`application_name` 변수는 이 프로젝트가 쓰는 실제
+  값(`00g85ljahc0svj2p`/`de4-batch-jobs`)을 기본값으로 채워 뒀다(다른
+  application을 보려면 대시보드 상단에서 값을 바꾼다). Prometheus/Grafana/Ops
+  Agent는 blackbox_exporter가 probe한 `probe_success`를 UP/DOWN으로 보여준다 —
+  자세한 내용과 한계는 아래 [Monitoring self-health](#monitoring-self-health)
+  참고.
+- **Overall System Health 판정에는 EMR Serverless를 포함하지 않는다** — Prometheus
+  기반 컴포넌트(A~G)와 CloudWatch 기반 EMR을 하나의 Grafana expression에서
+  결합하는 게 현재 버전(12.4.8)에서 동작이 보장된다고 확신할 수 없고,
+  RunningJobs=0(정상 idle)을 장애 신호로 잘못 섞을 위험도 있다 —
+  `service-status-overview.json`의 Pipeline Health가 이미 같은 이유로 EMR을
+  제외하고 있어 그 판단을 그대로 따랐다. EMR 상태는 위 Service Status의
+  독립된 카드로만 확인한다.
+- **Trends**: 서비스별 대표 그래프 하나씩 — Kafka Message Rate over Time
+  (`kafka.json`과 동일 query), Spark Streaming Rows/sec over Time
+  (`spark-streaming.json`의 Rows/sec over Time과 동일), Airflow Task
+  Success/Failure Rate(`airflow.json`의 Task Success Rate/Task Failure Rate
+  stat 패널과 같은 query를 시간축 그래프로), Serving API Requests/sec
+  (`serving-api.json`의 Requests/sec stat 패널과 같은 query를 시간축 그래프로).
+  나머지 그래프(latency percentile, DAG별/토픽별 breakdown 등)는 이 dashboard에
+  옮기지 않았다 — 전부 옮기면 개별 dashboard를 그대로 복제하는 셈이라, "한눈에
+  보는 화면"이라는 목적과 어긋난다.
+- **Container Resource Usage**: EC2 3대에서 뜨는 모든 컨테이너의 CPU/Memory를
+  두 그래프(Container CPU Usage, Container Memory Usage)로 보여준다.
+  `project-infrastructure.json`의 같은 이름 패널과 동일한 query를
+  `job=~"project-containers|spark-containers|monitoring-containers"`로 3대
+  EC2에 확장했다 — Spark Streaming/Monitoring EC2에는 원래 cAdvisor가 없어서
+  이번에 `infra/compose/spark-exporters.yaml`/`infra/compose/monitoring.yaml`에
+  추가했다(각각 `cadvisor`/`monitoring-cadvisor` 서비스, Project EC2의 기존
+  cAdvisor 설정을 그대로 재사용). legend에 `instance`(어느 EC2인지)와 컨테이너
+  이름이 함께 나와 어느 서비스가 자원을 많이 쓰는지 바로 구분된다.
+
+### Pipeline Health 4단계화
+
+`service-status-overview.json`의 Pipeline Health 패널은 원래
+HEALTHY/DEGRADED/FAILED 3단계였는데, 참조하는 원본 metric이 하나라도 아예 없으면
+(예: exporter 자체가 배포 전이라 Prometheus job이 없음) Grafana의 server-side
+math expression이 계산 자체를 못 해 패널 전체가 큰 "No data"로 표시됐다 — 실제
+장애(DOWN)와 metric 부재를 구분할 수 없는 문제였다.
+
+지금은 각 원본 query(A~E)를 `(<원래 쿼리>) or vector(2)`로 감싸 metric이 없을 때
+"UNKNOWN"을 뜻하는 값 2를 강제로 채운다(PromQL의 `or`가 왼쪽에 결과가 있으면
+오른쪽을 무시하는 성질을 이용) — 값이 실제로 있으면 원래 쿼리 결과가 그대로
+쓰이므로 기존 판정은 바뀌지 않는다. `I`(down_count, A~E 중 0인 개수)와
+`J`(unknown_count, A~E 중 2인 개수)로 나눠 최종 값을 계산한다.
+
+```text
+UNHEALTHY(3) = down_count > 0
+UNKNOWN(2)   = down_count == 0 && unknown_count > 0
+DEGRADED(1)  = down_count == 0 && unknown_count == 0 && (F+G) > 0
+HEALTHY(0)   = 그 외
+```
+
+기존 `FAILED`는 `UNHEALTHY`로 이름을 바꿨다(작업 지시의 상태 이름에 맞춤).
+`System Overview` dashboard의 Overall System Health 패널도 같은 원칙을 쓰되,
+서비스 4개(Kafka/Airflow/Spark Streaming/Serving API)는 자기 자신이 이미
+다단계 Component Status 코드를 갖고 있어서, "코드가 DOWN 계열 값 이상이면
+down", "DEGRADED 계열 값이면 degraded"로 한 번 더 해석하는 단계가 있다 — 다른
+서비스의 코드 범위와 겹치지 않도록 absent 처리는 `vector(2)`가 아니라
+`vector(99)`를 쓴다(Kafka의 실제 코드값 2, BROKER DOWN과 겹치지 않기 위해).
+
+### Infrastructure Alert
+
+Project/Spark Streaming/Monitoring EC2 3대에 공통으로 적용되는 host alert다
+(`infra/monitoring/grafana/provisioning/alerting/rules.yaml`의 `infrastructure`
+그룹, `Ops Agent` 폴더 — 이 그룹은 원래 `ProjectDiskPressure`(#504) 하나였고,
+이번에 아래 rule들과 self-health rule을 여기에 합쳤다).
+
+| Rule | 조건 | for | severity |
+| --- | --- | --- | --- |
+| `NodeDown` | `up{job=~"project-node\|spark-node\|monitoring-node"} == 0` | 2m | critical |
+| `HighCPU` | CPU 사용률 > 85%(project-infrastructure.json의 CPU % 패널과 같은 공식) | 10m | warning |
+| `HighMemory` | Memory 사용률 > 85% | 10m | warning |
+| `DiskWarning` | Disk(root filesystem) 사용률 > 80% | 10m | warning |
+| `DiskCritical` | Disk 사용률 > 90% | 5m | critical |
+
+모든 rule에 `service: infrastructure` 라벨이 붙는다 — `ProjectDiskPressure`(#504)가
+이미 정의해 둔 라벨/route를 그대로 재사용한 것이다. 이 값이
+`notification-policies.yaml`에서 `infra-slack` contact point로 라우팅되는
+기준이다. `auto_remediate` 라벨은 붙이지 않는다 — CPU/Memory/Disk 문제를 자동
+조치(재시작/재부팅/디스크 정리 등)하지 않고 알림만 보낸다.
+
+**`ProjectDiskPressure`를 지운 이유.** `DiskWarning`이 정확히 같은 조건(job=
+project-node, mountpoint="/", >80%, for 10m)을 포함하는 상위 호환이라, 둘 다 두면
+Project EC2 disk가 80%를 넘을 때 alert가 중복으로 울린다. `DiskWarning`/
+`DiskCritical`로 대체하고 `ProjectDiskPressure`는 삭제했다.
+
+**왜 ops-agent의 `ops-agent` contact point를 쓰지 않고 `infra-slack`을
+쓰는가(#504가 이미 만든 설계, 그대로 재사용).** `ops-agent`의 webhook을 처리하는
+`OpsAgentOrchestrator.handle()`(`services/ops-agent/src/ops_agent/orchestrator.py`)은
+어떤 alert가 오든 **항상** `PrometheusClient.stream_processor_status()`로
+stream-processor 상태를 재검증하도록 만들어져 있다(#447 설계, stream-processor
+전용). EC2 host/self-health alert를 그 contact point로 보내면, stream-processor가
+그 순간 우연히 정상이면 "이미 정상, 조치 없음"으로 조용히 넘어가 버리고(실제
+진단 메시지가 안 나감), stream-processor가 우연히 비정상이면 엉뚱한 "진단:
+Prometheus 상태=..." 메시지가 Slack에 나간다 — 둘 다 기존 ops-agent 동작을
+깨뜨리지 않으면서 새 alert를 제대로 다루는 방법이 아니다. `infra-slack`은
+webhook 없는 Slack 전용 contact point라 이 문제 자체가 생기지 않는다. 기존
+`StreamProcessorDown`/`StreamProcessorStale`은 `service: infrastructure` 라벨이
+없어 그대로 default(`ops-agent`) route로 간다 — **동작 변화 없음**.
+
+Slack Bot Token/채널은 새로 만들지 않고 기존 `$GRAFANA_SLACK_BOT_TOKEN`/
+`$GRAFANA_SLACK_ALERT_CHANNEL`(Grafana 컨테이너 env, `OPS_AGENT_SLACK_BOT_TOKEN`/
+`OPS_AGENT_SLACK_ALERT_CHANNEL`에서 옴)을 재사용한다 — 새 secret이 필요 없다.
+
+threshold는 초기값이다. 특히 `DiskCritical`의 `for: 5m`(다른 규칙보다 짧음)은
+디스크가 가득 차기 직전 상황에 더 빨리 반응하기 위한 의도적 선택이고,
+`DiskWarning`의 `for: 10m`은 `ProjectDiskPressure`가 쓰던 값을 그대로 물려받아
+다른 규칙과 cadence를 맞췄다 — 둘 다 실제 운영 데이터로 검증된 값은 아니라서,
+배포 후 false positive/negative가 관찰되면 조정이 필요하다.
+
+### Monitoring self-health
+
+Grafana가 죽으면 Grafana Alerting도 같이 죽는다 — Alerting 엔진이 Grafana
+프로세스 안에서 돌기 때문이다. Grafana 자신의 장애를 Grafana Alerting만으로
+감지하는 구조는 근본적으로 순환 의존이라 성립할 수 없다.
+
+**한 만큼만 구현했다 — 새 서비스를 억지로 만들지 않았다.**
+`infra/compose/monitoring.yaml`에 `blackbox-exporter`(공식
+`prom/blackbox-exporter` 이미지, `monitoring` 네트워크 내부 전용, 포트 미공개)
+하나만 추가해서 Grafana(`/api/health`)/Prometheus(`/-/ready`)/Ops
+Agent(`/health`) 세 endpoint를 외부에서 HTTP로 주기적으로 probe하고, 그 결과
+(`probe_success{instance="..."}`)를 Prometheus에 저장한다
+(`infra/monitoring/prometheus/prometheus.yml`의 `blackbox-self-health` job).
+ops-agent 코드는 전혀 건드리지 않았고 새 secret도 필요 없다.
+
+이 값으로 할 수 있는 것과 할 수 없는 것을 구분해야 한다.
+
+- **System Overview 대시보드에서 사람이 보는 용도**로는 세 서비스 모두
+  충분하다 — Prometheus/Grafana/Ops Agent 패널이 `probe_success`를 그대로
+  보여준다.
+- **Prometheus/Ops Agent가 죽었을 때 Grafana Alerting이 Slack으로 알림을
+  보내는 것**도 가능하다(`rules.yaml`의 `infrastructure` 그룹,
+  `PrometheusUnreachable`/`OpsAgentUnreachable`) — 이 두 경우는 Grafana
+  자신만 살아있으면 되므로 순환 의존이 아니다. `PrometheusUnreachable`은
+  `execErrState`/`noDataState`를 기본값(`Error`/`NoData`, 알림 없이 상태만
+  바뀜)이 아니라 `Alerting`으로 명시해서, Prometheus가 완전히 죽어 쿼리
+  자체가 실패하거나 데이터가 없는 경우도 "장애"로 취급해 알림이 나가게 했다.
+- **Grafana 자신이 죽는 경우는 alert rule을 만들지 않았다** — Grafana
+  Alerting이 Grafana 프로세스 안에서 돌기 때문에 이 규칙 자체가 평가되지
+  않는다(순환 의존, 해결 불가능한 구조적 한계). `probe_success`는 Prometheus에
+  값으로 계속 쌓이므로 **사람이 System Overview를 보면 즉시 알 수 있지만,
+  자동 Slack 알림은 나가지 않는다.**
+
+**진짜 해결하려면(이번 범위 밖, 후속 작업으로 남김):**
+
+1. Prometheus Alertmanager(Grafana와 완전히 독립된 별도 alerting 엔진)를 새로
+   추가하고, `probe_success{instance=".../api/health"}`에 native Prometheus
+   alerting rule을 걸어 Alertmanager가 직접 Slack으로 알림을 보내게 한다.
+   Grafana가 죽어도 이 경로는 영향받지 않는다.
+2. 또는 ops-agent에 자체 폴링 루프(현재는 Grafana webhook에만 반응하는
+   구조 — `services/ops-agent/README.md`의 Incident flow 참고)를 추가해서
+   주기적으로 Grafana `/api/health`를 직접 확인하고 죽었으면 Slack에 직접
+   알리게 한다.
+
+둘 다 `services/ops-agent/**` 코드 변경 또는 새 인프라 서비스 추가가 필요해
+이번 작업 범위(모니터링 설정만, ops-agent remediation 로직 확장 금지) 밖이라
+구현하지 않았다.
 
 ### Serving API dashboard 지표
 
@@ -542,6 +815,7 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
 | Requests/sec | `sum(rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
 | 2xx / 4xx / 5xx | `sum(rate(serving_api_http_requests_total{job="serving-api", status=~"2.."}[5m]))` (4xx/5xx는 `status=~"4.."`/`"5.."`) |
 | p50 / p95 / p99 latency | `histogram_quantile(0.50, sum by (le) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` (0.95/0.99는 quantile 값만 교체) |
+| Latency over Time (p50/p95/p99) | 위와 같은 query 3개를 stat이 아닌 시간축(range query) timeseries로 — 순간값만으로는 안 보이는 추세를 확인한다 |
 | Requests by Endpoint | `sum by (route) (rate(serving_api_http_requests_total{job="serving-api"}[5m]))` |
 | Latency by Endpoint (p95) | `histogram_quantile(0.95, sum by (le, route) (rate(serving_api_http_request_duration_seconds_bucket{job="serving-api"}[5m])))` |
 
@@ -570,10 +844,29 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
 | Topics | `count(kafka_topic_partitions{job="kafka", topic!~"__.*"})` |
 | Partitions | `sum(kafka_topic_partitions{job="kafka", topic!~"__.*"})` |
 | Under Replicated | `sum(kafka_topic_partition_under_replicated_partition{job="kafka"})` |
+| Under Replicated Partitions(표) | `kafka_topic_partition_under_replicated_partition{job="kafka"} > 0` |
 | Message Rate over Time | `sum by (topic) (rate(kafka_topic_partition_current_offset{job="kafka", topic!~"__.*"}[5m]))` |
 | Consumer Lag | `sum(kafka_consumergroup_lag{job="kafka"})` |
+| Consumer Lag Trend | `deriv(sum by (instance, consumergroup) (kafka_consumergroup_lag_sum{job="kafka"})[10m:1m])` |
 | Consumer Lag by Topic | `sum by (topic) (kafka_consumergroup_lag_sum{job="kafka"})` |
 | Consumer Group Members | `sum by (consumergroup) (kafka_consumergroup_members{job="kafka"})` |
+
+**Under Replicated Partitions**는 새 metric 없이 `Under Replicated` 패널이 쓰는
+raw metric을 `table` 패널로 그대로 나열한 것이다. `Under Replicated`가 개수만
+보여줘서 "몇 개"는 알아도 "어느 topic/partition인지"는 다른 곳(예: broker
+로그)을 찾아봐야 했는데, 이 표는 `topic`/`partition`/`instance` label을 그대로
+컬럼으로 보여준다. under-replicated partition이 없으면(`> 0` 조건에 걸리는
+시계열이 없으면) 표가 비어 있는 게 정상이다.
+
+**Consumer Lag Trend**는 새 metric 없이 기존 `kafka_consumergroup_lag_sum`의
+10분 구간 변화율(`deriv`)만 계산한다. 절대값(Consumer Lag)만으로는 "지금 lag가
+쌓이는 중인지 줄어드는 중인지" 알기 어려운데, 이 패널은 그 추세를 직접
+보여준다 — 양수면 계속 쌓이는 중(=consumer가 producer 속도를 못 따라감), 음수면
+줄어드는 중이다. 이 프로젝트에서 `sensor-events`의 consumer는
+Spark Streaming(stream-processor) 하나뿐이라, 이 값이 계속 양수로 유지되면
+파이프라인 지연이 커지고 있다는 신호다 — Spark Streaming dashboard의 `Last
+Progress Age`/`Event-Time Lag`와 함께 보면 지연이 Kafka 쪽(consumer가 못
+따라감)인지 Spark 쪽(마이크로배치 자체가 멈춤)인지 구분하는 데 도움이 된다.
 
 몇 가지 명확히 해 둘 점:
 
@@ -635,6 +928,7 @@ metric만 쓴다. wire상 이름은 `AIRFLOW__METRICS__STATSD_PREFIX=airflow`가
 | DAG Import Errors | `airflow_dag_processing_import_errors{job="airflow"}` |
 | Running DAG Runs / Scheduled / Queued / Running Tasks | `sum(airflow_scheduler_dagruns_running{job="airflow"}) or vector(0)` (나머지도 같은 형태로 `airflow_ti_scheduled`/`airflow_ti_queued`/`airflow_ti_running`) |
 | Task Success/Failure Rate | `sum(rate(airflow_ti_successes{job="airflow"}[5m])) or vector(0)` (failure는 `ti_failures`) |
+| Task Success/Failure Rate over Time | 위와 같은 query를 stat이 아닌 시간축(range query) timeseries로 — 순간값만으로는 안 보이는 추세(성공률이 떨어지는 중인지)를 확인한다 |
 | Failures by DAG | `sum by (dag_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Failures by Task | `sum by (dag_id, task_id) (rate(airflow_ti_failures{job="airflow"}[5m]))` |
 | Task/DAG Run Duration (p50/p95/p99) | `histogram_quantile(0.95, sum by (le) (rate(airflow_task_duration_seconds_bucket{job="airflow"}[5m])))` (dagrun success/failed도 같은 형태) |
@@ -731,6 +1025,8 @@ metric들을 갱신한다.
 | Processed Rows/sec | `stream_processor_processed_rows_per_second{job="stream-processor"}` |
 | Micro-batch Duration (p50/p95) | `histogram_quantile(0.50, sum by (le) (rate(stream_processor_batch_duration_seconds_bucket{job="stream-processor"}[5m])))` (p95는 quantile 값만 교체) |
 | Last Progress Age | `(time() - stream_processor_last_progress_timestamp_seconds{job="stream-processor"}) and (stream_processor_last_progress_timestamp_seconds{job="stream-processor"} > 0)` |
+| Freshness over Time | 위 Last Progress Age + Event-Time Lag를 시간축(range query)으로 합친 그래프 — 둘 다 초 단위, 같은 330초 threshold를 써서 한 그래프에 둔다 |
+| Kafka Offset Lag over Time | `stream_processor_kafka_offset_lag{job="stream-processor"}`를 시간축으로 — record 개수 단위라 Freshness(초 단위)와 축이 달라 별도 그래프로 뒀다 |
 | Total Input Rows | `stream_processor_input_rows_total{job="stream-processor"}` |
 | Query Failures | `stream_processor_query_failures_total{job="stream-processor"}` |
 
