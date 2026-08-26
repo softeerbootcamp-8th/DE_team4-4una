@@ -8,10 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ops_agent.diagnostics import (
-    StreamProcessorDiagnostics,
-    collect_stream_processor_diagnostics,
-)
+from ops_agent.diagnostics import ContainerDiagnostics, collect_container_diagnostics
 from ops_agent.incident_store import IncidentStore
 from ops_agent.models import Incident
 from ops_agent.notification import (
@@ -22,11 +19,20 @@ from ops_agent.notification import (
 from ops_agent.owners import ServiceOwnersRegistry
 from ops_agent.policy import PolicyDecision, decide
 from ops_agent.prometheus_client import PrometheusClient, StreamProcessorStatus
-from ops_agent.remediation import RemediationResult, restart_stream_processor
+from ops_agent.remediation import RemediationResult, restart_container
 from ops_agent.slack_notifier import SlackNotifier
 from ops_agent.ssh import SshTarget
 
 logger = logging.getLogger(__name__)
+
+
+def _default_diagnose(target: SshTarget) -> ContainerDiagnostics:
+    # Task 4에서 ActionSpec이 컨테이너 이름을 주게 되면 사라진다.
+    return collect_container_diagnostics(target, "stream-processor")
+
+
+def _default_remediate(target: SshTarget) -> RemediationResult:
+    return restart_container(target, "stream-processor", action="restart_stream_processor")
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +41,7 @@ class IncidentOutcome:
     handled: bool
     reverified_status: StreamProcessorStatus | None
     policy: PolicyDecision | None
-    diagnostics: StreamProcessorDiagnostics | None
+    diagnostics: ContainerDiagnostics | None
     remediation: RemediationResult | None
     recovered: bool | None
     escalated: bool
@@ -55,8 +61,8 @@ class OpsAgentOrchestrator:
         recovery_poll_interval_seconds: float = 10.0,
         recovery_wait_seconds: float = 90.0,
         history_window_seconds: float = 7 * 24 * 3600,
-        diagnose: Callable[[SshTarget], StreamProcessorDiagnostics] = collect_stream_processor_diagnostics,
-        remediate: Callable[[SshTarget], RemediationResult] = restart_stream_processor,
+        diagnose: Callable[[SshTarget], ContainerDiagnostics] = _default_diagnose,
+        remediate: Callable[[SshTarget], RemediationResult] = _default_remediate,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         # diagnose/remediate/sleep은 테스트가 실제 SSH/대기 없이 fake를 주입할 수 있게 콜백으로 뒀다.
@@ -212,7 +218,7 @@ class OpsAgentOrchestrator:
         )
 
     def _log_diagnose(
-        self, incident: Incident, diagnostics: StreamProcessorDiagnostics
+        self, incident: Incident, diagnostics: ContainerDiagnostics
     ) -> None:
         self._log_stage(
             "diagnose",
@@ -236,7 +242,7 @@ class OpsAgentOrchestrator:
         self,
         incident: Incident,
         status: StreamProcessorStatus,
-        diagnostics: StreamProcessorDiagnostics,
+        diagnostics: ContainerDiagnostics,
         policy_decision: PolicyDecision | None,
         *,
         remediation: RemediationResult | None,

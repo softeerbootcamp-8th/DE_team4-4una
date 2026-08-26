@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ops_agent.diagnostics import StreamProcessorDiagnostics
+from ops_agent.diagnostics import ContainerDiagnostics
 from ops_agent.models import Incident
 from ops_agent.owners import ServiceOwner
 from ops_agent.policy import PolicyDecision
@@ -21,7 +21,7 @@ MAX_LOG_CHARS = 2600
 class NotificationInput:
     incident: Incident
     status: StreamProcessorStatus
-    diagnostics: StreamProcessorDiagnostics
+    diagnostics: ContainerDiagnostics
     policy: PolicyDecision | None
     remediation: RemediationResult | None
     recovered: bool
@@ -105,7 +105,7 @@ def _owner_name(owner: ServiceOwner | None) -> str:
     return owner.name if owner is not None else "(no owner configured)"
 
 
-def build_log_reply(diagnostics: StreamProcessorDiagnostics) -> str | None:
+def build_log_reply(diagnostics: ContainerDiagnostics) -> str | None:
     """로그 tail은 본문이 아니라 스레드 답글로 보낸다 — 내용을 통제할 수 없어 메인 메시지에 싣지 않는다."""
     logs = diagnostics.recent_logs.strip()
     if not logs:
