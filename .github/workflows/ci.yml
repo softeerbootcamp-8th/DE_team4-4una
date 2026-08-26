@@ -81,7 +81,7 @@ jobs:
             batch-jobs-sensor-features: *batchjobs
             batch-jobs-cleansing: *batchjobs
             batch-jobs-rest: *batchjobs
-            # tests/integration은 7개 패키지를 모두 import하므로 전체 설치가 필요하다.
+            # tests/integration은 워크스페이스 패키지를 모두 import하므로 전체 설치가 필요하다.
             # 자체 테스트가 없는 서비스는 이 job만이 import를 검증한다.
             workspace:
               - *shared
@@ -236,7 +236,7 @@ jobs:
           PATHS: ${{ matrix.target.paths }}
         run: uv run --package "$PKG" --group dev --frozen pytest $PATHS
 
-  # tests/integration은 7개 패키지를 모두 import하므로 전체 설치가 필요하다.
+  # tests/integration은 워크스페이스 패키지를 모두 import하므로 전체 설치가 필요하다.
   # 위 test job들과 달리 이것만 --all-packages를 쓴다.
   workspace:
     name: Workspace Imports
