@@ -89,6 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["standard_segment_comfort_score", "current_segment_comfort_score"],
     )
 
+    # 정규 파이프라인이 아니다 — 어떤 DAG도 이 command를 부르지 않는다. hourly_comfort.yaml의
+    # anchor/threshold를 사람이 캘리브레이션할 때만 수동으로 실행한다(#544).
+    calibrate_parser = subparsers.add_parser("analyze-hourly-feature-distribution")
+    calibrate_parser.add_argument("--input-path")
+    calibrate_parser.add_argument("--start", type=datetime.fromisoformat)
+    calibrate_parser.add_argument("--end", type=datetime.fromisoformat)
+    calibrate_parser.add_argument("--scoring-config-path", type=Path)
+
     return parser
 
 
@@ -374,6 +382,62 @@ def run_gold_audit_cli(arguments: argparse.Namespace) -> None:
         connection.close()
 
 
+def run_hourly_feature_distribution_analysis(arguments: argparse.Namespace) -> None:
+    """`hourly_segment_features`의 실제 분포를 사람이 눈으로 보고 calibration하기 위한
+    일회성 analysis 명령이다 — 어떤 DAG도 부르지 않는다(#544)."""
+    from batch_jobs.comfort_calibration import (
+        PERCENTILES,
+        build_feature_distributions,
+        filter_representative_period,
+        scoring_feature_columns,
+    )
+    from batch_jobs.comfort_scoring_config import (
+        DEFAULT_HOURLY_SCORING_CONFIG_PATH,
+        load_hourly_scoring_config,
+    )
+    from batch_jobs.hourly_comfort_job import (
+        HourlyComfortJobConfig,
+        build_spark_session,
+    )
+    from batch_jobs.schemas import HOURLY_SEGMENT_FEATURE_SCHEMA
+
+    defaults = HourlyComfortJobConfig.from_env()
+    input_path = arguments.input_path or defaults.feature_input_path
+    scoring_config = load_hourly_scoring_config(
+        arguments.scoring_config_path or DEFAULT_HOURLY_SCORING_CONFIG_PATH
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    spark = build_spark_session()
+    try:
+        features = spark.read.schema(HOURLY_SEGMENT_FEATURE_SCHEMA).parquet(input_path)
+        features = filter_representative_period(features, arguments.start, arguments.end)
+        distributions = build_feature_distributions(
+            features, scoring_feature_columns(scoring_config)
+        )
+        print(
+            json.dumps(
+                {
+                    name: {
+                        "count": dist.count,
+                        "mean": dist.mean,
+                        "min": dist.minimum,
+                        "max": dist.maximum,
+                        **{
+                            f"p{int(p * 100):02d}": value
+                            for p, value in zip(PERCENTILES, dist.percentiles, strict=True)
+                        },
+                    }
+                    for name, dist in distributions.items()
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    finally:
+        spark.stop()
+
+
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "cleanse-sensor-events":
@@ -390,6 +454,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if arguments.command == "audit-gold":
         run_gold_audit_cli(arguments)
+        return
+    if arguments.command == "analyze-hourly-feature-distribution":
+        run_hourly_feature_distribution_analysis(arguments)
         return
     if arguments.command == "fetch-reference-data":
         manifest_path = fetch_reference_sources(
