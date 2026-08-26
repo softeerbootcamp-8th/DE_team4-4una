@@ -1,0 +1,471 @@
+{
+  "id": null,
+  "uid": "system-overview",
+  "title": "System Overview",
+  "tags": ["overview", "monitoring"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "application_id",
+        "label": "EMR Application ID",
+        "description": "EMR Serverless dashboard와 같은 값. 이 프로젝트에서 쓰는 application id로 기본값을 채워 뒀다.",
+        "type": "textbox",
+        "query": "00g85ljahc0svj2p",
+        "current": { "text": "00g85ljahc0svj2p", "value": "00g85ljahc0svj2p" }
+      },
+      {
+        "name": "application_name",
+        "label": "EMR Application Name",
+        "type": "textbox",
+        "query": "de4-batch-jobs",
+        "current": { "text": "de4-batch-jobs", "value": "de4-batch-jobs" }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Overall System Health",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Overall System Health",
+      "description": "EC2 3대와 핵심 서비스 4개를 하나로 합친 요약 값이다. 초록 HEALTHY = 전부 정상, 주황 DEGRADED = 죽은 건 없지만 경고 신호가 있음(아래 Active Alerts에서 무엇인지 확인), 빨강 UNHEALTHY = 확인된 장애 있음, 파랑 UNKNOWN = 아직 판단할 metric 자체가 없음(장애 아님). 상세 판정 로직: EC2 3대(Project/Spark Streaming/Monitoring)와 핵심 서비스 4개(Kafka/Airflow/Spark Streaming/Serving API)의 상태를 하나로 합친다. 우선순위: 하나라도 확인된 DOWN이면 UNHEALTHY(3) > DOWN은 아닌데 metric 자체가 없는(absent) 항목이 있으면 UNKNOWN(2) > 전부 확인됐고 DOWN도 없는데 경고성 신호(Kafka UNDER REPLICATED, Airflow DAG IMPORT ERROR/PROCESSOR STALE, Spark PROGRESS/EVENT DATA STALE)가 있으면 DEGRADED(1) > 그 외 HEALTHY(0). NO DATA를 곧바로 장애로 표시하지 않기 위해 UNKNOWN을 UNHEALTHY와 분리했다(service-status-overview.json의 Pipeline Health 패널과 같은 설계). A/B/C=EC2 up(Project/Spark/Monitoring), D=Kafka Component Status 코드, E=Airflow Component Status 코드, F=Spark Streaming Component Status 코드, G=Serving API Component Status 코드 — D~G는 각 상세 대시보드의 Component Status 패널과 완전히 동일한 query다(판정 기준 일치). 각 raw query는 `or vector(99)`로 감싸 metric이 아예 없을 때 코드 99(어떤 서비스의 실제 코드 범위와도 겹치지 않는 값)를 반환하게 해 UNKNOWN을 구분한다. I=down_count, J=unknown_count, K=degraded_count는 최종 판정(H)을 읽기 쉽게 나눈 중간 계산이다.",
+      "datasource": { "type": "datasource", "uid": "-- Mixed --" },
+      "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
+      "targets": [
+        { "refId": "A", "datasource": "Prometheus", "expr": "(min(up{job=\"project-node\"})) or vector(99)", "legendFormat": "project-ec2-up", "instant": true, "hide": true },
+        { "refId": "B", "datasource": "Prometheus", "expr": "(min(up{job=\"spark-node\"})) or vector(99)", "legendFormat": "spark-ec2-up", "instant": true, "hide": true },
+        { "refId": "C", "datasource": "Prometheus", "expr": "(min(up{job=\"monitoring-node\"})) or vector(99)", "legendFormat": "monitoring-ec2-up", "instant": true, "hide": true },
+        { "refId": "D", "datasource": "Prometheus", "expr": "((3 * (up{job=\"kafka\"} == bool 0) > 0) or (2 * (kafka_brokers{job=\"kafka\"} == bool 0) > 0) or (1 * (sum by (instance, job) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"}) > bool 0) > 0) or (0 * up{job=\"kafka\"})) or vector(99)", "legendFormat": "kafka-status", "instant": true, "hide": true },
+        { "refId": "E", "datasource": "Prometheus", "expr": "((4 * (up{job=\"airflow\"} == bool 0) > 0) or (3 * (sum by (instance, job) (increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) == bool 0) > 0) or (2 * (max by (instance, job) (airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"}) > bool 300) > 0) or (1 * (sum by (instance, job) (airflow_dag_processing_import_errors{job=\"airflow\"}) > bool 0) > 0) or (0 * up{job=\"airflow\"})) or vector(99)", "legendFormat": "airflow-status", "instant": true, "hide": true },
+        { "refId": "F", "datasource": "Prometheus", "expr": "((4 * (up{job=\"stream-processor\"} == bool 0) > 0) or (3 * (stream_processor_query_running{job=\"stream-processor\"} == bool 0) > 0) or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)) > bool 330) > 0) or (1 * (stream_processor_event_time_lag_seconds{job=\"stream-processor\"} > bool 330) > 0) or (0 * up{job=\"stream-processor\"})) or vector(99)", "legendFormat": "spark-status", "instant": true, "hide": true },
+        { "refId": "G", "datasource": "Prometheus", "expr": "((1 * (up{job=\"serving-api\"} == bool 0) > 0) or (0 * up{job=\"serving-api\"})) or vector(99)", "legendFormat": "servingapi-status", "instant": true, "hide": true },
+        {
+          "refId": "I",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "hide": true,
+          "expression": "($A==0)+($B==0)+($C==0)+($D>=2)+($E>=3)+($F>=3)+($G==1)"
+        },
+        {
+          "refId": "J",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "hide": true,
+          "expression": "($A==99)+($B==99)+($C==99)+($D==99)+($E==99)+($F==99)+($G==99)"
+        },
+        {
+          "refId": "K",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "hide": true,
+          "expression": "($D==1)+(($E==1)||($E==2))+(($F==1)||($F==2))"
+        },
+        {
+          "refId": "H",
+          "datasource": { "type": "__expr__", "uid": "__expr__" },
+          "type": "math",
+          "expression": "($I>0)*3 + (($I==0)&&($J>0))*2 + (($I==0)&&($J==0)&&($K>0))*1"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "NO DATA",
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "HEALTHY", "color": "green", "index": 0 },
+                "1": { "text": "DEGRADED", "color": "orange", "index": 1 },
+                "2": { "text": "UNKNOWN", "color": "blue", "index": 2 },
+                "3": { "text": "UNHEALTHY", "color": "red", "index": 3 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "blue", "value": 2 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 109,
+      "type": "row",
+      "title": "Active Alerts",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "alertlist",
+      "title": "Active Alerts",
+      "description": "지금 firing 중이거나 pending인 Grafana alert를 전부 보여준다. Overall System Health가 DEGRADED/UNHEALTHY일 때 정확히 어떤 alert(NodeDown/HighCPU/HighMemory/DiskWarning/DiskCritical/StreamProcessorDown/StreamProcessorStale/PrometheusUnreachable/OpsAgentUnreachable 등)가 원인인지 여기서 바로 확인한다. 아무것도 없으면 firing 중인 alert가 없다는 뜻이다(정상).",
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 5 },
+      "options": {
+        "maxItems": 20,
+        "sortOrder": 3,
+        "dashboardAlerts": false,
+        "stateFilter": { "firing": true, "pending": true, "noData": false, "normal": false, "error": true },
+        "viewMode": "list",
+        "showOptions": "current"
+      },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "EC2 Instances",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "Project EC2",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 10, "type": "stat", "title": "Project EC2 · Status", "datasource": "Prometheus", "gridPos": { "x": 0, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "up{job=\"project-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    { "id": 11, "type": "gauge", "title": "Project EC2 · CPU %", "datasource": "Prometheus", "gridPos": { "x": 3, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"project-node\", mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 12, "type": "gauge", "title": "Project EC2 · Memory %", "datasource": "Prometheus", "gridPos": { "x": 6, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"project-node\"} / node_memory_MemTotal_bytes{job=\"project-node\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 13, "type": "gauge", "title": "Project EC2 · Disk %", "datasource": "Prometheus", "gridPos": { "x": 9, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 80 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 14, "type": "stat", "title": "Project EC2 · Load (1m)", "datasource": "Prometheus", "gridPos": { "x": 12, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "node_load1{job=\"project-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    { "id": 15, "type": "stat", "title": "Project EC2 · Uptime", "datasource": "Prometheus", "gridPos": { "x": 15, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "time() - node_boot_time_seconds{job=\"project-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "dtdurations" }, "overrides": [] }
+    },
+    { "id": 16, "type": "stat", "title": "Project EC2 · Network RX", "datasource": "Prometheus", "gridPos": { "x": 18, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_receive_bytes_total{job=\"project-node\", device!=\"lo\"}[5m]))", "legendFormat": "receive", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    { "id": 17, "type": "stat", "title": "Project EC2 · Network TX", "datasource": "Prometheus", "gridPos": { "x": 21, "y": 13, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_transmit_bytes_total{job=\"project-node\", device!=\"lo\"}[5m]))", "legendFormat": "transmit", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 103,
+      "type": "row",
+      "title": "Spark Streaming EC2",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 20, "type": "stat", "title": "Spark Streaming EC2 · Status", "datasource": "Prometheus", "gridPos": { "x": 0, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "up{job=\"spark-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    { "id": 21, "type": "gauge", "title": "Spark Streaming EC2 · CPU %", "datasource": "Prometheus", "gridPos": { "x": 3, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"spark-node\", mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 22, "type": "gauge", "title": "Spark Streaming EC2 · Memory %", "datasource": "Prometheus", "gridPos": { "x": 6, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"spark-node\"} / node_memory_MemTotal_bytes{job=\"spark-node\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 23, "type": "gauge", "title": "Spark Streaming EC2 · Disk %", "datasource": "Prometheus", "gridPos": { "x": 9, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"spark-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"spark-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 80 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 24, "type": "stat", "title": "Spark Streaming EC2 · Load (1m)", "datasource": "Prometheus", "gridPos": { "x": 12, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "node_load1{job=\"spark-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    { "id": 25, "type": "stat", "title": "Spark Streaming EC2 · Uptime", "datasource": "Prometheus", "gridPos": { "x": 15, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "time() - node_boot_time_seconds{job=\"spark-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "dtdurations" }, "overrides": [] }
+    },
+    { "id": 26, "type": "stat", "title": "Spark Streaming EC2 · Network RX", "datasource": "Prometheus", "gridPos": { "x": 18, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_receive_bytes_total{job=\"spark-node\", device!=\"lo\"}[5m]))", "legendFormat": "receive", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    { "id": 27, "type": "stat", "title": "Spark Streaming EC2 · Network TX", "datasource": "Prometheus", "gridPos": { "x": 21, "y": 19, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_transmit_bytes_total{job=\"spark-node\", device!=\"lo\"}[5m]))", "legendFormat": "transmit", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 104,
+      "type": "row",
+      "title": "Monitoring EC2",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 30, "type": "stat", "title": "Monitoring EC2 · Status", "datasource": "Prometheus", "gridPos": { "x": 0, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "up{job=\"monitoring-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    { "id": 31, "type": "gauge", "title": "Monitoring EC2 · CPU %", "datasource": "Prometheus", "gridPos": { "x": 3, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"monitoring-node\", mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 32, "type": "gauge", "title": "Monitoring EC2 · Memory %", "datasource": "Prometheus", "gridPos": { "x": 6, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"monitoring-node\"} / node_memory_MemTotal_bytes{job=\"monitoring-node\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 33, "type": "gauge", "title": "Monitoring EC2 · Disk %", "datasource": "Prometheus", "gridPos": { "x": 9, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"monitoring-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"monitoring-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 80 }, { "color": "red", "value": 90 }] } }, "overrides": [] }
+    },
+    { "id": 34, "type": "stat", "title": "Monitoring EC2 · Load (1m)", "datasource": "Prometheus", "gridPos": { "x": 12, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "node_load1{job=\"monitoring-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    { "id": 35, "type": "stat", "title": "Monitoring EC2 · Uptime", "datasource": "Prometheus", "gridPos": { "x": 15, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "time() - node_boot_time_seconds{job=\"monitoring-node\"}", "legendFormat": "{{instance}}", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "dtdurations" }, "overrides": [] }
+    },
+    { "id": 36, "type": "stat", "title": "Monitoring EC2 · Network RX", "datasource": "Prometheus", "gridPos": { "x": 18, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_receive_bytes_total{job=\"monitoring-node\", device!=\"lo\"}[5m]))", "legendFormat": "receive", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    { "id": 37, "type": "stat", "title": "Monitoring EC2 · Network TX", "datasource": "Prometheus", "gridPos": { "x": 21, "y": 25, "w": 3, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(node_network_transmit_bytes_total{job=\"monitoring-node\", device!=\"lo\"}[5m]))", "legendFormat": "transmit", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 110,
+      "type": "row",
+      "title": "Host Trends",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 80, "type": "timeseries", "title": "Host CPU Usage over Time", "description": "EC2 3대의 CPU 사용률 추세다. project-infrastructure.json의 CPU Usage over Time 패널과 같은 query를 job 정규식으로 3대 EC2에 확장했다. 위 CPU % gauge는 현재 값만, 이 그래프는 시간에 따른 변화(스파이크인지 계속 높은 건지)를 보여준다.",
+      "datasource": "Prometheus", "gridPos": { "x": 0, "y": 31, "w": 8, "h": 7 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=~\"project-node|spark-node|monitoring-node\", mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{instance}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    { "id": 81, "type": "timeseries", "title": "Host Memory Usage over Time", "description": "EC2 3대의 Memory 사용률 추세다.",
+      "datasource": "Prometheus", "gridPos": { "x": 8, "y": 31, "w": 8, "h": 7 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=~\"project-node|spark-node|monitoring-node\"} / node_memory_MemTotal_bytes{job=~\"project-node|spark-node|monitoring-node\"})", "legendFormat": "{{instance}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    { "id": 82, "type": "timeseries", "title": "Host Disk Usage over Time", "description": "EC2 3대의 root filesystem 사용률 추세다. DiskWarning(80%)/DiskCritical(90%) alert의 근거가 되는 값이 서서히 차오르는지 여기서 미리 확인할 수 있다.",
+      "datasource": "Prometheus", "gridPos": { "x": 16, "y": 31, "w": 8, "h": 7 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "100 * (1 - node_filesystem_avail_bytes{job=~\"project-node|spark-node|monitoring-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=~\"project-node|spark-node|monitoring-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})", "legendFormat": "{{instance}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 105,
+      "type": "row",
+      "title": "Service Status",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 40, "type": "stat", "title": "Kafka", "description": "Kafka dashboard의 Component Status와 완전히 같은 query/mapping이다(판정 기준 일치).",
+      "datasource": "Prometheus", "gridPos": { "x": 0, "y": 39, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "(3 * (up{job=\"kafka\"} == bool 0) > 0) or (2 * (kafka_brokers{job=\"kafka\"} == bool 0) > 0) or (1 * (sum by (instance, job) (kafka_topic_partition_under_replicated_partition{job=\"kafka\"}) > bool 0) > 0) or (0 * up{job=\"kafka\"})", "legendFormat": "kafka", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "HEALTHY", "color": "green", "index": 0 }, "1": { "text": "UNDER REPLICATED", "color": "orange", "index": 1 }, "2": { "text": "BROKER DOWN", "color": "red", "index": 2 }, "3": { "text": "TARGET DOWN", "color": "red", "index": 3 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 2 }] } }, "overrides": [] },
+      "links": [{ "title": "Kafka", "url": "/d/kafka?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 41, "type": "stat", "title": "Airflow", "description": "Airflow dashboard의 Component Status와 완전히 같은 query/mapping이다(판정 기준 일치).",
+      "datasource": "Prometheus", "gridPos": { "x": 6, "y": 39, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "(4 * (up{job=\"airflow\"} == bool 0) > 0) or (3 * (sum by (instance, job) (increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) == bool 0) > 0) or (2 * (max by (instance, job) (airflow_dag_processing_last_run_seconds_ago{job=\"airflow\"}) > bool 300) > 0) or (1 * (sum by (instance, job) (airflow_dag_processing_import_errors{job=\"airflow\"}) > bool 0) > 0) or (0 * up{job=\"airflow\"})", "legendFormat": "airflow", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "HEALTHY", "color": "green", "index": 0 }, "1": { "text": "DAG IMPORT ERROR", "color": "orange", "index": 1 }, "2": { "text": "DAG PROCESSOR STALE", "color": "orange", "index": 2 }, "3": { "text": "SCHEDULER HEARTBEAT LOST", "color": "red", "index": 3 }, "4": { "text": "METRICS TARGET DOWN", "color": "red", "index": 4 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 3 }] } }, "overrides": [] },
+      "links": [{ "title": "Airflow", "url": "/d/airflow?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 42, "type": "stat", "title": "Spark Streaming", "description": "Spark Streaming dashboard의 Component Status와 완전히 같은 query/mapping이다(판정 기준 일치).",
+      "datasource": "Prometheus", "gridPos": { "x": 12, "y": 39, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "(4 * (up{job=\"stream-processor\"} == bool 0) > 0) or (3 * (stream_processor_query_running{job=\"stream-processor\"} == bool 0) > 0) or (2 * (((time() - stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"}) and (stream_processor_last_progress_timestamp_seconds{job=\"stream-processor\"} > 0)) > bool 330) > 0) or (1 * (stream_processor_event_time_lag_seconds{job=\"stream-processor\"} > bool 330) > 0) or (0 * up{job=\"stream-processor\"})", "legendFormat": "stream-processor", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "RUNNING", "color": "green", "index": 0 }, "1": { "text": "EVENT DATA STALE", "color": "orange", "index": 1 }, "2": { "text": "PROGRESS STALE", "color": "orange", "index": 2 }, "3": { "text": "QUERY STOPPED", "color": "red", "index": 3 }, "4": { "text": "TARGET DOWN", "color": "red", "index": 4 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 3 }] } }, "overrides": [] },
+      "links": [{ "title": "Spark Streaming", "url": "/d/spark-streaming?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 43, "type": "stat", "title": "Serving API", "description": "Serving API dashboard의 Component Status와 완전히 같은 query/mapping이다(판정 기준 일치).",
+      "datasource": "Prometheus", "gridPos": { "x": 18, "y": 39, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "(1 * (up{job=\"serving-api\"} == bool 0) > 0) or (0 * up{job=\"serving-api\"})", "legendFormat": "serving-api", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "HEALTHY", "color": "green", "index": 0 }, "1": { "text": "TARGET DOWN", "color": "red", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "links": [{ "title": "Serving API", "url": "/d/serving-api?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 47, "type": "stat", "title": "EMR Serverless", "description": "AWS/EMRServerless RunningJobs(Statistic: Maximum) 직접 조회 — service-status-overview.json/emr-serverless.json의 Running Jobs 패널과 완전히 같은 query(#410, matchExact:true)다. RunningJobs=0은 idle 상태이므로 IDLE(파랑)로 표시하고 DOWN으로 취급하지 않는다. 6시간 창 안에 metric 자체가 전혀 없으면(Application ID/Name이 잘못됐거나 IAM 권한 문제, 또는 오래 idle이라 auto-stop된 상태 포함) NO METRIC DATA(주황)로 표시한다 — 실제 상태는 `aws emr-serverless get-application --application-id $application_id`로 확인해야 한다. Prometheus 기반이 아니라서 위 Overall System Health 판정에는 포함하지 않았다(service-status-overview.json의 Pipeline Health와 같은 이유).",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "timeFrom": "6h", "gridPos": { "x": 0, "y": 44, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "namespace": "AWS/EMRServerless", "metricName": "RunningJobs", "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" }, "statistic": "Maximum", "region": "default", "matchExact": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "noValue": "NO METRIC DATA", "color": { "mode": "thresholds" }, "mappings": [{ "type": "special", "options": { "match": "null", "result": { "text": "NO METRIC DATA", "color": "orange", "index": 0 } } }, { "type": "value", "options": { "0": { "text": "IDLE", "color": "blue", "index": 1 } } }, { "type": "range", "options": { "from": 1, "to": 1000000, "result": { "text": "RUNNING", "color": "green", "index": 2 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] } }, "overrides": [] },
+      "links": [{ "title": "EMR Serverless", "url": "/d/emr-serverless?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 44, "type": "stat", "title": "Prometheus", "description": "blackbox_exporter가 http://prometheus:9090/-/ready를 외부에서 probe한 결과다(#monitoring self-health). Prometheus 자체가 죽으면 이 값도 더 이상 갱신되지 않는다 — Prometheus가 죽었는데도 최신 값처럼 보이면 이 패널 자체가 stale임을 의심한다.",
+      "datasource": "Prometheus", "gridPos": { "x": 6, "y": 44, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "probe_success{instance=\"http://prometheus:9090/-/ready\"}", "legendFormat": "prometheus", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    { "id": 45, "type": "stat", "title": "Grafana", "description": "blackbox_exporter가 http://grafana:3000/api/health를 외부에서 probe한 결과다. 주의: Grafana가 완전히 죽으면 이 대시보드 자체를 열 수 없으므로 이 패널로는 확인할 수 없다 — Prometheus API를 직접 조회하거나 다른 팀원의 Grafana가 살아있을 때만 유효하다(#monitoring self-health, README 참고).",
+      "datasource": "Prometheus", "gridPos": { "x": 12, "y": 44, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "probe_success{instance=\"http://grafana:3000/api/health\"}", "legendFormat": "grafana", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    { "id": 46, "type": "stat", "title": "Ops Agent", "description": "blackbox_exporter가 http://ops-agent:8080/health를 외부에서 probe한 결과다. ops-agent는 Prometheus metrics를 노출하지 않아(코드 변경 없이) 이 방식이 유일한 상태 확인 수단이다 — 이 값이 DOWN이어도 Grafana가 직접 보내는 최초 장애 Slack 알림은 계속 동작한다(ops-agent와 무관하게 독립적으로 발송).",
+      "datasource": "Prometheus", "gridPos": { "x": 18, "y": 44, "w": 6, "h": 5 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "probe_success{instance=\"http://ops-agent:8080/health\"}", "legendFormat": "ops-agent", "instant": true }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal", "textMode": "value_and_name", "colorMode": "background", "graphMode": "none", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+    },
+    {
+      "id": 107,
+      "type": "row",
+      "title": "Trends",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 49, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 60, "type": "timeseries", "title": "Kafka Message Rate over Time (offset increase, approx.)", "description": "kafka.json의 Message Rate over Time 패널과 완전히 같은 query다.",
+      "datasource": "Prometheus", "gridPos": { "x": 0, "y": 50, "w": 12, "h": 7 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum by (instance, topic) (rate(kafka_topic_partition_current_offset{job=\"kafka\", topic!~\"__.*\"}[5m]))", "legendFormat": "{{instance}} / {{topic}}" }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "links": [{ "title": "Kafka", "url": "/d/kafka?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 61, "type": "timeseries", "title": "Spark Streaming Rows/sec over Time", "description": "spark-streaming.json의 Rows/sec over Time 패널과 완전히 같은 query다.",
+      "datasource": "Prometheus", "gridPos": { "x": 12, "y": 50, "w": 12, "h": 7 },
+      "targets": [
+        { "refId": "A", "datasource": "Prometheus", "expr": "stream_processor_input_rows_per_second{job=\"stream-processor\"}", "legendFormat": "input rows/sec" },
+        { "refId": "B", "datasource": "Prometheus", "expr": "stream_processor_processed_rows_per_second{job=\"stream-processor\"}", "legendFormat": "processed rows/sec" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "links": [{ "title": "Spark Streaming", "url": "/d/spark-streaming?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 62, "type": "timeseries", "title": "Airflow Task Success/Failure Rate", "description": "airflow.json의 Task Success Rate/Task Failure Rate 패널과 같은 query를 시간축(range query)으로 합쳤다.",
+      "datasource": "Prometheus", "gridPos": { "x": 0, "y": 57, "w": 12, "h": 7 },
+      "targets": [
+        { "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(airflow_ti_successes{job=\"airflow\"}[5m])) or vector(0)", "legendFormat": "successes/sec" },
+        { "refId": "B", "datasource": "Prometheus", "expr": "sum(rate(airflow_ti_failures{job=\"airflow\"}[5m])) or vector(0)", "legendFormat": "failures/sec" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [{ "matcher": { "id": "byName", "options": "failures/sec" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "links": [{ "title": "Airflow", "url": "/d/airflow?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    { "id": 63, "type": "timeseries", "title": "Serving API Requests/sec", "description": "serving-api.json의 Requests/sec 패널과 같은 query를 시간축(range query)으로 바꿨다.",
+      "datasource": "Prometheus", "gridPos": { "x": 12, "y": 57, "w": 12, "h": 7 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum(rate(serving_api_http_requests_total{job=\"serving-api\"}[5m])) or vector(0)", "legendFormat": "requests/sec" }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "links": [{ "title": "Serving API", "url": "/d/serving-api?from=${__from}&to=${__to}", "targetBlank": false }]
+    },
+    {
+      "id": 108,
+      "type": "row",
+      "title": "Container Resource Usage",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 64, "w": 24, "h": 1 },
+      "panels": []
+    },
+    { "id": 70, "type": "timeseries", "title": "Container CPU Usage", "description": "EC2 3대(Project/Spark Streaming/Monitoring)에서 뜨는 모든 컨테이너의 CPU 사용률 — project-infrastructure.json의 Container CPU Usage 패널과 같은 query를 job 정규식으로 3대 EC2에 확장했다. cAdvisor 기준이라 컨테이너가 하나도 없거나 cAdvisor 자체가 아직 안 떠 있으면 No data다. legend에 instance(어느 EC2인지)와 컨테이너 이름이 함께 나온다.",
+      "datasource": "Prometheus", "gridPos": { "x": 0, "y": 65, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum by (instance, name) (rate(container_cpu_usage_seconds_total{job=~\"project-containers|spark-containers|monitoring-containers\", name!=\"\"}[5m])) * 100", "legendFormat": "{{instance}} / {{name}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    { "id": 71, "type": "timeseries", "title": "Container Memory Usage", "description": "EC2 3대에서 뜨는 모든 컨테이너의 Memory(working set) 사용량 — project-infrastructure.json의 Container Memory Usage 패널과 같은 query를 job 정규식으로 3대 EC2에 확장했다.",
+      "datasource": "Prometheus", "gridPos": { "x": 12, "y": 65, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "datasource": "Prometheus", "expr": "sum by (instance, name) (container_memory_working_set_bytes{job=~\"project-containers|spark-containers|monitoring-containers\", name!=\"\"})", "legendFormat": "{{instance}} / {{name}}" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 106,
+      "type": "row",
+      "title": "Notes",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 73, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 50,
+      "type": "text",
+      "title": "How to read this dashboard",
+      "gridPos": { "x": 0, "y": 74, "w": 24, "h": 5 },
+      "options": {
+        "mode": "markdown",
+        "content": "이 대시보드는 상세 분석용이 아니라 **\"현재 어디가 문제인지 한눈에 보는 화면\"**이다. 맨 위 **Overall System Health**가 전체 요약(초록=정상/주황=경고/빨강=장애/파랑=판단 불가), 그 아래 **Active Alerts**가 지금 실제로 firing 중인 alert 목록이다 — DEGRADED/UNHEALTHY가 뜨면 여기서 원인을 바로 확인한다. **EC2 Instances**/**Host Trends**는 EC2 3대의 지금 값과 추세, **Service Status**/**Trends**는 서비스별 상태와 대표 그래프, **Container Resource Usage**는 어떤 컨테이너가 자원을 많이 쓰는지 보여준다. 전체 그래프를 다 옮기지 않고 대표 그래프만 골랐다 — 더 자세히 보려면 각 패널을 클릭(또는 위 링크)해 상세 대시보드(Kafka/Airflow/Spark Streaming/Serving API/Project Infrastructure)로 이동한다.\n\n- **UNKNOWN**은 장애가 아니라 \"판단할 metric이 아직 없다\"는 뜻이다(예: exporter가 막 재시작해 아직 첫 scrape 전, 또는 Prometheus 설정에 job이 빠짐). 빨간색(UNHEALTHY)과 구분해서 봐야 한다.\n- **Prometheus/Grafana/Ops Agent** 3개 패널은 blackbox_exporter가 외부에서 HTTP로 probe한 결과다. **Grafana가 완전히 죽으면 이 대시보드 자체를 열 수 없어 이 패널로 확인할 수 없다** — Grafana Alerting도 Grafana 프로세스 안에서 돌기 때문에 Grafana 자신의 죽음은 자동 Slack 알림도 나가지 않는다(구조적 한계, README의 Monitoring self-health 절 참고). Prometheus/Ops Agent가 죽는 경우는 Grafana Alerting이 감지해 Slack으로 알림이 나간다.\n- EC2 host alert(NodeDown/HighCPU/HighMemory/DiskWarning/DiskCritical)와 self-health alert(PrometheusUnreachable/OpsAgentUnreachable)는 자동 조치 없이 Slack(infra-slack contact point)으로만 알림이 간다."
+      }
+    }
+  ]
+}
