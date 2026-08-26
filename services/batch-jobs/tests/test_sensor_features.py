@@ -1587,6 +1587,15 @@ class TestHourlySegmentFeatures:
 
         validate_hourly_segment_features(df)
 
+    def test_returns_the_row_count_so_callers_can_skip_a_separate_count(self, spark) -> None:
+        # count()와 row-level 검증을 한 agg로 합쳤으니(#539) 그 값을 그대로 돌려줘야
+        # 호출부가 별도 count()를 안 해도 된다.
+        df = self.feature_rows_df(
+            spark, [self.feature_row(segment_id="S1"), self.feature_row(segment_id="S2")]
+        )
+
+        assert validate_hourly_segment_features(df) == 2
+
     def test_cache_is_released_after_successful_validation(self, spark) -> None:
         df = self.feature_rows_df(spark, [self.feature_row()])
 
@@ -1772,6 +1781,7 @@ class TestHourlySegmentFeatureJob:
             self.RUN_ID,
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            cleansing_quarantined_count=0,
             raw_record_source=self.raw_records(spark, rows),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
@@ -1941,6 +1951,37 @@ class TestHourlySegmentFeatureJob:
         # 원문은 더 이상 전 구간을 따라오지 않고 event_id로 되찾는다 — 맞는 행이 붙었는지 확인
         assert quarantined[0]["raw_record"] == '{"raw":"e2"}'
 
+    def test_multiple_unmatched_events_each_keep_their_own_raw_record(
+        self, spark, tmp_path
+    ) -> None:
+        """distinct()/broadcast() 힌트를 뺀 뒤에도(#539) 실패 행마다 맞는 event_id의
+        raw_record가 붙는지 확인한다 — 여러 건이 동시에 실패해도 서로 안 섞여야 한다."""
+        rows = [
+            self.sensor_row(self.TARGET_HOUR + timedelta(seconds=0), "matched"),
+        ] + [
+            self.sensor_row(
+                self.TARGET_HOUR + timedelta(seconds=i + 1),
+                f"unmatched-{i}",
+                trip_seq=i + 1,
+                latitude=self.BASE_LAT + 1.0,
+                longitude=self.BASE_LON,
+            )
+            for i in range(5)
+        ]
+
+        summary, result = self.run_job(spark, tmp_path, rows)
+
+        assert len(result) == 1
+        assert summary.map_matching_quarantined_count == 5
+        quarantined = {
+            row["event_id"]: row["raw_record"]
+            for row in spark.read.parquet(summary.quarantine_output_path).collect()
+        }
+        assert len(quarantined) == 5
+        for i in range(5):
+            event_id = f"unmatched-{i}"
+            assert quarantined[event_id] == f'{{"raw":"{event_id}"}}'
+
     def test_rerunning_the_same_hour_replaces_the_stored_result(self, spark, tmp_path) -> None:
         config = self.build_config(spark, tmp_path)
 
@@ -1954,6 +1995,7 @@ class TestHourlySegmentFeatureJob:
             "run-1",
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            cleansing_quarantined_count=0,
             raw_record_source=self.raw_records(
                 spark, [self.sensor_row(self.TARGET_HOUR, "e1")]
             ),
@@ -1973,6 +2015,7 @@ class TestHourlySegmentFeatureJob:
             "run-2",
             self.PROCESSED_AT,
             cleansing_quarantine=self.empty_quarantine(spark),
+            cleansing_quarantined_count=0,
             raw_record_source=self.raw_records(spark, rows),
             quarantine_output_path=str(tmp_path / "sensor_event_quarantine"),
         )
@@ -2012,6 +2055,7 @@ class TestHourlySegmentFeatureJob:
                 run_id,
                 processed_at,
                 cleansing_quarantine=self.empty_quarantine(spark),
+                cleansing_quarantined_count=0,
                 raw_record_source=self.raw_records(
                     spark, [self.sensor_row(self.TARGET_HOUR, "e1")]
                 ),

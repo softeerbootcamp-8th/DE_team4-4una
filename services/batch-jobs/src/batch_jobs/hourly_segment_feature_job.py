@@ -109,6 +109,7 @@ def run_hourly_segment_feature_job(
     processed_at: datetime,
     *,
     cleansing_quarantine: DataFrame,
+    cleansing_quarantined_count: int,
     raw_record_source: DataFrame,
     quarantine_output_path: str,
 ) -> HourlySegmentFeatureJobSummary:
@@ -181,7 +182,17 @@ def run_hourly_segment_feature_job(
                 (F.col("event_time") >= target_hour)
                 & (F.col("event_time") < target_hour_end)
             ).persist(StorageLevel.MEMORY_AND_DISK)
-            target_count = target_df.count()
+            # target_count와 map matching 실패 건수(segment_id IS NULL)를 한 agg로
+            # 같이 얻는다 — 이러면 뒤에서 map_matching_quarantine을 따로 persist/count할
+            # 필요가 없다(#539). materialize 목적도 이 agg 하나로 충분하다.
+            target_stats = target_df.agg(
+                F.count(F.lit(1)).alias("total"),
+                F.sum(F.when(F.col("segment_id").isNull(), 1).otherwise(0)).alias(
+                    "map_match_failed"
+                ),
+            ).first()
+            target_count = target_stats["total"]
+            map_matching_quarantined_count = target_stats["map_match_failed"] or 0
             steering_fields["rows"] = target_count
         try:
             logger.info(
@@ -195,23 +206,24 @@ def run_hourly_segment_feature_job(
             with perf_phase(
                 logger, "sensor_processing.quarantine_write"
             ) as quarantine_fields:
+                # map_matching_quarantined_count는 위 target_stats agg에서 이미 얻었으므로
+                # 여기서 별도로 persist/count하지 않는다 — combined_quarantine은 아래
+                # write_hourly_quarantine의 write 액션 한 번으로만 materialize된다(#539).
                 map_matching_quarantine = _build_map_matching_quarantine(
                     target_df, raw_record_source, run_id, processed_at
-                ).persist(StorageLevel.MEMORY_AND_DISK)
-                try:
-                    map_matching_quarantined_count = map_matching_quarantine.count()
-                    combined_quarantine = cleansing_quarantine.unionByName(
-                        map_matching_quarantine
-                    )
-                    quarantine_write = write_hourly_quarantine(
-                        spark,
-                        combined_quarantine,
-                        quarantine_output_path,
-                        target_hour,
-                        run_id,
-                    )
-                finally:
-                    map_matching_quarantine.unpersist()
+                )
+                combined_quarantine = cleansing_quarantine.unionByName(
+                    map_matching_quarantine
+                )
+                quarantine_write = write_hourly_quarantine(
+                    spark,
+                    combined_quarantine,
+                    quarantine_output_path,
+                    target_hour,
+                    run_id,
+                    expected_count=cleansing_quarantined_count
+                    + map_matching_quarantined_count,
+                )
                 quarantine_fields["rows"] = quarantine_write.row_count
 
             accepted_count = target_count - map_matching_quarantined_count
@@ -219,10 +231,10 @@ def run_hourly_segment_feature_job(
                 result = build_hourly_segment_features(
                     target_df, feature_version=feature_version, run_id=run_id, processed_at=processed_at
                 ).persist(StorageLevel.MEMORY_AND_DISK)
-                # 한 번에 materialize해 validate/write가 이 캐시를 재사용하게 한다(#474).
-                result_count = result.count()
-                # 이미 persist된 DataFrame이면 validate가 캐시를 건드리지 않아 여기서 재계산 안 한다.
-                validate_hourly_segment_features(result)
+                # validate가 행 수 계산(count)과 NULL/기간/카운트 위반 검사를 한 agg로
+                # 같이 하고 그 count를 돌려준다(#539) — 이미 persist된 DataFrame이면
+                # validate가 캐시를 건드리지 않아 여기서 재계산 안 한다(#474).
+                result_count = validate_hourly_segment_features(result)
                 aggregation_fields["rows"] = result_count
             try:
                 logger.info(
@@ -310,16 +322,24 @@ def _build_map_matching_quarantine(
         F.lit(rejected_at).alias("_rejected_at"),
         F.lit(rejected_at.date()).alias("rejected_date"),
     )
-    # 실패 행은 소수라 그 event_id만 broadcast해 Bronze에서 원문을 끌어온다.
-    # Bronze에는 같은 event_id가 중복될 수 있어(중복 제거 전) 한 건만 남긴다.
+    # failed.event_id는 이미 유일하다 — T1 dedup(deduplication.key=[event_id])이
+    # target_df의 event_id 유일성을 보장하고, match_segment_candidates()가 event당
+    # 결과 1행만 돌려주므로(#479) matched=target_df도 유일성이 이어진다. 그래서
+    # .distinct()가 필요 없다. Bronze(raw_record_source)에는 같은 event_id가
+    # 중복될 수 있어(중복 제거 전) dropDuplicates는 그대로 둔다.
+    #
+    # broadcast 힌트는 강제하지 않는다 — 실패 건수가 실측에서 100만 건을 넘는
+    # 경우가 있어(#539) 무조건 broadcast하면 OOM 위험이 있다. 이 저장소는
+    # spark.sql.autoBroadcastJoinThreshold나 AQE 설정을 오버라이드하지 않으므로
+    # 기본값(AQE 활성화)이 그대로 적용되고, AQE가 실행 중 실측 크기를 보고
+    # 작을 때만 알아서 broadcast join으로 바꿔준다 — 행 수 magic number 없이
+    # Spark의 판단을 그대로 쓴다.
     raw_records = (
-        raw_record_source.join(
-            F.broadcast(failed.select("event_id").distinct()), on="event_id"
-        )
+        raw_record_source.join(failed.select("event_id"), on="event_id")
         .dropDuplicates(["event_id"])
         .select("event_id", F.col(RAW_RECORD_COLUMN).alias("raw_record"))
     )
-    return failed.join(F.broadcast(raw_records), on="event_id", how="left").select(
+    return failed.join(raw_records, on="event_id", how="left").select(
         "event_id",
         "trip_id",
         "event_date",

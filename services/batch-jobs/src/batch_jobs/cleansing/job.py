@@ -36,6 +36,8 @@ class CleansedSensorEvents:
 
     processed: DataFrame
     quarantined: DataFrame
+    # dedup Window 캐시(validate.CleansingResult.cache_to_release)가 있으면 그대로 전달한다.
+    dedup_cache: DataFrame | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +84,9 @@ def run_cleansing_job(
     rules = load_cleansing_config(cleansing_config.rules_config_path)
     window_start, window_end = feature_input_window(target_hour)
     processed_frames: list[DataFrame] = []
-    cached_bronze_frames: list[DataFrame] = []
+    # 여기서 캐시해 넘긴 프레임(hourly bronze, dedup Window 결과)을 모아 뒀다가
+    # 아래 finally에서 한 번에 unpersist한다.
+    cached_frames: list[DataFrame] = []
     target_processed: DataFrame | None = None
     target_quarantined: DataFrame | None = None
     target_bronze: DataFrame | None = None
@@ -103,7 +107,9 @@ def run_cleansing_job(
                 run_id,
                 processed_at,
             )
-            cached_bronze_frames.append(hourly_bronze)
+            cached_frames.append(hourly_bronze)
+            if cleansed.dedup_cache is not None:
+                cached_frames.append(cleansed.dedup_cache)
             processed_frames.append(cleansed.processed)
             if hour == target_hour:
                 target_processed = cleansed.processed
@@ -120,13 +126,22 @@ def run_cleansing_job(
         processed_window = _union_frames(processed_frames).persist(
             StorageLevel.MEMORY_AND_DISK
         )
-        # persist는 lazy라 여기서 즉시 materialize하지 않으면, 바로 아래 첫 action
-        # (target_processed.count())이 processed_window가 아닌 다른 DataFrame을
-        # 건드려서 실제 계산이 run_hourly_segment_feature_job 안의 target_df.count()
-        # (#386)까지 조용히 미뤄진다(#389). count()로 여기서 먼저 materialize한다.
-        processed_window.count()
+        # persist는 lazy라 여기서 즉시 materialize하지 않으면, 바로 아래 첫 action이
+        # processed_window가 아닌 다른 DataFrame을 건드려서 실제 계산이
+        # run_hourly_segment_feature_job 안의 target_df.count()(#386)까지 조용히
+        # 미뤄진다(#389). count()로 여기서 먼저 materialize하고 그 값을 재사용한다.
+        processed_window_count = processed_window.count()
         target_quarantined = target_quarantined.persist(StorageLevel.MEMORY_AND_DISK)
-        processed_count = target_processed.count()
+        # feature_input_window()가 항상 target_hour 한 시간만 돌려주므로(_overlapping_hours가
+        # 원소 1개짜리 리스트를 만들고 _union_frames가 그 원소를 그대로 돌려줌)
+        # processed_window는 target_processed와 같은 객체라 위에서 이미 잰 값을 그대로
+        # 쓴다. 창이 넓어져 여러 시간이 섞이면(len(processed_frames) > 1) target_processed만
+        # 별도로 다시 센다.
+        processed_count = (
+            processed_window_count
+            if len(processed_frames) == 1
+            else target_processed.count()
+        )
         cleansing_quarantined_count = target_quarantined.count()
         cleanse_fields["rows"] = processed_count + cleansing_quarantined_count
     try:
@@ -141,6 +156,7 @@ def run_cleansing_job(
                 run_id,
                 processed_at,
                 cleansing_quarantine=target_quarantined,
+                cleansing_quarantined_count=cleansing_quarantined_count,
                 # 맵매칭 실패 격리가 원문을 붙일 때만 쓰는 조회용 두 컬럼.
                 # 이미 캐시된 대상 시간 Bronze에서 뽑으므로 다시 읽지 않는다.
                 raw_record_source=target_bronze.select("event_id", RAW_RECORD_COLUMN),
@@ -149,8 +165,8 @@ def run_cleansing_job(
     finally:
         target_quarantined.unpersist()
         processed_window.unpersist()
-        for hourly_bronze in cached_bronze_frames:
-            hourly_bronze.unpersist()
+        for cached_frame in cached_frames:
+            cached_frame.unpersist()
 
     _log_summary(
         target_hour=target_hour,
@@ -196,6 +212,7 @@ def cleanse_bronze_sensor_events(
     return CleansedSensorEvents(
         processed=to_processed_sensor_events(result.passed, run_id, processed_at),
         quarantined=result.quarantined,
+        dedup_cache=result.cache_to_release,
     )
 
 

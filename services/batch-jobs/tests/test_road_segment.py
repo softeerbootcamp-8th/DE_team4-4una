@@ -1205,6 +1205,7 @@ class TestBuild:
             spark, sensor_df, config, self.TARGET_HOUR, self.SNAPSHOT, self.FEATURE_VERSION,
             self.RUN_ID, self.PROCESSED_AT,
             cleansing_quarantine=spark.createDataFrame([], SENSOR_EVENT_QUARANTINE_SCHEMA),
+            cleansing_quarantined_count=0,
             raw_record_source=spark.createDataFrame(
                 [("e1", "{}")], ["event_id", RAW_RECORD_COLUMN]
             ),
@@ -1253,6 +1254,7 @@ class TestBuild:
                 cleansing_quarantine=spark.createDataFrame(
                     [], SENSOR_EVENT_QUARANTINE_SCHEMA
                 ),
+                cleansing_quarantined_count=0,
                 raw_record_source=spark.createDataFrame(
                     [("e1", "{}")], ["event_id", RAW_RECORD_COLUMN]
                 ),

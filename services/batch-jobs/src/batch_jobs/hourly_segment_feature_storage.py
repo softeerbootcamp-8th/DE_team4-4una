@@ -55,8 +55,9 @@ def write_hourly_segment_features(
     try:
         result.write.parquet(staging_path)
         staged = spark.read.parquet(staging_path)
-        validate_hourly_segment_features(staged)
-        row_count = staged.count()
+        # validate가 검증과 count를 한 스캔에서 같이 하고 그 값을 돌려주므로(#539)
+        # staged.count()를 따로 부르지 않는다.
+        row_count = validate_hourly_segment_features(staged)
         if row_count == 0:
             raise ValueError("refusing to write an empty result over an existing hour")
         # 호출부가 이미 count를 알고 있으면 재사용한다 — 여기서 또 count()하면 상류 lineage가 재계산될 수 있다(#474).

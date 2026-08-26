@@ -36,8 +36,17 @@ def write_hourly_quarantine(
     quarantine_output_root: str,
     target_hour: datetime,
     run_id: str,
+    *,
+    expected_count: int | None = None,
 ) -> QuarantineWriteResult:
-    """Replace only the requested UTC-hour quarantine after validation."""
+    """Replace only the requested UTC-hour quarantine after validation.
+
+    `expected_count`: 호출부가 이미 정확한 행 수를 알고 있으면 넘긴다 — 그러면
+    아래 count()도, 그걸 위한 캐시도 건너뛰고 write 액션 하나만 남는다(#539).
+    read-back 단계에서 여전히 실제 written 파일 수와 이 값을 대조하므로
+    (`_stage_quarantine`의 `expected_count != staged.count()` 체크), 값이 틀리면
+    그대로 실패한다 — 안전장치는 그대로다.
+    """
     _require_safe_run_id(run_id)
     _require_utc_hour(target_hour)
     _require_schema(quarantined, SENSOR_EVENT_QUARANTINE_SCHEMA)
@@ -57,12 +66,13 @@ def write_hourly_quarantine(
     #
     # DataFrame.persist()는 새 객체가 아니라 같은 객체를 돌려주므로, 호출자가 이미
     # 캐시해 넘긴 프레임을 여기서 unpersist하면 남의 캐시를 지운다. 우리가 만든
-    # 캐시만 해제한다.
-    caches_here = quarantined.storageLevel == StorageLevel.NONE
+    # 캐시만 해제한다. expected_count가 있으면 count() 자체를 안 해서 write 액션
+    # 하나만 남으므로(#539) 캐시도 필요 없다.
+    caches_here = expected_count is None and quarantined.storageLevel == StorageLevel.NONE
     if caches_here:
         quarantined.persist(StorageLevel.MEMORY_AND_DISK)
     try:
-        row_count = quarantined.count()
+        row_count = expected_count if expected_count is not None else quarantined.count()
         staged_path = _stage_quarantine(
             spark,
             quarantined,
