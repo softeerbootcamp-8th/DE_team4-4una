@@ -17,6 +17,7 @@ from ops_agent.slack_notifier import SlackNotifier
 from ops_agent.ssh import SshTarget
 
 TARGET = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
+PROJECT_TARGET = SshTarget(host="5.6.7.8", user="ec2-user", key_path="/keys/project.pem")
 
 
 def main_messages(client) -> list[dict]:
@@ -45,6 +46,8 @@ def make_orchestrator(
     recovery_poll_interval_seconds: float = 1.0,
     recovery_wait_seconds: float = 5.0,
     cooldown_seconds: float = 600,
+    ssh_targets=None,
+    remediate=None,
 ):
     slack_client = FakeSlackClient()
 
@@ -62,13 +65,13 @@ def make_orchestrator(
                 )
             }
         ),
-        ssh_target=TARGET,
+        ssh_targets=ssh_targets or {"spark": TARGET, "project": PROJECT_TARGET},
         slack=SlackNotifier(channel="#alerts", client=slack_client),
         cooldown_seconds=cooldown_seconds,
         recovery_poll_interval_seconds=recovery_poll_interval_seconds,
         recovery_wait_seconds=recovery_wait_seconds,
         diagnose=diagnose,
-        remediate=make_fake_remediate(succeeded=remediate_succeeds),
+        remediate=remediate or make_fake_remediate(succeeded=remediate_succeeds),
         sleep=record_sleep,
     )
     return orchestrator, slack_client
@@ -300,3 +303,72 @@ class TestOrchestratorHandle:
         stages = [json.loads(line)["stage"] for line in records if line.startswith("{")]
         # 정상이면 decide()를 부르지 않으므로 policy 단계가 없다.
         assert stages == ["reverify", "diagnose"]
+
+    def test_serving_api_down_is_restarted_on_the_project_host(self, tmp_path):
+        seen = {}
+
+        def spy(target, container, *, action):
+            seen["target"] = target
+            seen["container"] = container
+            return make_fake_remediate()(target, container, action=action)
+
+        orchestrator, _slack = make_orchestrator(
+            tmp_path=tmp_path, statuses=[down_status(), healthy_status()], remediate=spy
+        )
+        incident = Incident.from_grafana_alert(
+            grafana_alert(alertname="ServingApiDown", service="serving-api")
+        )
+
+        outcome = orchestrator.handle(incident)
+
+        assert outcome.remediation is not None
+        assert seen["target"] == PROJECT_TARGET
+        assert seen["container"] == "serving-api"
+
+    def test_the_node_exporter_is_restarted_on_the_spark_host(self, tmp_path):
+        seen = {}
+
+        def spy(target, container, *, action):
+            seen["target"] = target
+            seen["container"] = container
+            return make_fake_remediate()(target, container, action=action)
+
+        orchestrator, _slack = make_orchestrator(
+            tmp_path=tmp_path, statuses=[down_status(), healthy_status()], remediate=spy
+        )
+        incident = Incident.from_grafana_alert(
+            grafana_alert(alertname="SparkNodeExporterDown", service="spark-node")
+        )
+
+        orchestrator.handle(incident)
+
+        assert seen["target"] == TARGET
+        assert seen["container"] == "node-exporter"
+
+    def test_an_unresolvable_ssh_target_escalates_instead_of_guessing(self, tmp_path):
+        # project 설정이 없는데 serving-api를 재시작하려 들면 엉뚱한 호스트를 건드릴 수 있다.
+        orchestrator, slack_client = make_orchestrator(
+            tmp_path=tmp_path, statuses=[down_status()], ssh_targets={"spark": TARGET}
+        )
+        incident = Incident.from_grafana_alert(
+            grafana_alert(alertname="ServingApiDown", service="serving-api")
+        )
+
+        outcome = orchestrator.handle(incident)
+
+        assert outcome.remediation is None
+        assert outcome.escalated is True
+        assert "no ssh target" in block_text(main_messages(slack_client)[0])
+
+    def test_an_alert_without_a_spec_is_escalated_without_touching_any_host(self, tmp_path):
+        orchestrator, slack_client = make_orchestrator(
+            tmp_path=tmp_path, statuses=[down_status()]
+        )
+        incident = Incident.from_grafana_alert(grafana_alert(alertname="SomethingNew"))
+
+        outcome = orchestrator.handle(incident)
+
+        assert outcome.remediation is None
+        assert outcome.escalated is True
+        body = block_text(main_messages(slack_client)[0])
+        assert "읽기만 한 명령" not in body

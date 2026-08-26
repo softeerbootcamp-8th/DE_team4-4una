@@ -116,3 +116,44 @@ class TestActionSpecs:
         from ops_agent.policy import ACTION_SPECS, IMPLEMENTED_ACTIONS
 
         assert all(spec.action in IMPLEMENTED_ACTIONS for spec in ACTION_SPECS.values())
+
+    def test_every_spec_has_a_matching_grafana_alert_rule(self):
+        # 이름이 어긋나면 alert가 와도 명세를 못 찾아 조용히 escalation만 된다.
+        from pathlib import Path
+
+        import yaml
+        from ops_agent.policy import ACTION_SPECS
+
+        repo_root = Path(__file__).resolve().parents[3]
+        rules = yaml.safe_load(
+            (
+                repo_root
+                / "infra/monitoring/grafana/provisioning/alerting/rules.yaml"
+            ).read_text()
+        )
+        titles = {rule["title"] for group in rules["groups"] for rule in group["rules"]}
+
+        assert set(ACTION_SPECS) <= titles
+
+    def test_every_auto_remediate_rule_has_a_spec(self):
+        # auto_remediate 라벨만 붙이고 명세를 빠뜨리면 조치될 것처럼 보이지만 안 된다.
+        from pathlib import Path
+
+        import yaml
+        from ops_agent.policy import ACTION_SPECS
+
+        repo_root = Path(__file__).resolve().parents[3]
+        rules = yaml.safe_load(
+            (
+                repo_root
+                / "infra/monitoring/grafana/provisioning/alerting/rules.yaml"
+            ).read_text()
+        )
+        opted_in = {
+            rule["title"]
+            for group in rules["groups"]
+            for rule in group["rules"]
+            if (rule.get("labels") or {}).get("auto_remediate") == "true"
+        }
+
+        assert opted_in == set(ACTION_SPECS)

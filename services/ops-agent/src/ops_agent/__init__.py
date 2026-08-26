@@ -14,7 +14,6 @@ def main() -> None:
     from ops_agent.owners import load_service_owners_registry
     from ops_agent.prometheus_client import PrometheusClient
     from ops_agent.slack_notifier import SlackNotifier, build_client
-    from ops_agent.ssh import SshTarget
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     config = OpsAgentConfig.from_env()
@@ -25,11 +24,7 @@ def main() -> None:
         ),
         incident_store=IncidentStore(config.incident_store_path),
         owners=load_service_owners_registry(config.dag_owners_config_path),
-        ssh_target=SshTarget(
-            host=config.stream_processor_ssh_host,
-            user=config.stream_processor_ssh_user,
-            key_path=config.stream_processor_ssh_key_path,
-        ),
+        ssh_targets=config.ssh_targets(),
         slack=SlackNotifier(
             channel=config.slack_alert_channel,
             client=build_client(config.slack_bot_token),

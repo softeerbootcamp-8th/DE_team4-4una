@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ops_agent.diagnostics import ContainerDiagnostics, collect_container_diagnostics
@@ -18,25 +18,12 @@ from ops_agent.notification import (
 )
 from ops_agent.owners import ServiceOwnersRegistry
 from ops_agent.policy import ACTION_SPECS, PolicyDecision, decide
-from ops_agent.prometheus_client import (
-    STREAM_PROCESSOR_HEALTH,
-    PrometheusClient,
-    ServiceStatus,
-)
+from ops_agent.prometheus_client import HealthCheck, PrometheusClient, ServiceStatus
 from ops_agent.remediation import RemediationResult, restart_container
 from ops_agent.slack_notifier import SlackNotifier
 from ops_agent.ssh import SshTarget
 
 logger = logging.getLogger(__name__)
-
-
-def _default_diagnose(target: SshTarget) -> ContainerDiagnostics:
-    # Task 4에서 ActionSpec이 컨테이너 이름을 주게 되면 사라진다.
-    return collect_container_diagnostics(target, "stream-processor")
-
-
-def _default_remediate(target: SshTarget) -> RemediationResult:
-    return restart_container(target, "stream-processor", action="restart_stream_processor")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,21 +46,21 @@ class OpsAgentOrchestrator:
         prometheus: PrometheusClient,
         incident_store: IncidentStore,
         owners: ServiceOwnersRegistry,
-        ssh_target: SshTarget,
+        ssh_targets: Mapping[str, SshTarget],
         slack: SlackNotifier,
         cooldown_seconds: float,
         recovery_poll_interval_seconds: float = 10.0,
         recovery_wait_seconds: float = 90.0,
         history_window_seconds: float = 7 * 24 * 3600,
-        diagnose: Callable[[SshTarget], ContainerDiagnostics] = _default_diagnose,
-        remediate: Callable[[SshTarget], RemediationResult] = _default_remediate,
+        diagnose: Callable[..., ContainerDiagnostics] = collect_container_diagnostics,
+        remediate: Callable[..., RemediationResult] = restart_container,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         # diagnose/remediate/sleep은 테스트가 실제 SSH/대기 없이 fake를 주입할 수 있게 콜백으로 뒀다.
         self._prometheus = prometheus
         self._incident_store = incident_store
         self._owners = owners
-        self._ssh_target = ssh_target
+        self._ssh_targets = ssh_targets
         self._slack = slack
         self._cooldown_seconds = cooldown_seconds
         self._recovery_poll_interval_seconds = recovery_poll_interval_seconds
@@ -97,12 +84,20 @@ class OpsAgentOrchestrator:
                 summary=f"{incident.alertname}: status={incident.status!r}, no action taken",
             )
 
-        status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
+        spec = ACTION_SPECS.get(incident.alertname)
+        if spec is None:
+            # 담당 명세가 없으면 확인할 PromQL도 진단할 컨테이너도 정해지지 않는다.
+            # 넘겨짚지 않고 어떤 호스트도 건드리지 않는다.
+            return self._escalate_without_spec(incident)
+
+        status = self._prometheus.evaluate(spec.health)
         self._log_stage("reverify", incident, status=status.label)
         if status.is_healthy:
             # 조치하지 않더라도 알린다 — 침묵하면 Grafana의 감지 알림 뒤로 후속이 없어
             # agent가 죽은 것인지 판단하고 넘어간 것인지 구분할 수 없다(설계 §1-1).
-            diagnostics = self._diagnose(self._ssh_target)
+            diagnostics = self._diagnose(
+                self._ssh_targets[spec.ssh_target_key], spec.container
+            )
             self._log_diagnose(incident, diagnostics)
             self._notify(
                 incident,
@@ -128,11 +123,22 @@ class OpsAgentOrchestrator:
                 ),
             )
 
-        policy_decision = decide(incident, ACTION_SPECS.get(incident.alertname))
+        policy_decision = decide(incident, spec)
         self._log_stage(
             "policy", incident, allowed=policy_decision.allowed, reason=policy_decision.reason
         )
-        diagnostics = self._diagnose(self._ssh_target)
+
+        target = self._ssh_targets.get(spec.ssh_target_key)
+        if target is None:
+            # 설정이 없는 호스트를 넘겨짚어 엉뚱한 곳에 docker restart를 쏘지 않는다.
+            policy_decision = PolicyDecision(
+                action=spec.action,
+                allowed=False,
+                reason=f"no ssh target configured for {spec.ssh_target_key!r}",
+            )
+            diagnostics = ContainerDiagnostics("unknown", None, "", ())
+        else:
+            diagnostics = self._diagnose(target, spec.container)
         self._log_diagnose(incident, diagnostics)
 
         if not policy_decision.allowed:
@@ -174,7 +180,7 @@ class OpsAgentOrchestrator:
         event_id = self._incident_store.record_attempt(
             incident.fingerprint, incident.alertname, policy_decision.action.value
         )
-        remediation_result = self._remediate(self._ssh_target)
+        remediation_result = self._remediate(target, spec.container, action=spec.action.value)
         self._log_stage(
             "remediate",
             incident,
@@ -183,7 +189,7 @@ class OpsAgentOrchestrator:
             command=" ".join(remediation_result.command.argv),
         )
 
-        post_status = self._wait_for_recovery()
+        post_status = self._wait_for_recovery(spec.health)
         recovered = post_status.is_healthy
         self._log_stage("recovery", incident, status=post_status.label, recovered=recovered)
         self._incident_store.record_outcome(
@@ -232,15 +238,32 @@ class OpsAgentOrchestrator:
             commands=[command.display for command in diagnostics.commands],
         )
 
-    def _wait_for_recovery(self) -> ServiceStatus:
-        # docker restart 직후엔 Spark JVM 기동/Prometheus scrape가 아직 안 끝났을 수 있어 즉시 판정하지 않고 폴링한다.
-        status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
+    def _wait_for_recovery(self, check: HealthCheck) -> ServiceStatus:
+        # docker restart 직후엔 프로세스 기동/Prometheus scrape가 아직 안 끝났을 수 있어 즉시 판정하지 않고 폴링한다.
+        status = self._prometheus.evaluate(check)
         elapsed = 0.0
         while not status.is_healthy and elapsed < self._recovery_wait_seconds:
             self._sleep(self._recovery_poll_interval_seconds)
             elapsed += self._recovery_poll_interval_seconds
-            status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
+            status = self._prometheus.evaluate(check)
         return status
+
+    def _escalate_without_spec(self, incident: Incident) -> IncidentOutcome:
+        decision = decide(incident, None)
+        empty = ContainerDiagnostics("unknown", None, "", ())
+        status = ServiceStatus(code=None, label="NOT CHECKED", instance=None, healthy_code=0)
+        self._notify(incident, status, empty, decision, remediation=None, recovered=False)
+        return IncidentOutcome(
+            incident=incident,
+            handled=True,
+            reverified_status=None,
+            policy=decision,
+            diagnostics=None,
+            remediation=None,
+            recovered=False,
+            escalated=True,
+            summary=f"{incident.alertname}: no action spec, escalated",
+        )
 
     def _notify(
         self,
