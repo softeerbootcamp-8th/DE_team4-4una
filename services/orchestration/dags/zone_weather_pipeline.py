@@ -18,7 +18,12 @@ from airflow.providers.standard.operators.python import (
 from airflow.sdk import DAG
 from airflow.timetables.interval import CronDataIntervalTimetable
 from assets import ZONE_WEATHER_ASSET
-from notifications import on_failure_callback, on_success_callback
+from notifications import (
+    on_failure_callback,
+    on_retry_callback,
+    on_success_callback,
+    on_task_success_callback,
+)
 
 
 def _collect_latest_zone_weather(data_interval_end) -> dict:
@@ -111,6 +116,11 @@ with DAG(
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),
         "on_failure_callback": on_failure_callback,
+        # 1차 실패를 즉시 알리고, 이후 전개는 그 알림의 스레드에 이어 붙인다.
+        "on_retry_callback": on_retry_callback,
+        # 재시도 끝에 성공했을 때만 스레드에 복구를 알린다(task 단위 — DAG 단위
+        # on_success_callback과 별개다).
+        "on_success_callback": on_task_success_callback,
     },
     on_success_callback=on_success_callback,
     tags=["zone-weather-pipeline"],

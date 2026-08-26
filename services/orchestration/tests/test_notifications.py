@@ -7,6 +7,7 @@ context 모양과 일치하는지는 로컬 Airflow 수동 검증(README)에서 
 
 from __future__ import annotations
 
+import datetime
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -574,3 +575,143 @@ def test_failure_callback_says_log_has_no_error_trace_instead_of_empty_unknown(
     assert "driver 로그에 오류 흔적이 없습니다" in text
     assert "SPARK_EXECUTOR" in text
     assert "등록된 룰에 해당하지 않습니다" not in text
+
+
+# --- 1차 실패 알림 + 스레드 (#527) ---
+
+
+@dataclass
+class _FakeRetryTask:
+    """retries/retry_delay를 가진 task — 시도 횟수와 재시도 간격 표시에 쓴다."""
+
+    task_group: _FakeTaskGroup | None = None
+    retries: int = 1
+    retry_delay: object = datetime.timedelta(minutes=5)
+
+
+def _retry_context(dag_id, task_instance, *, try_number, retries=1, exception=None):
+    context = _context(dag_id, task_instance, exception=exception)
+    context["task"] = _FakeRetryTask(retries=retries)
+    task_instance.try_number = try_number
+    return context
+
+
+def test_retry_callback_posts_first_failure_to_channel_with_mention(
+    _fake_slack_hook, _fake_object_store
+):
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+
+    notifications.on_retry_callback(context)
+
+    kwargs = _fake_slack_hook.client.chat_postMessage.call_args.kwargs
+    assert "thread_ts" not in kwargs  # 채널에 새 메시지로 나간다
+    assert "1차 실패 (1/2)" in kwargs["text"]
+    assert "<@U0456GHIJKL>" in kwargs["text"]  # 1차에도 담당자를 부른다
+    assert "5분 뒤 재시도합니다" in kwargs["text"]
+
+
+def test_retry_callback_posts_later_attempt_into_the_thread_without_mention(
+    _fake_slack_hook, _fake_object_store
+):
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    task_instance.xcom_store[
+        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
+    ] = "1724650000.000100"
+    context = _retry_context("bronze_compaction", task_instance, try_number=2, retries=2)
+
+    notifications.on_retry_callback(context)
+
+    kwargs = _fake_slack_hook.client.chat_postMessage.call_args.kwargs
+    assert kwargs["thread_ts"] == "1724650000.000100"
+    assert "2차 시도도 실패 (2/3)" in kwargs["text"]
+    assert "<@U0456GHIJKL>" not in kwargs["text"]  # 이미 부른 사람을 또 부르지 않는다
+
+
+def test_final_failure_goes_into_the_same_thread_and_mentions_again(
+    _fake_slack_hook, _fake_object_store
+):
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    task_instance.xcom_store[
+        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
+    ] = "1724650000.000100"
+    context = _retry_context("bronze_compaction", task_instance, try_number=2)
+
+    notifications.on_failure_callback(context)
+
+    kwargs = _fake_slack_hook.client.chat_postMessage.call_args.kwargs
+    assert kwargs["thread_ts"] == "1724650000.000100"
+    assert "최종 실패 (2/2)" in kwargs["text"]
+    assert "<@U0456GHIJKL>" in kwargs["text"]
+    assert "뒤 재시도합니다" not in kwargs["text"]
+
+
+def test_first_failure_alert_remembers_its_thread_ts(_fake_slack_hook, _fake_object_store):
+    pushed = {}
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    task_instance.xcom_push = lambda key, value: pushed.__setitem__(key, value)
+    _fake_slack_hook.client.chat_postMessage.return_value = {"ts": "1724650000.000100"}
+    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+
+    notifications.on_retry_callback(context)
+
+    assert pushed[notifications._ALERT_THREAD_TS_XCOM_KEY] == "1724650000.000100"
+
+
+def test_alert_still_posts_when_thread_ts_cannot_be_stored(_fake_slack_hook, _fake_object_store):
+    # 콜백에서 xcom_push가 막히면 스레드만 포기하고 알림은 그대로 나가야 한다.
+    def _boom(key, value):
+        raise RuntimeError("xcom_push not allowed in callback")
+
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    task_instance.xcom_push = _boom
+    _fake_slack_hook.client.chat_postMessage.return_value = {"ts": "1724650000.000100"}
+
+    notifications.on_retry_callback(
+        _retry_context("bronze_compaction", task_instance, try_number=1)
+    )
+
+    assert "1차 실패" in _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+
+
+def test_task_success_callback_reports_recovery_only_after_a_retry(
+    _fake_slack_hook, _fake_object_store
+):
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    task_instance.xcom_store[
+        ("compact_zone_weather_snapshot", notifications._ALERT_THREAD_TS_XCOM_KEY)
+    ] = "1724650000.000100"
+    context = _retry_context("bronze_compaction", task_instance, try_number=2)
+
+    notifications.on_task_success_callback(context)
+
+    kwargs = _fake_slack_hook.client.chat_postMessage.call_args.kwargs
+    assert kwargs["thread_ts"] == "1724650000.000100"
+    assert "재시도에서 성공했습니다 (2/2)" in kwargs["text"]
+
+
+def test_task_success_callback_is_silent_when_the_task_never_retried(
+    _fake_slack_hook, _fake_object_store
+):
+    task_instance = _FakeTaskInstance(task_id="compact_zone_weather_snapshot")
+    context = _retry_context("bronze_compaction", task_instance, try_number=1)
+
+    notifications.on_task_success_callback(context)
+
+    _fake_slack_hook.client.chat_postMessage.assert_not_called()
+
+
+def test_failure_alert_still_posts_for_a_dag_missing_from_the_registry(
+    _fake_slack_hook, _fake_object_store
+):
+    # dag_owners.py는 미등록 dag_id에 KeyError를 던진다. 그 예외가 콜백에서 터지면
+    # 실패했는데 알림이 오지 않는 최악의 형태가 된다.
+    task_instance = _FakeTaskInstance(task_id="some_task")
+    context = _retry_context("brand_new_pipeline", task_instance, try_number=1)
+
+    notifications.on_failure_callback(context)
+
+    text = _fake_slack_hook.client.chat_postMessage.call_args.kwargs["text"]
+    assert "담당자 미등록" in text
+    assert "brand_new_pipeline" in text
+    assert "some_task" in text
