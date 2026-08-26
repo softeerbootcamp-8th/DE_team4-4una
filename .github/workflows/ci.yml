@@ -414,6 +414,13 @@ jobs:
 
       - name: Tear down smoke-test stack
         if: always()
+        env:
+          PROJECT_EC2_PRIVATE_IP: 10.0.0.1
+          SPARK_EC2_PRIVATE_IP: 10.0.0.2
+          GRAFANA_ADMIN_PASSWORD: ci-placeholder
+          OPS_AGENT_SLACK_BOT_TOKEN: ci-placeholder
+          OPS_AGENT_SLACK_ALERT_CHANNEL: ci-placeholder
+          STREAM_PROCESSOR_SSH_HOST: 10.0.0.3
         run: |
           docker compose -f infra/compose/monitoring.yaml down -v
 
