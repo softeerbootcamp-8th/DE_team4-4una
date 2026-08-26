@@ -26,6 +26,7 @@ from de4_core import (
     standard_manifest_uri,
     standard_snapshot_uri,
 )
+from great_expectations.data_context.types.base import ProgressBarsConfig
 
 DEFAULT_SUITE_PATH = (
     Path(__file__).parent
@@ -131,6 +132,9 @@ def _read_snapshot(
 
 def _validate(frame: pd.DataFrame, suite: gx.ExpectationSuite):
     context = gx.get_context(mode="ephemeral")
+    # tqdm 진행바는 stderr로 나가고 Airflow supervisor는 task stderr를 내용과 무관하게
+    # ERROR로 포워딩해, 정상 검증이 오류처럼 보인다 (#540). context 변수로 꺼 둔다.
+    context.variables.progress_bars = ProgressBarsConfig(globally=False)
     datasource = context.data_sources.add_pandas(name="standard_score_datasource")
     asset = datasource.add_dataframe_asset(name="standard_segment_comfort_score")
     batch_definition = asset.add_batch_definition_whole_dataframe("standard_score_batch")

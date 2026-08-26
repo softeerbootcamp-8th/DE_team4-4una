@@ -102,8 +102,8 @@ def test_dag_preserves_retry_policy():
 def test_all_emr_tasks_submit_with_the_shared_variables():
     module = _load_dag_module()
 
-    # resolve_road_snapshot_date(#402)는 EMR Serverless가 아니라 이 컨테이너 안에서
-    # 도는 PythonOperator라 아래 검증 대상에서 제외한다.
+    # validate_standard_score/report_processing_counts는 EMR Serverless가 아니라
+    # 이 컨테이너 안에서 도는 PythonOperator라 아래 검증 대상에서 제외한다.
     emr_tasks = [
         task for task in module.dag.tasks if isinstance(task, EmrServerlessStartJobOperator)
     ]
@@ -124,17 +124,56 @@ def test_sensor_processing_task_group_contains_the_combined_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert "sensor_processing.resolve_road_snapshot_date" in task_ids
     assert "sensor_processing.run_sensor_processing" in task_ids
 
 
-def test_resolve_road_snapshot_date_is_a_python_operator_not_an_emr_job():
-    """road_environment_uri의 active pointer/manifest를 읽는 건 이 컨테이너에서
-    바로 Python으로 처리하지, EMR Serverless Job Run을 거치지 않는다(#402)."""
+def test_road_snapshot_date_is_resolved_without_a_separate_task():
+    """road_snapshot_date 조회는 별도 PythonOperator가 아니라 인자 렌더링 중에
+    돈다(#540) — DAG에 등록된 매크로가 그 통로다."""
     module = _load_dag_module()
 
-    task = module.dag.get_task("sensor_processing.resolve_road_snapshot_date")
-    assert isinstance(task, PythonOperator)
+    task_ids = {task.task_id for task in module.dag.tasks}
+    assert "sensor_processing.resolve_road_snapshot_date" not in task_ids
+    assert (
+        module.dag.user_defined_macros["resolve_road_snapshot_date"]
+        is module._resolve_road_snapshot_date
+    )
+
+
+def test_road_snapshot_date_macro_actually_renders_into_the_job_arguments(monkeypatch):
+    """등록만 되고 렌더링이 안 되면 EMR에 템플릿 문자열이 그대로 넘어간다(#540).
+
+    별도 task를 없앤 대가로 이 경로가 유일한 안전망이라, 실제 렌더 결과를 본다.
+    """
+    import datetime as dt
+
+    import jobs.road_environment
+
+    module = _load_dag_module()
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(
+            lambda key, default=None: "s3://ref-bucket/road-environment"
+            if key == "REFERENCE_DATA_LAKE_URI"
+            else default
+        ),
+    )
+    monkeypatch.setattr(
+        jobs.road_environment,
+        "resolve_road_snapshot_date_for_month",
+        lambda uri, target_month: dt.date(2026, 3, 12),
+    )
+
+    task = module.dag.get_task("sensor_processing.run_sensor_processing")
+    args = _entry_point_arguments(task)
+    template = args[args.index("--road-snapshot-date") + 1]
+
+    rendered = task.render_template(
+        template, {"data_interval_start": pendulum.datetime(2026, 3, 20, 9, tz="UTC")}
+    )
+
+    assert rendered == "2026-03-12"
 
 
 def test_hourly_scoring_task_group_contains_the_scoring_job():
@@ -154,10 +193,7 @@ def test_run_sensor_processing_invokes_combined_job_with_required_arguments():
     assert "--target-hour" in args
     assert "{{ data_interval_start.isoformat() }}" in args
     assert "--road-snapshot-date" in args
-    assert (
-        "{{ ti.xcom_pull(task_ids='sensor_processing.resolve_road_snapshot_date') }}"
-        in args
-    )
+    assert "{{ resolve_road_snapshot_date(data_interval_start) }}" in args
     assert "--feature-version" in args
     assert "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}" in args
     assert "--bronze-input-path" in args
@@ -188,7 +224,6 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
-        "sensor_processing.resolve_road_snapshot_date",
         "sensor_processing.run_sensor_processing",
         "hourly_scoring.run_hourly_scoring",
         "standard_score.run_standard_score",
@@ -210,9 +245,6 @@ def test_current_score_task_group_is_removed():
 def test_task_groups_follow_standard_score_pipeline_order():
     module = _load_dag_module()
 
-    resolve_road_snapshot_date = module.dag.get_task(
-        "sensor_processing.resolve_road_snapshot_date"
-    )
     run_sensor_processing = module.dag.get_task(
         "sensor_processing.run_sensor_processing"
     )
@@ -222,13 +254,7 @@ def test_task_groups_follow_standard_score_pipeline_order():
         "standard_score.validate_standard_score"
     )
 
-    assert resolve_road_snapshot_date.upstream_task_ids == set()
-    assert resolve_road_snapshot_date.downstream_task_ids == {
-        "sensor_processing.run_sensor_processing"
-    }
-    assert run_sensor_processing.upstream_task_ids == {
-        "sensor_processing.resolve_road_snapshot_date"
-    }
+    assert run_sensor_processing.upstream_task_ids == set()
     assert run_sensor_processing.downstream_task_ids == {
         "hourly_scoring.run_hourly_scoring"
     }
@@ -346,9 +372,11 @@ def test_dag_wires_shared_slack_notification_callbacks():
     assert module.dag.on_success_callback is notifications.on_success_callback
 
 
-def test_resolve_road_snapshot_date_logs_what_it_resolved(monkeypatch, capsys):
-    # 어떤 snapshot을 골랐는지가 XCom에만 담기고 Airflow Log 탭에는 전혀 안 보였다(#406).
-    # 같은 파일의 다른 PythonOperator가 쓰는 print({...}) 요약 관례를 따른다.
+def test_resolve_road_snapshot_date_looks_up_the_month_being_processed(monkeypatch, capsys):
+    """조회 기준은 실행 시각이 아니라 run이 처리 중인 논리 시각의 달이다(#540).
+
+    어떤 snapshot을 골랐는지는 Airflow Log 탭에 남아야 한다(#406).
+    """
     import datetime as dt
 
     import jobs.road_environment
@@ -363,17 +391,27 @@ def test_resolve_road_snapshot_date_logs_what_it_resolved(monkeypatch, capsys):
             else default
         ),
     )
+    seen = {}
+
+    def _fake_resolve(uri, target_month):
+        seen["uri"] = uri
+        seen["target_month"] = target_month
+        return dt.date(2026, 3, 12)
+
     monkeypatch.setattr(
-        jobs.road_environment,
-        "resolve_active_road_snapshot_date",
-        lambda uri: dt.date(2026, 8, 1),
+        jobs.road_environment, "resolve_road_snapshot_date_for_month", _fake_resolve
     )
 
-    assert module._resolve_road_snapshot_date() == "2026-08-01"
+    data_interval_start = pendulum.datetime(2026, 3, 20, 9, tz="UTC")
+    assert module._resolve_road_snapshot_date(data_interval_start) == "2026-03-12"
+
+    assert seen["uri"] == "s3://ref-bucket/road-environment"
+    assert seen["target_month"] == dt.date(2026, 3, 20)
 
     output = capsys.readouterr().out
     assert "s3://ref-bucket/road-environment" in output
-    assert "2026-08-01" in output
+    assert "2026-03" in output
+    assert "2026-03-12" in output
 
 
 def test_resolve_road_snapshot_date_logs_the_fallback_source(monkeypatch, capsys):
@@ -389,7 +427,8 @@ def test_resolve_road_snapshot_date_logs_the_fallback_source(monkeypatch, capsys
         ),
     )
 
-    assert module._resolve_road_snapshot_date() == "2026-07-15"
+    data_interval_start = pendulum.datetime(2026, 8, 20, 9, tz="UTC")
+    assert module._resolve_road_snapshot_date(data_interval_start) == "2026-07-15"
 
     output = capsys.readouterr().out
     assert "2026-07-15" in output

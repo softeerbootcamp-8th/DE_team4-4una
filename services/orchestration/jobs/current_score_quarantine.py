@@ -14,6 +14,7 @@ from pathlib import Path
 
 import great_expectations as gx
 import pandas as pd
+from great_expectations.data_context.types.base import ProgressBarsConfig
 from psycopg2.extras import Json, execute_values
 
 from .weather_rules import LOW_VISIBILITY, WeatherRuleConfig, parse_impact_signature
@@ -96,6 +97,9 @@ def split_batch(
     frame["identity_diff"] = [compute_identity_diff(row, rule_config) for row in rows]
 
     context = gx.get_context(mode="ephemeral")
+    # tqdm 진행바는 stderr로 나가고 Airflow supervisor는 task stderr를 내용과 무관하게
+    # ERROR로 포워딩해, 정상 검증이 오류처럼 보인다 (#540). context 변수로 꺼 둔다.
+    context.variables.progress_bars = ProgressBarsConfig(globally=False)
     datasource = context.data_sources.add_pandas(name="current_score_batch_datasource")
     asset = datasource.add_dataframe_asset(name="current_score_batch")
     batch_definition = asset.add_batch_definition_whole_dataframe(

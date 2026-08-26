@@ -13,7 +13,9 @@ standard_score_pipeline으로 바꾼다. 이슈 #227: 구 segment_comfort_score 
 PostgreSQL 적재 전에 S3 Gold snapshot을 먼저 저장하도록 바뀌었다(Task 구조는 그대로).
 이슈 #402: road_snapshot_date를 하드코딩된 Variable 대신 road_environment_uri의
 active pointer/manifest(#389)에서 읽도록, sensor_processing 맨 앞에
-resolve_road_snapshot_date task를 추가했다. 이슈 #432: 마지막에 EMR Serverless
+resolve_road_snapshot_date task를 추가했다. 이슈 #540: 그 task를 없애고 같은
+조회를 run_sensor_processing의 인자 렌더링에서 user_defined_macros로 수행하며,
+active pointer 대신 run이 처리 중인 달의 build를 고르도록 바꿨다. 이슈 #432: 마지막에 EMR Serverless
 Application을 명시적으로 stop시키는 task를 붙여 idle timeout(15분)을 기다리지
 않게 했다.
 
@@ -117,25 +119,35 @@ _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI = (
 )
 
 
-def _resolve_road_snapshot_date() -> str:
-    """road_environment_uri(#389)의 active pointer/manifest에서 최신 build의
-    road_snapshot_date를 읽는다(#402). REFERENCE_DATA_LAKE_URI Variable이
-    비어 있으면(로컬 개발 등) 기존 하드코딩 Variable로 폴백한다. de4_core는
+def _resolve_road_snapshot_date(data_interval_start: datetime.datetime) -> str:
+    """이 run이 처리 중인 달의 road-environment build에서 road_snapshot_date를 읽는다.
+
+    #402에서는 active pointer가 가리키는 build 하나만 봤지만, 그러면 백필로 과거
+    달을 돌려도 항상 지금 활성화된(=최신) 도로 정보를 쓰게 된다. #540부터는
+    data_interval_start가 속한 달의 build를 고르고, 그 달에 없으면 그 이전 중
+    가장 최신으로 폴백한다.
+
+    이 함수는 DAG의 user_defined_macros로 등록돼 run_sensor_processing의
+    entry_point_arguments를 렌더링할 때 워커에서 호출된다 — de4_core와 jobs는
     dag-processor에 설치돼 있지 않으므로(airflow.yaml 참고) 이 함수 안에서만
     import한다.
     """
-    from jobs.road_environment import resolve_active_road_snapshot_date
+    from jobs.road_environment import resolve_road_snapshot_date_for_month
 
-    # 어느 snapshot을 골랐는지 XCom에만 담기면 Airflow Log 탭에서 확인할 길이
-    # 없다(#406) — 같은 파일의 다른 PythonOperator처럼 print({...}) 요약을 남긴다.
+    # 어느 snapshot을 골랐는지 남기지 않으면 Airflow Log 탭에서 확인할 길이 없다
+    # (#406) — 같은 파일의 다른 PythonOperator처럼 print({...}) 요약을 남긴다.
     # S3 URI는 자격증명이 아니라 로그에 남겨도 안전하다(#406 논의).
+    target_month = data_interval_start.date()
     road_environment_uri = Variable.get("REFERENCE_DATA_LAKE_URI", default="")
     if road_environment_uri:
-        road_snapshot_date = resolve_active_road_snapshot_date(road_environment_uri).isoformat()
+        road_snapshot_date = resolve_road_snapshot_date_for_month(
+            road_environment_uri, target_month
+        ).isoformat()
         print(
             {
                 "source": "REFERENCE_DATA_LAKE_URI",
                 "road_environment_uri": road_environment_uri,
+                "target_month": target_month.strftime("%Y-%m"),
                 "road_snapshot_date": road_snapshot_date,
             }
         )
@@ -151,6 +163,7 @@ def _resolve_road_snapshot_date() -> str:
         {
             "source": "HOURLY_SEGMENT_FEATURE_ROAD_SNAPSHOT_DATE",
             "road_environment_uri": None,
+            "target_month": target_month.strftime("%Y-%m"),
             "road_snapshot_date": fallback,
         }
     )
@@ -248,17 +261,11 @@ with DAG(
     },
     on_success_callback=on_success_callback,
     tags=["standard-score-pipeline", "comfort-score"],
+    # entry_point_arguments 렌더링 중에 road_snapshot_date를 직접 구하기 위한
+    # 매크로다(#540) — 이것 때문에 별도 resolve task를 두지 않아도 된다.
+    user_defined_macros={"resolve_road_snapshot_date": _resolve_road_snapshot_date},
 ) as dag:
     with TaskGroup(group_id="sensor_processing") as sensor_processing:
-        # road_snapshot_date는 사람이 관리하는 Variable이 아니라 road_environment_uri의
-        # active pointer/manifest에서 매 실행마다 새로 읽는다(#402) — EMR Serverless
-        # Job Run의 entry_point_arguments는 Jinja 템플릿 문자열일 뿐이라 이 안에서
-        # 직접 pointer를 읽을 수 없으므로, 별도 PythonOperator로 미리 resolve해 XCom에
-        # 남기고 run_sensor_processing이 그 값을 xcom_pull로 참조한다.
-        resolve_road_snapshot_date = PythonOperator(
-            task_id="resolve_road_snapshot_date",
-            python_callable=_resolve_road_snapshot_date,
-        )
         # T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
         # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
         run_sensor_processing = submit_batch_jobs_command(
@@ -273,7 +280,7 @@ with DAG(
                 "--target-hour",
                 "{{ data_interval_start.isoformat() }}",
                 "--road-snapshot-date",
-                "{{ ti.xcom_pull(task_ids='sensor_processing.resolve_road_snapshot_date') }}",
+                "{{ resolve_road_snapshot_date(data_interval_start) }}",
                 "--feature-version",
                 "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}",
                 "--bronze-input-path",
@@ -290,8 +297,6 @@ with DAG(
         # 이어서 돈다(#495, ADR-0012) — 검증만을 위해 Job Run을 하나 더 띄우면
         # 검증 자체(약 30초)보다 콜드 스타트(약 1분 25초)가 더 든다. 실패하면
         # 이 task가 실패해 scoring으로 넘어가지 않는 것(hard fail)은 그대로다.
-        resolve_road_snapshot_date >> run_sensor_processing
-
     with TaskGroup(group_id="hourly_scoring") as hourly_scoring:
         run_hourly_scoring = submit_batch_jobs_command(
             task_id="run_hourly_scoring",
