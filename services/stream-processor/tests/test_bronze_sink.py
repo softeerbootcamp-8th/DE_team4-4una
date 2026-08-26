@@ -58,7 +58,11 @@ SENSOR_VALUE = {
 }
 
 
-def stream_config(output_path: str, checkpoint_path: str) -> StreamConfig:
+def stream_config(
+    output_path: str,
+    checkpoint_path: str,
+    bronze_output_partitions: int = 2,
+) -> StreamConfig:
     return StreamConfig(
         bootstrap_servers="localhost:9092",
         topic="sensor-events",
@@ -69,7 +73,7 @@ def stream_config(output_path: str, checkpoint_path: str) -> StreamConfig:
         min_offsets_per_trigger=0,
         max_trigger_delay="5m",
         max_offsets_per_trigger=0,
-        bronze_output_partitions=1,
+        bronze_output_partitions=bronze_output_partitions,
         driver_memory="1g",
     )
 
@@ -221,7 +225,9 @@ def test_write_bronze_stream_observes_the_latest_event_time_per_batch(spark, tmp
     assert observed[MAX_EVENT_TIME_FIELD] == "2026-08-14 05:10:00"
 
 
-def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -> None:
+def test_one_micro_batch_preserves_kafka_identity_across_two_output_tasks(
+    spark, tmp_path
+) -> None:
     input_path = tmp_path / "input"
     output_path = tmp_path / "bronze"
     input_path.mkdir()
@@ -258,6 +264,14 @@ def test_one_micro_batch_writes_one_file_per_output_partition(spark, tmp_path) -
         spark.conf.set("spark.sql.files.maxPartitionBytes", previous_max_bytes)
         spark.conf.unset("spark.sql.files.openCostInBytes")
 
-    assert config.bronze_output_partitions == 1
-    assert len(list(output_path.rglob("*.parquet"))) == 1
-    assert spark.read.parquet(str(output_path)).count() == 5
+    output_files = list(output_path.rglob("*.parquet"))
+    written = spark.read.parquet(str(output_path))
+
+    assert config.bronze_output_partitions == 2
+    assert len(output_files) == 2
+    assert sorted(row.offset for row in written.select("offset").collect()) == list(
+        range(1, 6)
+    )
+    assert sorted(
+        json.loads(row.value)["event_id"] for row in written.select("value").collect()
+    ) == [f"event-{offset}" for offset in range(1, 6)]
