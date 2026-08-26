@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from ops_agent.diagnostics import StreamProcessorDiagnostics
 from ops_agent.prometheus_client import StreamProcessorStatus
 from ops_agent.remediation import RemediationResult
+from ops_agent.ssh import CommandKind, ExecutedCommand
 
 
 def status(code: int, label: str, instance: str = "spark-ec2:9103") -> StreamProcessorStatus:
@@ -44,9 +45,19 @@ class FakeSlackClient:
         return {"ok": True}
 
 
+def executed(argv: tuple[str, ...], kind: CommandKind = CommandKind.READ) -> ExecutedCommand:
+    return ExecutedCommand(kind=kind, host="1.2.3.4", user="ec2-user", argv=argv)
+
+
 def fake_diagnose(_target) -> StreamProcessorDiagnostics:
     return StreamProcessorDiagnostics(
-        container_status="running", restart_count=0, recent_logs="fake logs"
+        container_status="running",
+        restart_count=0,
+        recent_logs="fake logs",
+        commands=(
+            executed(("docker", "inspect", "stream-processor")),
+            executed(("docker", "logs", "--tail", "50", "stream-processor")),
+        ),
     )
 
 
@@ -56,6 +67,9 @@ def make_fake_remediate(*, succeeded: bool = True):
             action="restart_stream_processor",
             succeeded=succeeded,
             detail="fake ssh output",
+            command=executed(
+                ("docker", "restart", "stream-processor"), kind=CommandKind.MUTATE
+            ),
         )
 
     return _remediate

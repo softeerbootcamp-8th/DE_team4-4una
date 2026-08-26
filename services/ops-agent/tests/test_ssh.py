@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ops_agent.ssh import SshTarget, run_remote_command
+from ops_agent.ssh import CommandKind, SshTarget, run_remote_command
 
 
 class _FakeCompleted:
@@ -23,7 +23,9 @@ class TestRunRemoteCommand:
         monkeypatch.setattr(subprocess, "run", fake_run)
         target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
 
-        result = run_remote_command(target, ["docker", "restart", "stream-processor"])
+        result = run_remote_command(
+            target, ["docker", "restart", "stream-processor"], kind=CommandKind.MUTATE
+        )
 
         assert result.ok is True
         assert result.stdout == "ok"
@@ -39,7 +41,9 @@ class TestRunRemoteCommand:
         )
         target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
 
-        result = run_remote_command(target, ["docker", "restart", "stream-processor"])
+        result = run_remote_command(
+            target, ["docker", "restart", "stream-processor"], kind=CommandKind.MUTATE
+        )
 
         assert result.ok is False
         assert "no such container" in result.stderr
@@ -51,7 +55,58 @@ class TestRunRemoteCommand:
         monkeypatch.setattr(subprocess, "run", fake_run)
         target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
 
-        result = run_remote_command(target, ["docker", "restart", "stream-processor"], timeout_seconds=5)
+        result = run_remote_command(
+            target,
+            ["docker", "restart", "stream-processor"],
+            kind=CommandKind.MUTATE,
+            timeout_seconds=5,
+        )
 
         assert result.ok is False
         assert "timed out" in result.stderr
+
+    def test_the_result_carries_the_remote_argv_and_its_kind(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess, "run", lambda command, **kwargs: _FakeCompleted(0, "ok", "")
+        )
+        target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
+
+        result = run_remote_command(
+            target, ["docker", "restart", "stream-processor"], kind=CommandKind.MUTATE
+        )
+
+        assert result.command.kind is CommandKind.MUTATE
+        assert result.command.argv == ("docker", "restart", "stream-processor")
+        assert result.command.host == "1.2.3.4"
+
+    def test_display_shows_the_remote_command_not_the_local_ssh_wrapper(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess, "run", lambda command, **kwargs: _FakeCompleted(0, "ok", "")
+        )
+        target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
+
+        result = run_remote_command(
+            target, ["docker", "logs", "--tail", "50", "stream-processor"], kind=CommandKind.READ
+        )
+
+        assert result.command.display == (
+            "ec2-user@1.2.3.4 $ docker logs --tail 50 stream-processor"
+        )
+        assert "/keys/id_ed25519" not in result.command.display
+
+    def test_a_timeout_still_reports_which_command_was_attempted(self, monkeypatch):
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 30))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        target = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
+
+        result = run_remote_command(
+            target,
+            ["docker", "restart", "stream-processor"],
+            kind=CommandKind.MUTATE,
+            timeout_seconds=5,
+        )
+
+        assert result.ok is False
+        assert result.command.argv == ("docker", "restart", "stream-processor")
