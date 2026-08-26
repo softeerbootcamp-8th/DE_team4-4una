@@ -2,10 +2,15 @@
 status: accepted
 date: 2026-08-19
 supersedes:
-superseded_by:
+superseded_by: 0012 (in-flight 검증의 별도 task 배치 부분에 한함)
 ---
 
 # 0004. 데이터 품질 검증 도구로 Great Expectations 도입
+
+> **부분 대체됨**: 이 결정 중 "각 TaskGroup에 `validate_X` task를 별도로
+> 배치한다"는 부분은
+> [ADR-0012](0012-validate-in-place-without-dedicated-job-runs.md)로
+> 대체되었다. GX 도입과 in-flight/at-rest 이원화 결정 자체는 그대로 유효하다.
 
 ## 배경
 
