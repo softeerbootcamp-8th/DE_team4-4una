@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from conftest import grafana_alert, grafana_webhook_payload
 from ops_agent.models import Incident, parse_grafana_webhook
+from ops_agent_test_support import grafana_alert, grafana_webhook_payload
 
 
 class TestIncidentFromGrafanaAlert:

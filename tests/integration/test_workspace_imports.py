@@ -13,6 +13,8 @@ import pytest
         "orchestration",
         "serving_api",
         "dashboard",
+        "ops_agent",
+        "pipeline_perf",
     ],
 )
 def test_workspace_package_is_importable(package_name: str) -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from conftest import FakeSlackClient
 from ops_agent.owners import ServiceOwner
 from ops_agent.slack_notifier import SlackNotifier, mention_text
+from ops_agent_test_support import FakeSlackClient
 
 
 class TestSlackNotifier:

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from conftest import (
+from fastapi.testclient import TestClient
+from ops_agent.app import create_app
+from ops_agent.incident_store import IncidentStore
+from ops_agent.orchestrator import OpsAgentOrchestrator
+from ops_agent.owners import ServiceOwnersRegistry
+from ops_agent.slack_notifier import SlackNotifier
+from ops_agent.ssh import SshTarget
+from ops_agent_test_support import (
     FakePrometheusClient,
     FakeSlackClient,
     down_status,
@@ -10,13 +17,6 @@ from conftest import (
     healthy_status,
     make_fake_remediate,
 )
-from fastapi.testclient import TestClient
-from ops_agent.app import create_app
-from ops_agent.incident_store import IncidentStore
-from ops_agent.orchestrator import OpsAgentOrchestrator
-from ops_agent.owners import ServiceOwnersRegistry
-from ops_agent.slack_notifier import SlackNotifier
-from ops_agent.ssh import SshTarget
 
 TARGET = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
 
