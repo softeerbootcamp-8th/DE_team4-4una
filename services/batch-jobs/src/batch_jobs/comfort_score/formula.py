@@ -90,16 +90,48 @@ def _compute(
     _validate_no_reserved_vehicle_profile_id(hourly_df)
 
     # 시간별 원본은 per-vehicle 경로가 그대로 쓰고, vehicle-agnostic 경로는 프로필을
-    # 트래픽 가중으로 접은 뒤 같은 Step 2~5를 탄다.
-    pooled_hourly = _pool_vehicle_profiles(hourly_df)
+    # 트래픽 가중으로 접은 뒤 같은 Step 2~5를 탄다. 전역 mu와 vehicle-agnostic 경로가
+    # 똑같이 T_min 필터를 걸므로 필터까지 끝낸 결과를 한 번만 만들어 둘이 나눠 쓴다.
+    #
+    # 이 프레임을 persist하는 것도 시도했지만 실측 결과 손해였다 — 캐시가 AQE의
+    # post-shuffle coalescing을 끊어서, 입력 756,000행 기준 실행 task가 188 -> 807로
+    # 늘었다. Spark가 셔플을 재사용해 주지도 않는다(계획에 ReusedExchange 없음).
+    pooled_qualifying = _qualifying_hours(_pool_vehicle_profiles(hourly_df), config)
 
     # 전역 mu는 vehicle-agnostic 경로의 모집단 평균이다. per-vehicle 경로의 mu_p
     # 대체값으로도 쓰이므로 한 번만 계산해 양쪽이 같은 값을 보게 한다.
-    global_mu = _population_means(_qualifying_hours(pooled_hourly, config), group_keys=())
+    global_mu = _collect_global_population_means(pooled_qualifying)
 
     per_vehicle = _per_vehicle_scores(hourly_df, config, universe_df, global_mu)
-    vehicle_agnostic = _vehicle_agnostic_scores(pooled_hourly, config, universe_df, global_mu)
+    vehicle_agnostic = _vehicle_agnostic_scores(
+        pooled_qualifying, config, universe_df, global_mu
+    )
     return per_vehicle.unionByName(vehicle_agnostic)
+
+
+def _collect_global_population_means(
+    pooled_qualifying: DataFrame,
+) -> dict[str, Column]:
+    """전역 mu를 드라이버로 한 번 걷어 방향별 리터럴로 만든다.
+
+    한 행짜리 DataFrame으로 들고 다니면 그 한 행을 만들기 위해 168시간 lineage(윈도우
+    필터 -> scoring_version 윈도우 -> pooling)가 소비처마다 계획에 다시 붙는다. 전역 mu는
+    per-vehicle 경로와 vehicle-agnostic 경로 양쪽이 쓰므로, 실측한 physical plan에서
+    그 서브트리가 두 벌 더 생기고 crossJoin(BroadcastNestedLoopJoin)도 두 개 붙었다.
+
+    값 자체는 한 행 세 컬럼뿐이라 드라이버로 걷어도 안전하다. 리터럴로 바꾸면 두 소비처가
+    같은 상수를 보고, crossJoin과 중복 서브트리가 함께 사라진다.
+
+    윈도우 전체에 qualifying hour가 하나도 없으면 평균이 NULL이다. 여기서 막지 않고
+    NULL 리터럴을 그대로 흘려보낸다 — 실행을 실패시킬지는 호출자(standard_job)의 책임이다.
+    """
+    row = _population_means(pooled_qualifying, group_keys=()).first()
+    return {
+        _population_column(direction): F.lit(
+            None if row is None else row[_population_column(direction)]
+        ).cast("double")
+        for direction in DIRECTION_COLUMNS
+    }
 
 
 def _validate_universe(universe_df: DataFrame) -> None:
@@ -180,7 +212,7 @@ def _per_vehicle_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
     universe_df: DataFrame | None,
-    global_mu: DataFrame | None,
+    global_mu: dict[str, Column] | None,
 ) -> DataFrame:
     group_keys = ("segment_id", "vehicle_profile_id")
 
@@ -205,23 +237,24 @@ def _per_vehicle_scores(
 
 
 def _vehicle_agnostic_scores(
-    pooled_hourly: DataFrame,
+    pooled_qualifying: DataFrame,
     config: ComfortScoreConfig,
     universe_df: DataFrame | None,
-    global_mu: DataFrame,
+    global_mu: dict[str, Column],
 ) -> DataFrame:
     group_keys = ("segment_id",)
 
-    qualifying = _qualifying_hours(pooled_hourly, config)
+    # T_min 필터는 _compute가 이미 적용했다.
+    qualifying = pooled_qualifying
     universe = (
         universe_df.select("segment_id").distinct()
         if universe_df is not None
-        else pooled_hourly.select("segment_id").distinct()
+        else pooled_qualifying.select("segment_id").distinct()
     )
     observed_full = _observed_with_universe(qualifying, universe, group_keys)
 
-    # 전역 mu는 그룹 없는 한 행짜리라 crossJoin으로 모든 segment 행에 동일하게 붙인다.
-    joined = observed_full.crossJoin(global_mu)
+    # 전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 조인 없이 컬럼으로 붙인다.
+    joined = observed_full.withColumns(global_mu)
     scored = _apply_shrinkage(joined, group_keys=group_keys, config=config)
     return scored.withColumn(
         "vehicle_profile_id", F.lit(VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID)
@@ -248,33 +281,25 @@ def _population_means(qualifying: DataFrame, group_keys: tuple[str, ...]) -> Dat
 
 
 def _fill_population_means(
-    profiles: DataFrame, population: DataFrame, global_mu: DataFrame
+    profiles: DataFrame, population: DataFrame, global_mu: dict[str, Column]
 ) -> DataFrame:
     """mu_p가 없는 프로필의 모집단 평균을 전역 mu로 채운다 (#198).
+
+    전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 crossJoin과 컬럼 rename 없이 그대로
+    coalesce에 넣는다.
 
     전역 mu 자체가 NULL이면(윈도우 전체에 qualifying hour가 하나도 없는 경우) 여기서
     막지 않고 NULL을 그대로 흘려보낸다 — 그 판단은 실행 단위로 실패시켜야 하므로
     호출자(standard_job)의 책임이다.
     """
-    global_columns = {
-        _population_column(direction): F.col(f"_global_{_population_column(direction)}")
-        for direction in DIRECTION_COLUMNS
-    }
-    renamed_global = global_mu.select(
-        *[
-            F.col(_population_column(direction)).alias(f"_global_{_population_column(direction)}")
-            for direction in DIRECTION_COLUMNS
-        ]
-    )
-    joined = profiles.join(population, on="vehicle_profile_id", how="left").crossJoin(
-        renamed_global
-    )
+    joined = profiles.join(population, on="vehicle_profile_id", how="left")
     return joined.select(
         "vehicle_profile_id",
         *[
-            F.coalesce(F.col(_population_column(direction)), global_columns[
-                _population_column(direction)
-            ]).alias(_population_column(direction))
+            F.coalesce(
+                F.col(_population_column(direction)),
+                global_mu[_population_column(direction)],
+            ).alias(_population_column(direction))
             for direction in DIRECTION_COLUMNS
         ],
     )
