@@ -54,22 +54,81 @@ _MAX_EVIDENCE_CHARS = 1200
 # 알림 시점에 조회할 Variable 이름.
 _SECRET_VARIABLE_NAMES = ("POSTGRES_PASSWORD",)
 
+# 첫 실패 알림의 Slack 메시지 ts를 이 키로 XCom에 남긴다. 이후 재시도/최종 실패/복구
+# 알림이 같은 스레드에 붙어, 채널에는 실패한 task당 메시지가 1개만 남는다.
+_ALERT_THREAD_TS_XCOM_KEY = "slack_alert_thread_ts"
+
+# 레지스트리에 dag_id가 없어 조회가 깨져도 알림은 나가야 한다 — 실패했는데 알림이 오지
+# 않는 것이 가장 알아채기 어려운 형태다.
+_UNREGISTERED_OWNER_NAME = "담당자 미등록"
+_UNREGISTERED_SEVERITY = "high"
+
+
+def on_retry_callback(context: dict) -> None:
+    """재시도가 남은 실패. 1차는 채널에 보내고, 2차 이후는 그 메시지의 스레드에 단다."""
+    _post_task_failure_alert(context, is_final=False)
+
 
 def on_failure_callback(context: dict) -> None:
-    from jobs.dag_owners import SEVERITY_LABELS, load_dag_owners_registry
+    """재시도까지 소진된 최종 실패. 1차 실패 알림이 있으면 그 스레드에 단다."""
+    _post_task_failure_alert(context, is_final=True)
 
-    task = context["task"]
+
+def on_task_success_callback(context: dict) -> None:
+    """재시도 끝에 성공한 task만 알린다(복구). 한 번에 성공한 task는 조용하다.
+
+    DAG 단위 on_success_callback(성공 요약)과는 별개다 — 이쪽은 task 단위로 배선한다.
+    """
+    if _try_number(context) <= 1:
+        return
+
+    task_instance = context["task_instance"]
+    dag_id = context["dag"].dag_id
+    # 복구에는 심각도 라벨을 붙이지 않는다 — 이미 해결된 일을 심각도로 색칠할 이유가 없고,
+    # 부모 메시지에 심각도가 이미 있다.
+    headline = (
+        f"🟢 *{dag_id}* 재시도에서 성공했습니다 "
+        f"({_try_number(context)}/{_total_attempts(context)}): `{task_instance.task_id}`"
+    )
+    lines = [headline]
+    counts = _pull_summary(context, dag_id)
+    if counts is not None:
+        lines.append(f"처리 건수: {counts}")
+
+    # 복구는 채널을 다시 시끄럽게 할 일이 아니다 — 스레드가 없으면 아예 보내지 않는다.
+    thread_ts = _pull_thread_ts(context)
+    if thread_ts is None:
+        return
+    _post_message(_build_slack_hook(), "\n".join(lines), thread_ts=thread_ts)
+
+
+def _post_task_failure_alert(context: dict, *, is_final: bool) -> None:
+    from jobs.dag_owners import SEVERITY_LABELS
+
     task_instance = context["task_instance"]
     dag_id = context["dag"].dag_id
     task_id = task_instance.task_id
-    task_group_id = task.task_group.group_id if task.task_group else None
+    task_group_id = _task_group_id(context)
 
-    registry = load_dag_owners_registry()
-    owner = registry.resolve_owner(dag_id, task_id=task_id, task_group_id=task_group_id)
-    severity = registry.resolve_severity(dag_id, task_id=task_id, task_group_id=task_group_id)
+    owner, severity, registered = _resolve_owner_and_severity(dag_id, task_id, task_group_id)
+
+    try_number = _try_number(context)
+    total_attempts = _total_attempts(context)
+    is_first = try_number <= 1
+    # 1차에서 담당자를 부르고(빨리 아는 것이 목적), 최종 실패에서 다시 부른다. 중간
+    # 재시도 답글은 이미 부른 사람을 또 부르지 않는다.
+    mention_owner = is_first or is_final
 
     hook = _build_slack_hook()
-    mention = _resolve_mention(owner, hook)
+    if not registered:
+        mention = (
+            f"{_UNREGISTERED_OWNER_NAME} — config/dag_owners.yaml에 "
+            f"`{dag_id}` 항목을 추가해 주세요"
+        )
+    elif mention_owner:
+        mention = _resolve_mention(owner, hook)
+    else:
+        mention = owner.name
     exception = context.get("exception")
     counts = _pull_summary(context, dag_id)
     # EMR task면 driver 로그를 읽어 원인을 분류한다. 아니면(또는 조회 실패면) None이라
@@ -94,6 +153,8 @@ def on_failure_callback(context: dict) -> None:
         # UNKNOWN_ERROR 비율을 나중에 집계해 룰을 추가할지 판단하기 위해 남긴다.
         "error_type": diagnosis["error_type"] if diagnosis else None,
         "error_evidence": diagnosis["evidence"] if diagnosis else None,
+        "try_number": try_number,
+        "is_final": is_final,
     }
     # S3 기록도 부가 정보다 — 버킷 오설정/권한 문제로 쓰기가 실패해도 Slack 알림은
     # 나가야 한다(#409 EC2 검증에서 정확히 이것 때문에 알림이 침묵했다). 실패하면
@@ -103,26 +164,36 @@ def on_failure_callback(context: dict) -> None:
     except Exception:  # noqa: BLE001
         record_url = None
 
+    headline = _failure_headline(try_number, total_attempts, is_final=is_final, is_first=is_first)
     lines = [
-        f"{SEVERITY_LABELS[severity]} *{dag_id}* task 실패: `{task_id}`",
+        f"{SEVERITY_LABELS.get(severity, severity)} *{dag_id}* {headline}: `{task_id}`",
         f"담당자: {mention}",
+    ]
+    if not is_final:
+        lines.append(f"{_retry_delay_text(context)} 뒤 재시도합니다")
+    lines += [
         f"처리 일자(logical_date): {record['logical_date'] or '알 수 없음(수동 트리거)'}",
         f"예외: {exception}" if exception else "예외 정보 없음(수동 확인 필요)",
         f"처리 건수: {counts}"
         if counts is not None
         else "처리 건수: 이 실행에서 아직 집계되지 않음",
-        f"<{task_instance.log_url}|Task Instance 열기>",
     ]
     if diagnosis is not None:
-        # 링크 줄 앞에 끼워 넣는다 — 원인이 링크보다 먼저 보여야 한다.
-        lines[-1:-1] = _diagnosis_lines(diagnosis)
+        # 원인이 링크보다 먼저 보여야 한다. 1차 실패에도 최종 실패와 동일하게 넣는다 —
+        # 1차에서 원인을 못 보면 결국 Airflow를 열게 된다.
+        lines += _diagnosis_lines(diagnosis)
+    lines.append(f"<{task_instance.log_url}|Task Instance 열기>")
     if record_url:
         lines.append(f"<{record_url}|실패 상세 기록 열기(S3)>")
     s3_logs_link = _emr_s3_logs_link(context)
     if s3_logs_link:
         lines.append(f"<{s3_logs_link}|EMR Serverless 원본 로그 열기>")
 
-    _post_message(hook, "\n".join(lines))
+    # 스레드가 이미 열려 있으면 거기에 답글로, 없으면 채널에 새 메시지로 보낸다.
+    thread_ts = _pull_thread_ts(context)
+    response = _post_message(hook, "\n".join(lines), thread_ts=thread_ts)
+    if thread_ts is None and not is_final:
+        _remember_thread_ts(context, response)
 
 
 def on_success_callback(context: dict) -> None:
@@ -145,6 +216,92 @@ def on_success_callback(context: dict) -> None:
 
     hook = _build_slack_hook()
     _post_message(hook, "\n".join(lines))
+
+
+def _task_group_id(context: dict) -> str | None:
+    task_group = getattr(context.get("task"), "task_group", None)
+    return task_group.group_id if task_group is not None else None
+
+
+def _try_number(context: dict) -> int:
+    # 1부터 시작한다(airflow.sdk의 "Try {{try_number}} out of {{max_tries + 1}}"와 같은 기준).
+    task_instance = context.get("task_instance")
+    return getattr(task_instance, "try_number", None) or 1
+
+
+def _total_attempts(context: dict) -> int:
+    # max_tries는 서버 컨텍스트에서만 채워질 수 있어 operator의 retries에서 직접 센다.
+    return (getattr(context.get("task"), "retries", 0) or 0) + 1
+
+
+def _retry_delay_text(context: dict) -> str:
+    delay = getattr(context.get("task"), "retry_delay", None)
+    seconds = getattr(delay, "total_seconds", None)
+    if seconds is None:
+        return "잠시"
+    total = int(seconds())
+    return f"{total // 60}분" if total >= 60 else f"{total}초"
+
+
+def _failure_headline(try_number: int, total: int, *, is_final: bool, is_first: bool) -> str:
+    if is_final:
+        return f"최종 실패 ({try_number}/{total})"
+    if is_first:
+        return f"1차 실패 ({try_number}/{total})"
+    return f"{try_number}차 시도도 실패 ({try_number}/{total})"
+
+
+def _resolve_owner_and_severity(dag_id: str, task_id: str, task_group_id: str | None):
+    """(owner, severity, registered)를 돌려준다. 레지스트리 조회가 깨져도 예외를 내지 않는다.
+
+    dag_owners.py는 미등록 dag_id에 KeyError를 던지는데, 그 예외가 콜백 안에서 터지면
+    Slack 알림이 통째로 발송되지 않는다. 담당자를 모르는 것보다 알림이 침묵하는 쪽이 훨씬
+    나쁘므로 여기서 흡수한다.
+    """
+    from jobs.dag_owners import OwnerRef, load_dag_owners_registry
+
+    try:
+        registry = load_dag_owners_registry()
+        return (
+            registry.resolve_owner(dag_id, task_id=task_id, task_group_id=task_group_id),
+            registry.resolve_severity(dag_id, task_id=task_id, task_group_id=task_group_id),
+            True,
+        )
+    except Exception:  # noqa: BLE001
+        return (
+            OwnerRef(name=_UNREGISTERED_OWNER_NAME, email=None, slack_id=None),
+            _UNREGISTERED_SEVERITY,
+            False,
+        )
+
+
+def _pull_thread_ts(context: dict) -> str | None:
+    task_instance = context.get("task_instance")
+    if task_instance is None:
+        return None
+    try:
+        return (
+            task_instance.xcom_pull(
+                task_ids=task_instance.task_id, key=_ALERT_THREAD_TS_XCOM_KEY
+            )
+            or None
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _remember_thread_ts(context: dict, response) -> None:
+    # 실패해도 스레드만 포기한다 — 이후 알림은 채널에 독립 메시지로 나가고, 내용은 같다.
+    try:
+        ts = response["ts"]
+    except Exception:  # noqa: BLE001
+        return
+    if not ts:
+        return
+    try:
+        context["task_instance"].xcom_push(key=_ALERT_THREAD_TS_XCOM_KEY, value=ts)
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _dag_run_url(dag_run) -> str:
@@ -385,6 +542,8 @@ def _build_slack_hook():
 def _resolve_mention(owner, hook) -> str:
     if owner.slack_id:
         return f"<@{owner.slack_id}>"
+    if not owner.email:
+        return owner.name
     # 멘션은 부가 정보다 — 이메일이 Slack에 없거나(레지스트리 오타, 퇴사 등) API가
     # 실패해도 알림 자체를 막아서는 안 된다(#409). 멘션 없이 이름/이메일만 남긴다.
     try:
@@ -400,5 +559,8 @@ def _slack_channel() -> str:
     return Variable.get("SLACK_ALERT_CHANNEL")
 
 
-def _post_message(hook, text: str) -> None:
-    hook.client.chat_postMessage(channel=_slack_channel(), text=text)
+def _post_message(hook, text: str, thread_ts: str | None = None):
+    kwargs = {"channel": _slack_channel(), "text": text}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    return hook.client.chat_postMessage(**kwargs)

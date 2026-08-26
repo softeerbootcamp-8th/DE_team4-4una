@@ -104,7 +104,23 @@ Web API, `slack_sdk.WebClient` 래핑)을 쓴다. Connection type `slack`, conn_
   멘션 + 심각도 라벨 + `context["task_instance"].log_url`(Task Instance로
   바로 이동) 포함. Airflow는 재시도가 남은 실패를 `UP_FOR_RETRY`로 보내고
   `on_failure_callback`은 재시도가 소진돼 최종 `FAILED`로 확정될 때만
-  호출하므로, 재시도마다 스팸이 발송되지 않는다(별도 처리 불필요).
+  호출한다.
+
+  > **#527에서 변경.** 위 성질 때문에 이 문서는 원래 "재시도마다 스팸이
+  > 발송되지 않는다(별도 처리 불필요)"고 판단하고 최종 실패만 알렸다. 그런데
+  > 그러면 실패를 4~5분 늦게 알게 되고(대상 DAG의 `retry_delay`는 2분 또는
+  > 5분), 그 사이 아무도 상황을 모른다. 그래서 `on_retry_callback`을 추가해
+  > **1차 실패 시점에 담당자를 멘션해 채널로 알린다.**
+  >
+  > 대신 이후 알림은 그 메시지의 **Slack 스레드에 답글로** 단다(첫 알림의
+  > `ts`를 XCom에 남겨 `thread_ts`로 재사용). 채널에는 실패한 task당 메시지가
+  > 1개만 남고, 2차 이후 재시도·최종 실패·복구는 스레드에서 이어진다. 중간
+  > 재시도 답글에는 멘션을 넣지 않는다 — 1차에서 이미 호출했다.
+- **`on_retry_callback`**(task 단위, #527): 위 1차 실패 알림. 최종 실패
+  알림과 본문 구조는 같고 헤더(`1차 실패 (1/2)`)와 재시도 예정 안내만 다르다.
+- **`on_task_success_callback`**(task 단위, #527): `try_number > 1`일 때만,
+  즉 재시도 끝에 성공한 경우에만 스레드에 복구를 알린다. 스레드가 없으면
+  보내지 않는다 — 복구는 채널을 다시 시끄럽게 할 일이 아니다.
 - **`on_success_callback`**(DAG 단위, DAG 선언에 배선): DagRun이 성공할 때
   1회, `context["dag_run"].get_absolute_url()` + §4에서 정한 처리 건수
   요약을 조합해 전송. DAG마다 "어느 task의 XCom을 요약에 쓸지"만 모듈 안의
