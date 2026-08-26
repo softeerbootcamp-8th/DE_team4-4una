@@ -55,6 +55,12 @@ MATCH_SCHEMA = StructType(
     ]
 )
 
+# match_batch()가 돌려주는 컬럼 중 event_id를 뺀 나머지 — 센서 배치에 덧붙일 매칭 결과다(#560).
+MATCH_RESULT_FIELDS = tuple(MATCH_SCHEMA.fields[1:])
+
+# 센서 컬럼을 통과시켜도 매칭 자체에 반드시 필요한 컬럼(#560).
+PASSTHROUGH_REQUIRED_COLUMNS = ("event_id", "latitude", "longitude", "heading")
+
 # select_best_segment()과 동일한 우선순위: match_score DESC, distance_m/heading_diff_deg/segment_id ASC, 모두 NULLS LAST.
 _TIE_BREAK_COLUMNS = ["match_score", "distance_m", "heading_diff_deg", "segment_id"]
 _TIE_BREAK_ASCENDING = [False, True, True, True]
@@ -200,6 +206,33 @@ def get_worker_matching_context(payload: RoadSegmentBroadcastPayload) -> WorkerM
     return _WORKER_CONTEXT_CACHE.get_or_build(payload)
 
 
+def build_passthrough_schema(sensor_schema: StructType) -> StructType:
+    """센서 컬럼 뒤에 매칭 결과 컬럼을 붙인 mapInPandas 출력 스키마를 만든다(#560)."""
+    sensor_names = [field.name for field in sensor_schema.fields]
+
+    missing = [name for name in PASSTHROUGH_REQUIRED_COLUMNS if name not in sensor_names]
+    if missing:
+        raise ValueError(f"sensor_df is missing required columns for map matching: {missing}")
+
+    # 이름이 겹치면 어느 쪽 값이 남는지 알 수 없어 조용히 틀린 결과가 나온다 — 먼저 실패시킨다.
+    conflicting = [field.name for field in MATCH_RESULT_FIELDS if field.name in sensor_names]
+    if conflicting:
+        raise ValueError(f"sensor_df already has map matching result columns: {conflicting}")
+
+    return StructType([*sensor_schema.fields, *MATCH_RESULT_FIELDS])
+
+
+def attach_match_results(batch: pd.DataFrame, result: pd.DataFrame) -> pd.DataFrame:
+    """원본 센서 배치 옆에 매칭 결과를 붙인다 — event_id로 되붙이는 조인을 없애기 위해서다(#560)."""
+    attached = batch.reset_index(drop=True)
+    # pandas는 Series 대입을 인덱스로 정렬한다. numpy 배열로 넘겨 위치 기준으로 붙인다 —
+    # 인덱스가 어긋나면 행이 뒤섞인 채로 조용히 통과한다.
+    for column in result.columns:
+        if column != "event_id":
+            attached[column] = result[column].to_numpy()
+    return attached
+
+
 def match_segment_candidates(
     sensor_df: DataFrame,
     road_segment_df: DataFrame,
@@ -207,9 +240,16 @@ def match_segment_candidates(
     distance_weight: float,
     heading_weight: float,
 ) -> DataFrame:
-    """find_segment_candidates -> score_segment_candidates -> select_best_segment과 동일한 결과를 event당 1행으로 반환한다."""
+    """센서 컬럼을 그대로 통과시키면서 event당 매칭 결과 1행을 덧붙여 반환한다(#560).
+
+    매칭 결과 자체는 find_segment_candidates -> score_segment_candidates ->
+    select_best_segment과 동일하다. 원본 센서 컬럼을 함께 돌려주므로 호출자가 결과를
+    event_id로 되붙이는 조인(Exchange 2개 + Sort 2개)을 하지 않아도 된다.
+    """
     validate_search_radius(search_radius_m)
     validate_score_weights(distance_weight, heading_weight)
+    # road_segment를 driver로 모으기 전에 검증한다 — 스키마 문제는 collect 비용을 치르기 전에 드러나야 한다.
+    output_schema = build_passthrough_schema(sensor_df.schema)
 
     road_records = collect_road_segment_candidates(road_segment_df)
     payload = build_broadcast_payload(road_records)
@@ -222,11 +262,12 @@ def match_segment_candidates(
         context = get_worker_matching_context(payload_broadcast.value)
 
         for batch in batches:
-            yield match_batch(batch, context, search_radius_m, distance_weight, heading_weight)
+            result = match_batch(
+                batch, context, search_radius_m, distance_weight, heading_weight
+            )
+            yield attach_match_results(batch, result)
 
-    return sensor_df.select("event_id", "latitude", "longitude", "heading").mapInPandas(
-        match_events, schema=MATCH_SCHEMA
-    )
+    return sensor_df.mapInPandas(match_events, schema=output_schema)
 
 
 def select_best_candidates(candidates_df: pd.DataFrame) -> pd.DataFrame:
