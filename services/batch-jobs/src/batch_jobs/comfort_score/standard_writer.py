@@ -155,17 +155,20 @@ def _validate_staging_table_shape(cursor) -> None:
 def _write_staging(
     df: DataFrame, jdbc_url: str, postgres_user: str, postgres_password: str
 ) -> None:
-    (
-        df.write.format("jdbc")
-        .option("url", jdbc_url)
-        .option("dbtable", STAGING_TABLE)
-        .option("user", postgres_user)
-        .option("password", postgres_password)
-        .option("driver", "org.postgresql.Driver")
-        .option("truncate", "true")
-        .mode("overwrite")
-        .save()
-    )
+    # Gold snapshot을 읽어 staging 테이블로 밀어 넣는 구간. Spark write라 event log에도
+    # 남지만, MERGE·검증과 나란히 놓고 보려면 같은 PERF 축에 있어야 한다(#527).
+    with perf_phase(logger, "standard_score.jdbc_staging_write"):
+        (
+            df.write.format("jdbc")
+            .option("url", jdbc_url)
+            .option("dbtable", STAGING_TABLE)
+            .option("user", postgres_user)
+            .option("password", postgres_password)
+            .option("driver", "org.postgresql.Driver")
+            .option("truncate", "true")
+            .mode("overwrite")
+            .save()
+        )
 
 
 def _validate_no_duplicates_or_nan(cursor) -> None:

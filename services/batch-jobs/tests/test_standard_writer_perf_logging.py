@@ -4,7 +4,8 @@
 psycopg2 직접 실행이다. 그 구간들은 Spark event log에 흔적이 없어, 베이스라인
 수집(#462)이 Postgres 적재 시간을 보려면 이 로그가 유일한 근거다.
 
-staging write만 monkeypatch로 대체하면 SparkSession 없이 전체 흐름을 돌릴 수 있다.
+`df.write` 체인만 가짜로 바꾸면 SparkSession 없이 전체 흐름을 돌릴 수 있다 — 그래야
+JDBC staging write 구간(#527)도 실제 코드 경로로 지나간다.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import json
 import logging
 
 import pytest
-from batch_jobs.comfort_score import standard_writer
 from batch_jobs.comfort_score.standard_writer import (
     EXPECTED_STAGING_COLUMNS,
     write_standard_comfort_scores,
@@ -75,19 +75,36 @@ def _perf_payloads(caplog) -> dict[str, dict]:
     return payloads
 
 
-@pytest.fixture
-def _no_spark_staging_write(monkeypatch):
-    monkeypatch.setattr(
-        standard_writer, "_write_staging", lambda *args, **kwargs: None
-    )
+class FakeWriter:
+    """`df.write.format(...).option(...).mode(...).save()` 체인을 그대로 받아 넘긴다."""
+
+    def __init__(self) -> None:
+        self.saved = False
+
+    def format(self, _format: str) -> FakeWriter:
+        return self
+
+    def option(self, _key: str, _value: str) -> FakeWriter:
+        return self
+
+    def mode(self, _mode: str) -> FakeWriter:
+        return self
+
+    def save(self) -> None:
+        self.saved = True
 
 
-def test_merge_phase_logs_elapsed_and_affected_rows(caplog, _no_spark_staging_write):
+class FakeDataFrame:
+    def __init__(self) -> None:
+        self.write = FakeWriter()
+
+
+def test_merge_phase_logs_elapsed_and_affected_rows(caplog):
     connection = FakeConnection()
 
     with caplog.at_level(logging.INFO):
         write_standard_comfort_scores(
-            df=object(),
+            df=FakeDataFrame(),
             jdbc_url="jdbc:postgresql://localhost:5432/de4",
             postgres_user="de4",
             postgres_password="unused",
@@ -100,13 +117,17 @@ def test_merge_phase_logs_elapsed_and_affected_rows(caplog, _no_spark_staging_wr
     assert isinstance(merge["elapsed_s"], float)
 
 
-def test_every_non_spark_phase_is_logged(caplog, _no_spark_staging_write):
-    """Spark 밖 4구간이 전부 남아야 Postgres 적재 시간을 쪼개 볼 수 있다."""
+def test_every_write_phase_is_logged(caplog):
+    """적재 5구간이 전부 남아야 Postgres 적재 시간을 쪼개 볼 수 있다.
+
+    staging write는 Spark JDBC라 event log에도 남지만, MERGE·검증과 같은 축에서
+    비교하려면 PERF 줄로도 남아야 한다(#527).
+    """
     connection = FakeConnection()
 
     with caplog.at_level(logging.INFO):
         write_standard_comfort_scores(
-            df=object(),
+            df=FakeDataFrame(),
             jdbc_url="jdbc:postgresql://localhost:5432/de4",
             postgres_user="de4",
             postgres_password="unused",
@@ -115,13 +136,14 @@ def test_every_non_spark_phase_is_logged(caplog, _no_spark_staging_write):
 
     assert set(_perf_payloads(caplog)) == {
         "standard_score.staging_lock",
+        "standard_score.jdbc_staging_write",
         "standard_score.staging_validate",
         "standard_score.postgres_merge",
         "standard_score.staging_truncate",
     }
 
 
-def test_failed_phase_is_logged_with_ok_false(caplog, _no_spark_staging_write):
+def test_failed_phase_is_logged_with_ok_false(caplog):
     """중복 행으로 검증이 실패해도 그 구간의 소요 시간은 남아야 한다."""
 
     class DuplicateRowsCursor(FakeCursor):
@@ -135,7 +157,7 @@ def test_failed_phase_is_logged_with_ok_false(caplog, _no_spark_staging_write):
 
     with caplog.at_level(logging.INFO), pytest.raises(ValueError, match="duplicate"):
         write_standard_comfort_scores(
-            df=object(),
+            df=FakeDataFrame(),
             jdbc_url="jdbc:postgresql://localhost:5432/de4",
             postgres_user="de4",
             postgres_password="unused",

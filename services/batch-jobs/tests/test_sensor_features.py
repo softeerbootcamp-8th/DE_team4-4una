@@ -1808,7 +1808,12 @@ class TestHourlySegmentFeatureJob:
         )
 
     def test_stage_elapsed_times_are_logged_separately(self, spark, tmp_path, caplog) -> None:
-        # 단계별(map matching/steering-event/집계/저장) elapsed를 따로 로그로 남긴다(#474).
+        # 단계별 elapsed를 따로 남긴다(#474). pipeline-perf가 읽을 수 있도록 PERF 줄로
+        # 남기므로(#527), 자유 형식 로그가 아니라 phase payload를 검증한다.
+        import json
+
+        from de4_core import PERF_LOG_PREFIX
+
         rows = [
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=0), "e1", trip_seq=0),
             self.sensor_row(self.TARGET_HOUR + timedelta(seconds=1), "e2", trip_seq=1),
@@ -1817,18 +1822,33 @@ class TestHourlySegmentFeatureJob:
         with caplog.at_level(logging.INFO):
             self.run_job(spark, tmp_path, rows)
 
-        messages = [record.getMessage() for record in caplog.records]
-        stage_labels = [
-            "map matching finished",
-            "steering/event feature processing finished",
-            "hourly aggregation finished",
-            "storage finished",
-            "hourly segment feature job finished",
+        payloads = [
+            json.loads(message[len(PERF_LOG_PREFIX) + 1 :])
+            for message in caplog.messages
+            if message.startswith(f"{PERF_LOG_PREFIX} ")
         ]
-        for label in stage_labels:
-            matching = [message for message in messages if label in message]
-            assert len(matching) == 1, f"expected exactly one log line containing {label!r}"
-            assert "elapsed=" in matching[0]
+        # 실행 순서대로 정확히 한 번씩 나와야 한다 — 한 단계가 빠지거나 두 번 잡히면
+        # 구간 합이 job 시간과 어긋난다.
+        assert [payload["phase"] for payload in payloads] == [
+            "sensor_processing.map_matching",
+            "sensor_processing.steering_event",
+            "sensor_processing.quarantine_write",
+            "sensor_processing.aggregation",
+            "sensor_processing.feature_write",
+        ]
+        for payload in payloads:
+            assert payload["ok"] is True
+            assert payload["elapsed_s"] >= 0
+            assert "rows" in payload, f"{payload['phase']} has no row count"
+
+        # 전체 소요는 요약 한 줄에 그대로 남긴다.
+        summary = [
+            message
+            for message in caplog.messages
+            if "hourly segment feature job finished" in message
+        ]
+        assert len(summary) == 1
+        assert "elapsed=" in summary[0]
 
     def test_episode_starting_before_target_hour_is_not_recounted(self, spark, tmp_path) -> None:
         rows = [

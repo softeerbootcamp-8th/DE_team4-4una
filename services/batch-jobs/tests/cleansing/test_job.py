@@ -220,12 +220,13 @@ def test_replacing_one_hour_preserves_adjacent_quarantine(spark, tmp_path, monke
     assert [row["event_id"] for row in hour_6] == ["bad-6"]
 
 
-def test_feature_step_is_timed_separately_from_the_fused_job(
+def test_cleanse_and_feature_steps_are_timed_separately_in_the_fused_job(
     spark, tmp_path, monkeypatch, caplog
 ):
-    """융합된 sensor_processing 안에서 T2 feature 시간이 따로 남아야 한다(#461).
+    """융합된 sensor_processing 안에서 T1과 T2 시간이 각각 따로 남아야 한다(#461, #527).
 
-    T1 cleanse 시간은 CLI 경계의 sensor_processing.job에서 이 값을 빼면 나온다.
+    예전에는 T2(features)만 재고 T1은 CLI 경계의 sensor_processing.job에서 빼서
+    얻었다. 두 구간을 다 재므로 뺄셈이 필요 없다.
     """
     import json
     import logging
@@ -237,9 +238,18 @@ def test_feature_step_is_timed_separately_from_the_fused_job(
     with caplog.at_level(logging.INFO):
         run_job(spark, tmp_path, bronze, monkeypatch)
 
-    phases = [
-        json.loads(message[len(PERF_LOG_PREFIX) + 1 :])["phase"]
+    payloads = [
+        json.loads(message[len(PERF_LOG_PREFIX) + 1 :])
         for message in caplog.messages
         if message.startswith(f"{PERF_LOG_PREFIX} ")
     ]
-    assert "sensor_processing.features" in phases
+    by_phase = {payload["phase"]: payload for payload in payloads}
+    assert "sensor_processing.cleanse" in by_phase
+    assert "sensor_processing.features" in by_phase
+    # cleanse가 features보다 먼저 끝나야 두 구간이 겹치지 않는다.
+    phases = [payload["phase"] for payload in payloads]
+    assert phases.index("sensor_processing.cleanse") < phases.index(
+        "sensor_processing.features"
+    )
+    # 정제를 통과한 1행 + 격리 0행.
+    assert by_phase["sensor_processing.cleanse"]["rows"] == 1

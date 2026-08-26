@@ -267,6 +267,40 @@ class TestGoldBeforePostgres:
         received_rows = {tuple(r) for r in received_df.collect()}
         assert received_rows == on_disk_rows
 
+    def test_spark_stages_are_timed_as_perf_phases(
+        self, spark, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """job의 Spark 구간이 PERF 줄로 남아야 한다(#527).
+
+        예전에는 standard_score.job 하나뿐이라 점수 산출과 Gold 저장이 각각 얼마인지
+        알 수 없었다 — 실측에서 그 공백이 job 91.5초 중 51.6초였다.
+        """
+        import logging
+
+        from de4_core import PERF_LOG_PREFIX
+
+        config = self._build_config(spark, tmp_path)
+        monkeypatch.setattr(
+            "batch_jobs.comfort_score.standard_job.write_standard_comfort_scores",
+            Mock(return_value=WriteSummary(staging_count=1, inserted_count=1, updated_count=0)),
+        )
+
+        with caplog.at_level(logging.INFO):
+            summary = run_standard_comfort_score_job(
+                spark, config, self.AS_OF, FakeConnection()
+            )
+
+        by_phase = {
+            payload["phase"]: payload
+            for payload in (
+                json.loads(message[len(PERF_LOG_PREFIX) + 1 :])
+                for message in caplog.messages
+                if message.startswith(f"{PERF_LOG_PREFIX} ")
+            )
+        }
+        assert by_phase["standard_score.compute"]["rows"] == summary.scored_count
+        assert by_phase["standard_score.gold_write"]["rows"] == summary.scored_count
+
     def test_postgres_write_reads_through_manifest_resolution_not_the_raw_write_result(
         self, spark, tmp_path, monkeypatch
     ) -> None:
