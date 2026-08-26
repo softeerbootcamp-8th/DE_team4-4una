@@ -112,6 +112,8 @@ with DAG(
     # 느려진 옛 실행과 새 실행이 겹쳐 latest_zone_weather를 역전시키는 걸 막는다(jobs/weather.py의 WHERE와 이중 방어).
     max_active_runs=1,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "LEEMINHA",
         # 15분 주기라 hourly_pipeline의 5분 재시도 간격은 너무 길다. retry_delay는 재시도 대기 시간일 뿐 실행 시간 제한이 아니다.
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),

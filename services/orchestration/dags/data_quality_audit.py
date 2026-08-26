@@ -86,6 +86,8 @@ with DAG(
     start_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),
     catchup=False,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "JEONGKIJOON",
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
         "on_failure_callback": on_failure_callback,

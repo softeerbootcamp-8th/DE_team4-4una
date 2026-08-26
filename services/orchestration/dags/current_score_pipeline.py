@@ -57,6 +57,8 @@ with DAG(
     # 두 producer가 겹쳐 트리거해도 동시에 두 번 쓰지 않게 한다(ADR-0007).
     max_active_runs=1,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "RYUJIYOON",
         "retries": 2,
         "retry_delay": datetime.timedelta(minutes=2),
         "on_failure_callback": on_failure_callback,

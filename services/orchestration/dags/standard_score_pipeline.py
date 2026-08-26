@@ -250,6 +250,8 @@ with DAG(
     # emr_serverless pool이 제출 자체는 직렬화하지만 DAG run이 쌓이는 것은 별개다.
     max_active_runs=1,
     default_args={
+        # UI 소유자 표시. config/dag_owners.yaml의 이름과 맞춘다.
+        "owner": "KIMYONGJIN",
         "retries": 1,
         "retry_delay": datetime.timedelta(minutes=5),
         "on_failure_callback": on_failure_callback,
