@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
@@ -42,9 +43,26 @@ def write_hourly_quarantine(
     _require_schema(quarantined, SENSOR_EVENT_QUARANTINE_SCHEMA)
 
     staging_root = f"{quarantine_output_root.rstrip('/')}/{_STAGING_DIRNAME}/{run_id}"
-    row_count = quarantined.count()
 
+    # 아래 count()와 _stage_quarantine의 write가 같은 계보를 각각 한 번씩 걷지 않도록
+    # 캐시한다(#529). 캐시가 없으면 write 질의가 union을 처음부터 다시 만든다 —
+    # 2026-08-26T04:00 실행 실측에서 격리가 70행뿐인데도 이 구간이 37.4초였고, 그중
+    # 26초가 parquet write(8.3초) 이전의 스테이지였다. 즉 비용이 격리 데이터 크기가
+    # 아니라 재계산에서 나온다. 449,632행이던 02:00 실행의 47.0초와 비교해도 행 수는
+    # 1/6,423인데 시간은 80%였다.
+    #
+    # MEMORY_AND_DISK인 이유는 격리량을 미리 알 수 없기 때문이다. 위 두 실행처럼
+    # 70행일 때도, 449,632행에 154 MB일 때도 같은 코드가 돈다. MEMORY_ONLY면 큰
+    # 시간대에 캐시가 밀려 재계산이 그대로 돌아온다.
+    #
+    # DataFrame.persist()는 새 객체가 아니라 같은 객체를 돌려주므로, 호출자가 이미
+    # 캐시해 넘긴 프레임을 여기서 unpersist하면 남의 캐시를 지운다. 우리가 만든
+    # 캐시만 해제한다.
+    caches_here = quarantined.storageLevel == StorageLevel.NONE
+    if caches_here:
+        quarantined.persist(StorageLevel.MEMORY_AND_DISK)
     try:
+        row_count = quarantined.count()
         staged_path = _stage_quarantine(
             spark,
             quarantined,
@@ -56,6 +74,8 @@ def write_hourly_quarantine(
         _replace_partition(spark, final_path, staged_path)
     finally:
         _delete_path(spark, staging_root)
+        if caches_here:
+            quarantined.unpersist()
 
     return QuarantineWriteResult(output_path=final_path, row_count=row_count)
 
