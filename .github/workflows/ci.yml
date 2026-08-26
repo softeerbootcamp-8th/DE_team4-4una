@@ -366,6 +366,57 @@ jobs:
           sys.exit(1 if errors else 0)
           PY
 
+      # 위 검사는 문법만 보고 실제 기동 실패(예: alert rule의 잘못된 datasourceUid)는 못 잡아서 직접 띄워 확인한다 — ops-agent는 빌드 비용 크고 무관해서 제외.
+      - name: Boot Prometheus/Grafana and check health
+        env:
+          PROJECT_EC2_PRIVATE_IP: 10.0.0.1
+          SPARK_EC2_PRIVATE_IP: 10.0.0.2
+          GRAFANA_ADMIN_PASSWORD: ci-placeholder
+          OPS_AGENT_SLACK_BOT_TOKEN: ci-placeholder
+          OPS_AGENT_SLACK_ALERT_CHANNEL: ci-placeholder
+          STREAM_PROCESSOR_SSH_HOST: 10.0.0.3
+        run: |
+          set -euo pipefail
+
+          docker compose -f infra/compose/monitoring.yaml up -d prometheus grafana
+
+          # 반복 횟수가 아니라 시계로 제한한다(deploy-monitoring.yml과 같은 방식).
+          wait_for() {
+            name="$1"
+            url="$2"
+            interval=3
+            deadline=$(( $(date +%s) + 90 ))
+
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl --fail --silent \
+                --connect-timeout 5 --max-time 10 \
+                "$url" >/dev/null 2>&1; then
+                printf '[health] %s 정상\n' "$name"
+                return 0
+              fi
+              sleep "$interval"
+            done
+
+            printf '[health] %s 실패 (%s)\n' "$name" "$url"
+            docker compose -f infra/compose/monitoring.yaml logs "$name" --tail 100 || true
+            return 1
+          }
+
+          wait_for prometheus http://localhost:9090/-/ready
+          wait_for grafana http://localhost:3000/api/health
+
+          # /api/health가 200이어도 일부 provisioning 에러는 로그에만 남을 수 있어 별도로 검사한다.
+          if docker compose -f infra/compose/monitoring.yaml logs grafana \
+            | grep -E 'logger=provisioning.*level=error'; then
+            echo "::error::Grafana provisioning 로그에서 에러가 발견됐습니다(위 출력 참고)."
+            exit 1
+          fi
+
+      - name: Tear down smoke-test stack
+        if: always()
+        run: |
+          docker compose -f infra/compose/monitoring.yaml down -v
+
   # 브랜치 보호의 required status check으로는 이 job 하나만 지정한다.
   # 위 job들은 변경 내용에 따라 스킵되고 matrix 때문에 이름도 늘어난다. 개별 job을
   # required로 걸면 스킵된 job이 pending으로 남아 PR이 merge되지 않는다.
