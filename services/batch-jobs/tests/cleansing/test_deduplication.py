@@ -7,7 +7,12 @@ from batch_jobs.cleansing.validate import (
     MISSING_REQUIRED_FIELD,
     cleanse_sensor_events,
 )
-from bronze_samples import VALID_EVENT, valid_value, write_bronze_parquet
+from bronze_samples import (
+    BRONZE_TIMESTAMP,
+    VALID_EVENT,
+    valid_value,
+    write_bronze_parquet,
+)
 
 RUN_ID = "cleansing-20260814-001"
 REJECTED_AT = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
@@ -17,7 +22,9 @@ LATER = "2026-08-13T10:23:25.000000+00:00"
 
 
 def cleanse(spark, path):
-    bronze = read_bronze_sensor_events(spark, path)
+    bronze = read_bronze_sensor_events(
+        spark, path, BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)
+    )
     return cleanse_sensor_events(bronze, load_cleansing_config(), RUN_ID, REJECTED_AT)
 
 

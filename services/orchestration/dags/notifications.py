@@ -19,6 +19,7 @@ _SUMMARY_TASK_IDS: dict[str, str] = {
     "current_score_pipeline": "compute_current_score",
     "zone_weather_pipeline": "collect_weather",
     "zone_weather_compaction": "compact_zone_weather_snapshot",
+    "bronze_sensor_events_compaction": "compact_sensor_events",
     # report_pipeline_counts는 quality_validation TaskGroup 안에 있어 접두사가 붙는다
     # — dags/standard_score_pipeline.py 참고.
     "standard_score_pipeline": "quality_validation.report_pipeline_counts",

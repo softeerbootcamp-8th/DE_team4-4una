@@ -8,14 +8,21 @@ from batch_jobs.cleansing.validate import (
     split_required_field_failures,
 )
 from batch_jobs.schemas import SENSOR_EVENT_QUARANTINE_SCHEMA
-from bronze_samples import MALFORMED_VALUE, valid_value, write_bronze_parquet
+from bronze_samples import (
+    BRONZE_TIMESTAMP,
+    MALFORMED_VALUE,
+    valid_value,
+    write_bronze_parquet,
+)
 
 RUN_ID = "cleansing-20260814-001"
 REJECTED_AT = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
 
 
 def split(spark, path):
-    bronze = read_bronze_sensor_events(spark, path)
+    bronze = read_bronze_sensor_events(
+        spark, path, BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)
+    )
     return split_required_field_failures(bronze, load_cleansing_config(), RUN_ID, REJECTED_AT)
 
 

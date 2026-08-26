@@ -179,6 +179,12 @@ services:
       # zone_weather_compaction(#271)이 압축할 zone_weather_snapshot(Bronze) root — 위
       # ZONE_WEATHER_SNAPSHOT_DATA_LAKE_URI와 항상 같은 값을 가리켜야 한다.
       BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI: ${BRONZE_COMPACTION_ZONE_WEATHER_SNAPSHOT_URI:-${AIRFLOW_HOME}/data/local-lake/bronze/zone_weather_snapshot}
+      # sensor-events compaction(#585)은 동일 Bronze 계층이지만 writer와 분리된 일 단위
+      # 유지보수 작업이다. 운영에서는 S3 root를 명시하고, 로컬에서는 아래 lake를 쓴다.
+      SENSOR_EVENTS_COMPACTION_ROOT_URI: ${SENSOR_EVENTS_COMPACTION_ROOT_URI:-${AIRFLOW_HOME}/data/local-lake/bronze/sensor-events}
+      SENSOR_EVENTS_COMPACTION_SAFETY_MARGIN_MINUTES: ${SENSOR_EVENTS_COMPACTION_SAFETY_MARGIN_MINUTES:-120}
+      SENSOR_EVENTS_COMPACTION_TARGET_FILE_MB: ${SENSOR_EVENTS_COMPACTION_TARGET_FILE_MB:-128}
+      SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN: ${SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN:-0}
       # current_score(#217)는 segment -> zone 매핑을 road_segment Parquet에서 읽는다. road_segment도
       # 이제 reference S3 버킷에서 직접 읽는다(#400) — CURRENT_SCORE_ROAD_SEGMENT_URI는 root를
       # 가리키고, jobs.current_score.load_segment_zones()가 CURRENT_SCORE_ROAD_SNAPSHOT_DATE로
