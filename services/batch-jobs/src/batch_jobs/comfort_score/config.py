@@ -23,10 +23,10 @@ class ComfortScoreConfig:
     shrinkage_k: ProvisionalThreshold
 
     def __post_init__(self) -> None:
-        # 점수 0~100은 방향 가중치가 비음수이고 합이 1이며 shrinkage_k가 비음수일
-        # 때만 성립한다(ADR-0012). 어긋나면 comfort_score가 범위를 벗어나는데,
-        # 방향 점수는 각각 범위 안이라 GX도 통과하고 Postgres CHECK 제약에서야
-        # 드러난다 — 계산을 다 마친 뒤다.
+        # 점수 0~100은 방향 가중치가 비음수이고 합이 1이며 shrinkage_k가 양수일 때만
+        # 성립한다(ADR-0012). 어긋나면 comfort_score가 범위를 벗어나는데, 방향 점수는
+        # 각각 범위 안이라 GX도 통과하고 Postgres CHECK 제약에서야 드러난다 — 계산을
+        # 다 마친 뒤다.
         weights = {
             "vertical_weight": self.vertical_weight.value,
             "longitudinal_weight": self.longitudinal_weight.value,
@@ -37,8 +37,10 @@ class ComfortScoreConfig:
                 raise ValueError(f"{name} must not be negative")
         if abs(sum(weights.values()) - 1.0) > 1e-9:
             raise ValueError("direction weights must sum to 1")
-        if self.shrinkage_k.value < 0:
-            raise ValueError("shrinkage_k must not be negative")
+        # confidence/shrinkage 분모가 (N_eff + k)인데 evidence가 하나도 없는 universe
+        # row는 N_eff=0으로 실제로 나온다 — k<=0이면 그 행에서 0/0이 된다(#566).
+        if self.shrinkage_k.value <= 0:
+            raise ValueError("shrinkage_k must be positive")
         # evidence weight e_h = min(1, trip_count_h / evidence_saturation_trip_count)의
         # 분모라 0 이하면 0으로 나누거나 방향이 뒤집힌다(#566).
         if self.evidence_saturation_trip_count.value <= 0:

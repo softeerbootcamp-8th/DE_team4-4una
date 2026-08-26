@@ -81,6 +81,12 @@ class TestComfortScoreConfigPremises:
         with pytest.raises(ValueError, match="shrinkage_k"):
             _comfort_config(shrinkage_k=-1.0)
 
+    def test_rejects_a_zero_shrinkage_k(self) -> None:
+        # evidence_hours=0인 universe row(#566)에서 confidence/shrinkage 분모가
+        # (N_eff + k) = (0 + k)가 되므로, k=0이면 그 행에서 0/0이 된다.
+        with pytest.raises(ValueError, match="shrinkage_k"):
+            _comfort_config(shrinkage_k=0.0)
+
     def test_rejects_a_non_positive_evidence_saturation_trip_count(self) -> None:
         with pytest.raises(ValueError, match="evidence_saturation_trip_count"):
             _comfort_config(evidence_saturation_trip_count=0.0)
