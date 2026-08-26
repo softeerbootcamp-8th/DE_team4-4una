@@ -35,9 +35,6 @@ TABLES: tuple[str, str] = (
     "current_segment_comfort_score",
 )
 
-# 두 테이블 모두 최신 행이 이 값(초)보다 오래되면 stale로 본다(spec §4).
-FRESHNESS_THRESHOLD_SECONDS = 10800
-
 # freshness를 판정할 기준 컬럼 — current_segment_comfort_score엔 score_as_of가 없다.
 _FRESHNESS_COLUMN: dict[str, str] = {
     "standard_segment_comfort_score": "score_as_of",

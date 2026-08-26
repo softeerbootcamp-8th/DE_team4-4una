@@ -904,18 +904,6 @@ class ReplayCoordinator:
             ) from error
 
 
-def distance_for_event(
-    trip_seq: int,
-    route: RoutePlan,
-    config: SimulationConfig,
-    trip: TripRecord,
-) -> float:
-    elapsed = min(trip.passenger_duration_seconds, trip_seq * config.interval_seconds)
-    return SpeedProfile.for_route(route, trip.passenger_duration_seconds).state_at(
-        elapsed
-    ).distance_m
-
-
 def locate(route: RoutePlan, distance_m: float) -> SamplePosition:
     remaining = min(route.total_length_m, max(0.0, distance_m))
     for leg in route.legs:
@@ -973,61 +961,12 @@ def vertical_acceleration(
     return pavement + sway + hump_response, near_hump
 
 
-def steering_vibration_amplitude(
-    speed_mps: float,
-    accel_y: float,
-    accel_z: float,
-    elapsed_seconds: float,
-    phase: float,
-    profile: VehicleProfile,
-) -> float:
-    """Approximate the non-negative steering-wheel vibration amplitude in m/s².
-
-    This is an RMS-like engineering signal rather than a calibrated steering
-    column model. Road vibration reaches the wheel only while moving, lateral
-    acceleration contributes during steering, and the carrier gives the signal
-    a deterministic high-frequency texture.
-    """
-
-    moving_factor = clamp(speed_mps / 1.5, 0.0, 1.0)
-    speed_factor = clamp(speed_mps / 8.0, 0.0, 1.5)
-    road_component = abs(accel_z) * (0.20 + 0.25 * speed_factor) * moving_factor
-    steering_component = abs(accel_y) * 0.14
-    carrier = 0.85 + 0.15 * abs(math.sin(elapsed_seconds * 28.0 + phase))
-    return (
-        profile.steering_vibration_response
-        * (road_component + steering_component)
-        * carrier
-    )
-
-
-def steering_angle_degrees(speed_mps: float, yaw_rate_rad_s: float) -> float:
-    """간단한 bicycle model로 부호가 있는 전륜 조향각을 근사한다.
-
-    heading은 시계 방향으로 증가하므로 양수는 우회전, 음수는 좌회전이다.
-    """
-
-    # 정지에 가까우면 heading 기반 조향각이 불안정하므로 중립값을 사용한다.
-    if speed_mps < MIN_STEERING_SPEED_MPS:
-        return 0.0
-    angle = math.degrees(
-        math.atan(REPRESENTATIVE_WHEELBASE_M * yaw_rate_rad_s / speed_mps)
-    )
-    if abs(angle) < STEERING_ANGLE_DEADBAND_DEG:
-        return 0.0
-    return clamp(angle, -MAX_STEERING_ANGLE_DEG, MAX_STEERING_ANGLE_DEG)
-
-
 def smoothstep(value: float) -> float:
     return 3 * value**2 - 2 * value**3
 
 
 def smoothstep_integral(value: float) -> float:
     return value**3 - value**4 / 2
-
-
-def signed_heading_delta(previous: float, current: float) -> float:
-    return (current - previous + 180) % 360 - 180
 
 
 def uniform01(namespace: str, seed: int, trip_id: str) -> float:

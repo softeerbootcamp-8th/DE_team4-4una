@@ -56,10 +56,6 @@ PAYLOAD_CACHE_MAX_ENTRIES = 12
 NYC_MAP_CENTER = (40.7128, -74.0060)
 NYC_MAP_ZOOM = 11
 
-# Zoom used after a borough is picked. A borough covers a small part of the
-# city, so staying at the city-wide zoom would leave the selection a speck.
-BOROUGH_MAP_ZOOM = 12
-
 # Sentinel for "no borough picked": the map then shows borough outlines rather
 # than road segments, which is also what makes the first render cheap.
 ALL_BOROUGHS = "All boroughs"
