@@ -124,7 +124,7 @@ def test_dag_contains_the_combined_sensor_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert "transform_sensor_readings" in task_ids
+    assert "score_computation.transform_sensor_readings" in task_ids
 
 
 def test_road_snapshot_date_is_resolved_without_a_separate_task():
@@ -165,7 +165,7 @@ def test_road_snapshot_date_macro_actually_renders_into_the_job_arguments(monkey
         lambda uri, target_month: dt.date(2026, 3, 12),
     )
 
-    task = module.dag.get_task("transform_sensor_readings")
+    task = module.dag.get_task("score_computation.transform_sensor_readings")
     args = _entry_point_arguments(task)
     template = args[args.index("--road-snapshot-date") + 1]
 
@@ -180,14 +180,14 @@ def test_dag_contains_the_scoring_job():
     module = _load_dag_module()
 
     task_ids = {task.task_id for task in module.dag.tasks}
-    assert "compute_hourly_score" in task_ids
+    assert "score_computation.compute_hourly_score" in task_ids
 
 
 def test_transform_sensor_readings_invokes_combined_job_with_required_arguments():
     module = _load_dag_module()
 
     args = _entry_point_arguments(
-        module.dag.get_task("transform_sensor_readings")
+        module.dag.get_task("score_computation.transform_sensor_readings")
     )
     assert args[0] == "cleanse-sensor-events"
     assert "--target-hour" in args
@@ -208,7 +208,7 @@ def test_compute_hourly_score_invokes_score_hourly_comfort_with_templated_run_id
     module = _load_dag_module()
 
     args = _entry_point_arguments(
-        module.dag.get_task("compute_hourly_score")
+        module.dag.get_task("score_computation.compute_hourly_score")
     )
     assert args[0] == "score-hourly-comfort"
     assert "--run-id" in args
@@ -224,11 +224,11 @@ def test_dag_contains_expected_pipeline_tasks_so_far():
 
     task_ids = {task.task_id for task in module.dag.tasks}
     assert task_ids == {
-        "transform_sensor_readings",
-        "compute_hourly_score",
-        "compute_standard_score",
-        "validate_standard_score",
-        "report_pipeline_counts",
+        "score_computation.transform_sensor_readings",
+        "score_computation.compute_hourly_score",
+        "score_computation.compute_standard_score",
+        "quality_validation.validate_standard_score",
+        "quality_validation.report_pipeline_counts",
         # 파이프라인 종료 후 EMR Serverless Application을 내리는 두 task(#432).
         "emr_teardown.check_idle",
         "emr_teardown.stop_application",
@@ -246,40 +246,40 @@ def test_tasks_follow_standard_score_pipeline_order():
     module = _load_dag_module()
 
     transform_sensor_readings = module.dag.get_task(
-        "transform_sensor_readings"
+        "score_computation.transform_sensor_readings"
     )
-    compute_hourly_score = module.dag.get_task("compute_hourly_score")
-    compute_standard_score = module.dag.get_task("compute_standard_score")
+    compute_hourly_score = module.dag.get_task("score_computation.compute_hourly_score")
+    compute_standard_score = module.dag.get_task("score_computation.compute_standard_score")
     validate_standard_score = module.dag.get_task(
-        "validate_standard_score"
+        "quality_validation.validate_standard_score"
     )
 
     assert transform_sensor_readings.upstream_task_ids == set()
     assert transform_sensor_readings.downstream_task_ids == {
-        "compute_hourly_score"
+        "score_computation.compute_hourly_score"
     }
     assert compute_hourly_score.upstream_task_ids == {
-        "transform_sensor_readings"
+        "score_computation.transform_sensor_readings"
     }
     assert compute_hourly_score.downstream_task_ids == {
-        "compute_standard_score"
+        "score_computation.compute_standard_score"
     }
     assert compute_standard_score.upstream_task_ids == {
-        "compute_hourly_score"
+        "score_computation.compute_hourly_score"
     }
     assert compute_standard_score.downstream_task_ids == {
-        "validate_standard_score"
+        "quality_validation.validate_standard_score"
     }
     assert validate_standard_score.upstream_task_ids == {
-        "compute_standard_score"
+        "score_computation.compute_standard_score"
     }
-    assert validate_standard_score.downstream_task_ids == {"report_pipeline_counts"}
+    assert validate_standard_score.downstream_task_ids == {"quality_validation.report_pipeline_counts"}
 
 
 def test_compute_standard_score_invokes_the_standard_load_with_templated_as_of():
     module = _load_dag_module()
 
-    task = module.dag.get_task("compute_standard_score")
+    task = module.dag.get_task("score_computation.compute_standard_score")
     args = _entry_point_arguments(task)
 
     assert args[0] == "load-standard-segment-comfort-score"
@@ -295,7 +295,7 @@ def test_validate_standard_score_runs_without_a_job_run():
     """Gold snapshot parquet 하나만 읽으므로 Spark가 필요 없다(#495, ADR-0012)."""
     module = _load_dag_module()
 
-    task = module.dag.get_task("validate_standard_score")
+    task = module.dag.get_task("quality_validation.validate_standard_score")
 
     assert isinstance(task, PythonOperator)
     assert task.op_kwargs["as_of"] == "{{ data_interval_end.isoformat() }}"
@@ -320,9 +320,9 @@ def test_validate_standard_score_points_at_the_gold_root_run_wrote():
     module = _load_dag_module()
 
     run_parameters = _driver_env(
-        module.dag.get_task("compute_standard_score")
+        module.dag.get_task("score_computation.compute_standard_score")
     )
-    validate = module.dag.get_task("validate_standard_score")
+    validate = module.dag.get_task("quality_validation.validate_standard_score")
 
     for key in ("data_lake_uri", "gold_output_uri"):
         assert validate.op_kwargs[key] in run_parameters
@@ -331,7 +331,7 @@ def test_validate_standard_score_points_at_the_gold_root_run_wrote():
 def test_compute_standard_score_does_not_emit_standard_score_asset():
     module = _load_dag_module()
 
-    task = module.dag.get_task("compute_standard_score")
+    task = module.dag.get_task("score_computation.compute_standard_score")
     assert task.outlets == []
 
 
@@ -339,23 +339,23 @@ def test_validate_standard_score_emits_standard_score_asset():
     """검증을 통과한 데이터만 current_score_pipeline을 깨우도록 outlet을 옮긴다(#249)."""
     module = _load_dag_module()
 
-    task = module.dag.get_task("validate_standard_score")
+    task = module.dag.get_task("quality_validation.validate_standard_score")
     assert task.outlets == [STANDARD_SCORE_ASSET]
 
 
 def test_report_pipeline_counts_runs_after_validate_standard_score():
     module = _load_dag_module()
 
-    task = module.dag.get_task("report_pipeline_counts")
+    task = module.dag.get_task("quality_validation.report_pipeline_counts")
     assert isinstance(task, PythonOperator)
     assert task.python_callable is module._report_pipeline_counts
-    assert task.upstream_task_ids == {"validate_standard_score"}
+    assert task.upstream_task_ids == {"quality_validation.validate_standard_score"}
 
 
 def test_report_pipeline_counts_templates_the_same_paths_as_upstream_tasks():
     module = _load_dag_module()
 
-    task = module.dag.get_task("report_pipeline_counts")
+    task = module.dag.get_task("quality_validation.report_pipeline_counts")
     assert task.op_kwargs["quarantine_output_path"] == module._CLEANSING_QUARANTINE_OUTPUT_PATH
     assert task.op_kwargs["feature_output_path"] == module._HOURLY_SEGMENT_FEATURE_OUTPUT_PATH
     assert task.op_kwargs["hourly_comfort_output_path"] == module._HOURLY_COMFORT_OUTPUT_PATH
@@ -451,7 +451,7 @@ def test_stop_application_runs_after_the_last_reporting_task():
 
     assert isinstance(check, ShortCircuitOperator)
     assert isinstance(stop, EmrServerlessStopApplicationOperator)
-    assert check.upstream_task_ids == {"report_pipeline_counts"}
+    assert check.upstream_task_ids == {"quality_validation.report_pipeline_counts"}
     assert stop.upstream_task_ids == {"emr_teardown.check_idle"}
     assert stop.downstream_task_ids == set()
     for task in (check, stop):
@@ -518,9 +518,9 @@ def test_transform_sensor_readings_uses_the_heavy_profile_and_the_others_default
     # compute_hourly_score는 0.073 vCPU-h로 10배 차이가 난다(#508).
     module = _load_dag_module()
 
-    sensor = module.dag.get_task("transform_sensor_readings")
-    hourly = module.dag.get_task("compute_hourly_score")
-    standard = module.dag.get_task("compute_standard_score")
+    sensor = module.dag.get_task("score_computation.transform_sensor_readings")
+    hourly = module.dag.get_task("score_computation.compute_hourly_score")
+    standard = module.dag.get_task("score_computation.compute_standard_score")
 
     assert "spark.executor.instances=4" in _spark_params(sensor)
     assert "spark.executor.instances=2" in _spark_params(hourly)

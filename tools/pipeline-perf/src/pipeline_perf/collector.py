@@ -23,7 +23,7 @@ from pipeline_perf.airflow import (
 SCHEMA_VERSION = 1
 
 _EMR_OPERATOR = "EmrServerlessStartJobOperator"
-_COUNTS_TASK_ID = "report_pipeline_counts"
+_COUNTS_TASK_ID = "quality_validation.report_pipeline_counts"
 
 # 한 번도 실행되지 않은 task의 상태. Airflow는 이런 task에도 start_date를 찍기
 # 때문에(상류 실패를 전파한 시각), 시각만 보고 Job Run을 찾으면 그 시간대에 있던

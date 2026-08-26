@@ -139,7 +139,7 @@ def test_asset_triggered_run_records_the_wait_from_the_trigger(lake):
                 {
                     "timestamp": "2026-08-25T01:59:30Z",
                     "source_dag_id": "standard_score_pipeline",
-                    "source_task_id": "report_pipeline_counts",
+                    "source_task_id": "quality_validation.report_pipeline_counts",
                     "source_run_id": "upstream-run",
                     "created_dagruns": [{"dag_id": "current_score_pipeline", "run_id": RUN_ID}],
                 }
@@ -168,7 +168,7 @@ def test_upstream_failed_task_is_not_matched_to_someone_elses_job_run(lake):
     실제 수집에서 관측한 오탐이라 상태로 먼저 걸러야 한다.
     """
     never_ran = {
-        "task_id": "validate_standard_score",
+        "task_id": "quality_validation.validate_standard_score",
         "operator": "EmrServerlessStartJobOperator",
         "state": "upstream_failed",
         "try_number": 0,

@@ -37,7 +37,7 @@ TASK_INSTANCES = [
         "duration": 5.0,
     },
     {
-        "task_id": "transform_sensor_readings",
+        "task_id": "score_computation.transform_sensor_readings",
         "operator": "EmrServerlessStartJobOperator",
         "state": "success",
         "try_number": 1,
@@ -85,8 +85,8 @@ def build_collector(
         xcoms=xcoms
         if xcoms is not None
         else {
-            (RUN_ID, "transform_sensor_readings"): JOB_RUN_ID,
-            (RUN_ID, "report_pipeline_counts"): {"feature_count": 184213},
+            (RUN_ID, "score_computation.transform_sensor_readings"): JOB_RUN_ID,
+            (RUN_ID, "quality_validation.report_pipeline_counts"): {"feature_count": 184213},
         },
         task_logs=task_logs
         if task_logs is not None

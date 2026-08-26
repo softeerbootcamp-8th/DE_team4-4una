@@ -34,7 +34,7 @@ def test_task_level_rows_are_included(lake):
 
     table = render_comparison(payload, payload)
 
-    assert "task.transform_sensor_readings.duration_s" in table
+    assert "task.score_computation.transform_sensor_readings.duration_s" in table
     assert "| 4:40 | 4:40 | +0:00 | +0.0% |" in table
 
 

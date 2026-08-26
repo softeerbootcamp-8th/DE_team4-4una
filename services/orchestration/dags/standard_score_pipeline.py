@@ -267,112 +267,118 @@ with DAG(
     # 매크로다(#540) — 이것 때문에 별도 resolve task를 두지 않아도 된다.
     user_defined_macros={"resolve_road_snapshot_date": _resolve_road_snapshot_date},
 ) as dag:
-    # T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
-    # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
-    transform_sensor_readings = submit_batch_jobs_command(
-        task_id="transform_sensor_readings",
-        # 파이프라인에서 가장 무거운 job이다 — 실측 0.783 vCPU-h로
-        # compute_hourly_score(0.073 vCPU-h)의 10배다(#508).
-        profile="heavy",
-        entry_point_arguments=[
-            "cleanse-sensor-events",
-            "--run-id",
-            "{{ run_id }}",
-            "--target-hour",
-            "{{ data_interval_start.isoformat() }}",
-            "--road-snapshot-date",
-            "{{ resolve_road_snapshot_date(data_interval_start) }}",
-            "--feature-version",
-            "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}",
-            "--bronze-input-path",
-            _CLEANSING_BRONZE_INPUT_PATH,
-            "--quarantine-output-path",
-            _CLEANSING_QUARANTINE_OUTPUT_PATH,
-            "--road-segment-path",
-            _HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH,
-            "--output-path",
-            _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
-        ],
-    )
-    # 품질 검증은 별도 task가 아니라 transform_sensor_readings의 Job Run 안에서
-    # 이어서 돈다(#495, ADR-0012) — 검증만을 위해 Job Run을 하나 더 띄우면
-    # 검증 자체(약 30초)보다 콜드 스타트(약 1분 25초)가 더 든다. 실패하면
-    # 이 task가 실패해 scoring으로 넘어가지 않는 것(hard fail)은 그대로다.
+    with TaskGroup(group_id="score_computation") as score_computation:
+        # T1 cleansing과 T2 feature 계산은 하나의 batch-jobs 명령으로 실행하며,
+        # cleansing 결과 DataFrame을 중간 저장 없이 T2에 직접 전달한다.
+        transform_sensor_readings = submit_batch_jobs_command(
+            task_id="transform_sensor_readings",
+            # 파이프라인에서 가장 무거운 job이다 — 실측 0.783 vCPU-h로
+            # compute_hourly_score(0.073 vCPU-h)의 10배다(#508).
+            profile="heavy",
+            entry_point_arguments=[
+                "cleanse-sensor-events",
+                "--run-id",
+                "{{ run_id }}",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
+                "--road-snapshot-date",
+                "{{ resolve_road_snapshot_date(data_interval_start) }}",
+                "--feature-version",
+                "{{ var.value.HOURLY_SEGMENT_FEATURE_VERSION }}",
+                "--bronze-input-path",
+                _CLEANSING_BRONZE_INPUT_PATH,
+                "--quarantine-output-path",
+                _CLEANSING_QUARANTINE_OUTPUT_PATH,
+                "--road-segment-path",
+                _HOURLY_SEGMENT_FEATURE_ROAD_SEGMENT_PATH,
+                "--output-path",
+                _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+            ],
+        )
+        # 품질 검증은 별도 task가 아니라 transform_sensor_readings의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012) — 검증만을 위해 Job Run을 하나 더 띄우면
+        # 검증 자체(약 30초)보다 콜드 스타트(약 1분 25초)가 더 든다. 실패하면
+        # 이 task가 실패해 scoring으로 넘어가지 않는 것(hard fail)은 그대로다.
 
-    compute_hourly_score = submit_batch_jobs_command(
-        task_id="compute_hourly_score",
-        entry_point_arguments=[
-            "score-hourly-comfort",
-            "--run-id",
-            "{{ run_id }}",
-            "--target-hour",
-            "{{ data_interval_start.isoformat() }}",
-            "--input-path",
-            _HOURLY_COMFORT_INPUT_PATH,
-            "--output-path",
-            _HOURLY_COMFORT_OUTPUT_PATH,
-            "--rejected-output-path",
-            _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
-        ],
-    )
-    # transform_sensor_readings와 같은 이유로 검증은 이 task의 Job Run 안에서
-    # 이어서 돈다(#495, ADR-0012).
+        compute_hourly_score = submit_batch_jobs_command(
+            task_id="compute_hourly_score",
+            entry_point_arguments=[
+                "score-hourly-comfort",
+                "--run-id",
+                "{{ run_id }}",
+                "--target-hour",
+                "{{ data_interval_start.isoformat() }}",
+                "--input-path",
+                _HOURLY_COMFORT_INPUT_PATH,
+                "--output-path",
+                _HOURLY_COMFORT_OUTPUT_PATH,
+                "--rejected-output-path",
+                _HOURLY_COMFORT_REJECTED_OUTPUT_PATH,
+            ],
+        )
+        # transform_sensor_readings와 같은 이유로 검증은 이 task의 Job Run 안에서
+        # 이어서 돈다(#495, ADR-0012).
 
-    # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 S3 Gold
-    # snapshot에 저장한 뒤(#265) PostgreSQL에 UPSERT한다. as_of는
-    # `[as_of - window_hours, as_of)` 윈도우의 끝이므로 data_interval_end를 쓴다.
-    # STANDARD_COMFORT_SCORE_*/POSTGRES_*는 CLI 플래그가 없어(from_env() 전용)
-    # driver_env로 넘긴다.
-    compute_standard_score = submit_batch_jobs_command(
-        task_id="compute_standard_score",
-        entry_point_arguments=[
-            "load-standard-segment-comfort-score",
-            "--as-of",
-            "{{ data_interval_end.isoformat() }}",
-        ],
-        driver_env={
-            **_POSTGRES_DRIVER_ENV,
-            "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
-            # road-environment(active pointer/manifest)는 gold/silver와 다른
-            # reference 버킷에 있다(#389) — build-road-environment/run-monthly가
-            # 이미 이 이름을 쓰고 있어 그대로 재사용한다. 비어 있으면 job이
-            # STANDARD_COMFORT_SCORE_DATA_LAKE_URI로 폴백한다.
-            "REFERENCE_DATA_LAKE_URI": (
-                "{{ var.value.get('REFERENCE_DATA_LAKE_URI', '') }}"
-            ),
-            "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
-                "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
-            ),
-            "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
-        },
-    )
-    # validate_standard_score는 compute_standard_score가 이번 실행에 쓴 Gold
-    # snapshot(기준 데이터셋)을 검증한다 — 서빙 테이블을 조회하던 방식은
-    # ADR-0012에서 바뀌었다(#495). Spark가 필요 없어 Job Run을 내지 않는다.
-    # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
-    # compute_standard_score가 아니라 여기 둔다(#249).
-    validate_standard_score = PythonOperator(
-        task_id="validate_standard_score",
-        python_callable=_validate_standard_score,
-        op_kwargs={
-            "data_lake_uri": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
-            "gold_output_uri": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
-            "as_of": "{{ data_interval_end.isoformat() }}",
-        },
-        outlets=[STANDARD_SCORE_ASSET],
-    )
+        # standard 점수는 hourly_comfort_score를 168시간 윈도우로 롤업해 S3 Gold
+        # snapshot에 저장한 뒤(#265) PostgreSQL에 UPSERT한다. as_of는
+        # `[as_of - window_hours, as_of)` 윈도우의 끝이므로 data_interval_end를 쓴다.
+        # STANDARD_COMFORT_SCORE_*/POSTGRES_*는 CLI 플래그가 없어(from_env() 전용)
+        # driver_env로 넘긴다.
+        compute_standard_score = submit_batch_jobs_command(
+            task_id="compute_standard_score",
+            entry_point_arguments=[
+                "load-standard-segment-comfort-score",
+                "--as-of",
+                "{{ data_interval_end.isoformat() }}",
+            ],
+            driver_env={
+                **_POSTGRES_DRIVER_ENV,
+                "STANDARD_COMFORT_SCORE_DATA_LAKE_URI": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
+                # road-environment(active pointer/manifest)는 gold/silver와 다른
+                # reference 버킷에 있다(#389) — build-road-environment/run-monthly가
+                # 이미 이 이름을 쓰고 있어 그대로 재사용한다. 비어 있으면 job이
+                # STANDARD_COMFORT_SCORE_DATA_LAKE_URI로 폴백한다.
+                "REFERENCE_DATA_LAKE_URI": (
+                    "{{ var.value.get('REFERENCE_DATA_LAKE_URI', '') }}"
+                ),
+                "STANDARD_COMFORT_SCORE_WINDOW_HOURS": (
+                    "{{ var.value.get('STANDARD_COMFORT_SCORE_WINDOW_HOURS', '168') }}"
+                ),
+                "STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
+            },
+        )
+        transform_sensor_readings >> compute_hourly_score >> compute_standard_score
 
-    report_pipeline_counts = PythonOperator(
-        task_id="report_pipeline_counts",
-        python_callable=_report_pipeline_counts,
-        op_kwargs={
-            "target_hour": "{{ data_interval_start.isoformat() }}",
-            "as_of": "{{ data_interval_end.isoformat() }}",
-            "quarantine_output_path": _CLEANSING_QUARANTINE_OUTPUT_PATH,
-            "feature_output_path": _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
-            "hourly_comfort_output_path": _HOURLY_COMFORT_OUTPUT_PATH,
-        },
-    )
+    with TaskGroup(group_id="quality_validation") as quality_validation:
+        # validate_standard_score는 compute_standard_score가 이번 실행에 쓴 Gold
+        # snapshot(기준 데이터셋)을 검증한다 — 서빙 테이블을 조회하던 방식은
+        # ADR-0012에서 바뀌었다(#495). Spark가 필요 없어 Job Run을 내지 않는다.
+        # 검증을 통과한 데이터만 current_score_pipeline을 깨우도록, outlet을
+        # compute_standard_score가 아니라 여기 둔다(#249).
+        validate_standard_score = PythonOperator(
+            task_id="validate_standard_score",
+            python_callable=_validate_standard_score,
+            op_kwargs={
+                "data_lake_uri": _STANDARD_COMFORT_SCORE_DATA_LAKE_URI,
+                "gold_output_uri": _STANDARD_COMFORT_SCORE_GOLD_OUTPUT_URI,
+                "as_of": "{{ data_interval_end.isoformat() }}",
+            },
+            outlets=[STANDARD_SCORE_ASSET],
+        )
+
+        report_pipeline_counts = PythonOperator(
+            task_id="report_pipeline_counts",
+            python_callable=_report_pipeline_counts,
+            op_kwargs={
+                "target_hour": "{{ data_interval_start.isoformat() }}",
+                "as_of": "{{ data_interval_end.isoformat() }}",
+                "quarantine_output_path": _CLEANSING_QUARANTINE_OUTPUT_PATH,
+                "feature_output_path": _HOURLY_SEGMENT_FEATURE_OUTPUT_PATH,
+                "hourly_comfort_output_path": _HOURLY_COMFORT_OUTPUT_PATH,
+            },
+        )
+
+        validate_standard_score >> report_pipeline_counts
 
     # 파이프라인이 다 끝나면 EMR Serverless Application을 바로 내려서 idle
     # timeout(15분)만큼의 유휴 과금을 없앤다(#432). 기본 trigger_rule(all_success)
@@ -386,11 +392,4 @@ with DAG(
         stop_application = stop_emr_serverless_application(task_id="stop_application")
         check_idle >> stop_application
 
-    (
-        transform_sensor_readings
-        >> compute_hourly_score
-        >> compute_standard_score
-        >> validate_standard_score
-        >> report_pipeline_counts
-        >> emr_teardown
-    )
+    score_computation >> quality_validation >> emr_teardown
