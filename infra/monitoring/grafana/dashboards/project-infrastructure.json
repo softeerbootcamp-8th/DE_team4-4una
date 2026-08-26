@@ -257,11 +257,39 @@
       }
     },
     {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Disk Usage over Time",
+      "description": "위 Disk %(root filesystem) 패널과 같은 query를 시간축(range query)으로 — 지금까지는 순간값(stat)만 있었는데, DiskWarning(80%)/DiskCritical(90%) alert가 왜 울렸는지(또는 서서히 가까워지는지) 여기서 추세로 미리 볼 수 있다.",
+      "datasource": "Prometheus",
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"project-node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 7,
       "type": "timeseries",
       "title": "Network Receive",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 33, "w": 12, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -286,7 +314,7 @@
       "type": "timeseries",
       "title": "Network Transmit",
       "datasource": "Prometheus",
-      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 33, "w": 12, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -311,7 +339,7 @@
       "type": "row",
       "title": "Docker Containers",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -320,7 +348,7 @@
       "title": "Container CPU Usage",
       "description": "cAdvisor container_cpu_usage_seconds_total, per-container name label. Verify the name label in Prometheus Explore if this panel shows No data (see README).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -346,7 +374,7 @@
       "title": "Container Memory Usage",
       "description": "cAdvisor container_memory_working_set_bytes, per-container name label. Verify the name label in Prometheus Explore if this panel shows No data (see README).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 50, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -372,7 +400,7 @@
       "title": "Container Network I/O",
       "description": "cAdvisor container_network_{receive,transmit}_bytes_total, per-container name label. This label may not be populated for every network setup — verify in Prometheus Explore if this panel shows No data (see README).",
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 50, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 58, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",

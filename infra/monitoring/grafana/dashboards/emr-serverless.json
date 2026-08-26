@@ -129,6 +129,7 @@
         "defaults": {
           "unit": "none",
           "noValue": "NO METRIC DATA",
+          "custom": { "lineWidth": 1, "fillOpacity": 90 },
           "mappings": [
             {
               "type": "special",
@@ -148,7 +149,8 @@
       },
       "options": {
         "mergeValues": true,
-        "showValue": "auto",
+        "showValue": "always",
+        "rowHeight": 0.8,
         "legend": { "displayMode": "list", "placement": "bottom" }
       }
     },
@@ -355,11 +357,73 @@
       }
     },
     {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Jobs over Time",
+      "description": "Running/Success/Failed Jobs stat 패널과 같은 query(#410, matchExact:true)를 시간축(range query)으로 합쳤다 — 지금까지는 순간값(stat) 3개만 있었는데, 배치가 하루 동안 몇 번 돌고 실패했는지 추세로 볼 수 있게 그래프를 추가했다. CloudWatch datasource도 range query를 지원하므로(CPU/Memory Allocated 패널과 같은 방식) instant 없이 그대로 쓴다.",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "AWS/EMRServerless",
+          "metricName": "RunningJobs",
+          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": true,
+          "legendFormat": "Running Jobs"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "AWS/EMRServerless",
+          "metricName": "SuccessJobs",
+          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": true,
+          "legendFormat": "Success Jobs"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "namespace": "AWS/EMRServerless",
+          "metricName": "FailedJobs",
+          "dimensions": { "ApplicationId": "$application_id", "ApplicationName": "$application_name" },
+          "statistic": "Maximum",
+          "region": "default",
+          "matchExact": true,
+          "legendFormat": "Failed Jobs"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Failed Jobs" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 101,
       "type": "row",
       "title": "Workers",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -368,7 +432,7 @@
       "title": "Running Workers",
       "description": "RunningWorkerCount 합계 (Statistic: Maximum). Jobs metric과 달리 이 metric은 ApplicationId/ApplicationName 외에 WorkerType(예: Spark_Driver/Spark_Executor)·CapacityAllocationType별로 별도 series가 발행되므로, application 전체의 실행 중 worker 수를 보려면 matchExact: false(search)로 그 조합 전체를 찾아 SUM()으로 합산해야 한다 — Jobs처럼 direct 단일 query로 단순화할 수 없다. 이 구성 자체는 맞았지만, hide된 search target과 SUM() target 둘 다 metricQueryType/metricEditorMode가 빠져 있어 Grafana가 기본값(Search, Code)으로 잘못 해석해 No data였다(#410) — 두 target에 명시적으로 채워 넣어 고쳤다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 4 },
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 4 },
       "targets": [
         {
           "refId": "A",
@@ -416,7 +480,7 @@
       "type": "row",
       "title": "Capacity",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -425,7 +489,7 @@
       "title": "CPU Allocated / Used",
       "description": "Allocated: CPUAllocated(Maximum). Used: WorkerCpuUsed(Sum, AWS 권장 statistic). 두 metric 모두 ApplicationId/ApplicationName 외에 WorkerType·CapacityAllocationType(Used는 JobId까지) 조합별로 별도 series가 발행되므로 matchExact: false(search)+SUM()으로 application 전체 값을 합산한다. No data였던 원인은 이 search/SUM target들에 metricQueryType/metricEditorMode가 빠져 Grafana가 기본값(Search, Code)으로 해석했기 때문이다(#410) — 4개 target 모두에 명시적으로 채워 넣었다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -495,7 +559,7 @@
       "title": "Memory Allocated / Used",
       "description": "Allocated: MemoryAllocated(Maximum). Used: WorkerMemoryUsed(Sum). 단위 GB — AWS가 두 metric 모두 GB(10진) 단위로 발행하므로 Grafana의 decgbytes(입력값이 이미 GB라고 가정하는 단위)가 맞다, bytes 단위로 다시 스케일링하지 않는다. 두 metric 모두 WorkerType·CapacityAllocationType(Used는 JobId까지) 조합별 series라 matchExact: false+SUM()으로 합산한다. No data 원인은 CPU 패널과 동일(metricQueryType/metricEditorMode 누락, #410) — 4개 target 모두에 채워 넣었다.",
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
