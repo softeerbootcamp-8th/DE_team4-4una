@@ -50,11 +50,11 @@
       "gridPos": { "x": 0, "y": 1, "w": 24, "h": 4 },
       "targets": [
         { "refId": "A", "datasource": "Prometheus", "expr": "(min(up{job=~\"project-node|project-containers\"})) or vector(2)", "legendFormat": "ec2-up", "instant": true, "hide": true },
-        { "refId": "B", "datasource": "Prometheus", "expr": "(kafka_brokers{job=\"kafka\"} > bool 0) or vector(2)", "legendFormat": "kafka-up", "instant": true, "hide": true },
+        { "refId": "B", "datasource": "Prometheus", "expr": "min(kafka_brokers{job=\"kafka\"} > bool 0) or vector(2)", "legendFormat": "kafka-up", "instant": true, "hide": true },
         { "refId": "C", "datasource": "Prometheus", "expr": "(sum(increase(airflow_scheduler_executor_heartbeat_duration_count{job=\"airflow\"}[5m])) > bool 0) or vector(2)", "legendFormat": "airflow-up", "instant": true, "hide": true },
-        { "refId": "D", "datasource": "Prometheus", "expr": "(stream_processor_query_running{job=\"stream-processor\"}) or vector(2)", "legendFormat": "spark-running", "instant": true, "hide": true },
-        { "refId": "E", "datasource": "Prometheus", "expr": "(up{job=\"serving-api\"}) or vector(2)", "legendFormat": "servingapi-up", "instant": true, "hide": true },
-        { "refId": "F", "datasource": "Prometheus", "expr": "(airflow_dag_processing_import_errors{job=\"airflow\"} > bool 0) or vector(0)", "legendFormat": "airflow-import-errors", "instant": true, "hide": true },
+        { "refId": "D", "datasource": "Prometheus", "expr": "min(stream_processor_query_running{job=\"stream-processor\"}) or vector(2)", "legendFormat": "spark-running", "instant": true, "hide": true },
+        { "refId": "E", "datasource": "Prometheus", "expr": "min(up{job=\"serving-api\"}) or vector(2)", "legendFormat": "servingapi-up", "instant": true, "hide": true },
+        { "refId": "F", "datasource": "Prometheus", "expr": "min(airflow_dag_processing_import_errors{job=\"airflow\"} > bool 0) or vector(0)", "legendFormat": "airflow-import-errors", "instant": true, "hide": true },
         { "refId": "G", "datasource": "Prometheus", "expr": "(sum(rate(serving_api_http_requests_total{job=\"serving-api\", status=~\"5..\"}[5m])) or vector(0)) > bool 0", "legendFormat": "servingapi-5xx", "instant": true, "hide": true },
         {
           "refId": "I",
