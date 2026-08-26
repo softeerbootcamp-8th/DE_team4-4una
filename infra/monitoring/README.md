@@ -582,7 +582,7 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
 - 접속: `http://<MONITORING_EC2_PUBLIC_IP>:3000`
 - 위치: Grafana 좌측 메뉴 **Dashboards → Infrastructure → System Overview** /
   **Project Infrastructure** / **Serving API** / **Kafka** / **Airflow** /
-  **Spark Streaming** / **EMR Serverless** / **Service Status Overview**
+  **Spark Streaming** / **EMR Serverless**
 - 구성 파일:
   - `infra/monitoring/grafana/provisioning/dashboards/dashboards.yml` — dashboard
     provider 정의(`Infrastructure` 폴더, `/var/lib/grafana/dashboards`를
@@ -611,11 +611,6 @@ Prometheus(스크랩 기반)와 CloudWatch(AWS API 직접 조회) 두 개가
     (Spark Streaming EC2에서 Prometheus로 scrape) dashboard 본문
   - `infra/monitoring/grafana/dashboards/emr-serverless.json` — EMR Serverless
     (CloudWatch datasource) dashboard 본문
-  - `infra/monitoring/grafana/dashboards/service-status-overview.json` — 주요
-    컴포넌트(Project EC2/Host, Kafka, Airflow, Spark Streaming, Serving API,
-    EMR Serverless) 상태를 한 화면에서 확인하는 통합 dashboard 본문. 자세한
-    내용은 아래 [Service Status Overview dashboard](#service-status-overview-dashboard)
-    참고.
   - `infra/monitoring/statsd/airflow-mapping.yml` — Airflow timer metric
     3개를 Prometheus histogram으로 바꾸는 statsd_exporter 매핑 설정
   - `infra/monitoring/blackbox/blackbox.yml` — Grafana/Prometheus/Ops Agent
@@ -644,11 +639,9 @@ Streaming/Serving API/Project Infrastructure)로 이동해 확인한다.
   패널과 동일한 공식을 job 정규식으로 3대 EC2에 확장한 것이다.
 - **Overall System Health**: EC2 3대(Project/Spark Streaming/Monitoring)와
   Kafka/Airflow/Spark Streaming/Serving API 4개 서비스를 하나로 합친
-  HEALTHY/DEGRADED/UNHEALTHY/UNKNOWN 4단계 상태다. 판정 로직은 아래 [Pipeline
-  Health 4단계화](#pipeline-health-4단계화)와 완전히 같은 원칙(우선순위:
-  UNHEALTHY > UNKNOWN > DEGRADED > HEALTHY)을 쓴다 — 차이는 Pipeline
-  Health(`service-status-overview.json`)가 EC2는 1대(Project)만 보는 반면 이
-  패널은 EC2 3대를 모두 포함한다는 점이다.
+  HEALTHY/DEGRADED/UNHEALTHY/UNKNOWN 4단계 상태다. 판정 로직은 아래 [Overall
+  System Health 4단계화](#overall-system-health-4단계화) 참고(우선순위:
+  UNHEALTHY > UNKNOWN > DEGRADED > HEALTHY).
 - **EC2 Instances**: Project/Spark Streaming/Monitoring EC2별로 Status(UP/
   DOWN), CPU/Memory/Disk Gauge, Load, Uptime, Network RX/TX를 보여준다.
   CPU/Memory/Disk의 PromQL과 threshold(70/90, 70/90, 80/90)는
@@ -656,8 +649,8 @@ Streaming/Serving API/Project Infrastructure)로 이동해 확인한다.
   `job` label만 `project-node`/`spark-node`/`monitoring-node`로 바꿨다.
 - **Service Status**: Kafka/Airflow/Spark Streaming/Serving API는 각 상세
   dashboard의 Component Status 패널과 완전히 같은 query/mapping을 재사용한다
-  (판정 기준 일치). EMR Serverless는 `service-status-overview.json`/
-  `emr-serverless.json`의 Running Jobs 패널과 완전히 같은 CloudWatch direct
+  (판정 기준 일치). EMR Serverless는 `emr-serverless.json`의 Component Status와
+  완전히 같은 CloudWatch direct
   query(`RunningJobs`, `matchExact: true`, #410)를 재사용해 IDLE/RUNNING/NO
   METRIC DATA로 보여준다 — RunningJobs=0은 정상 idle이라 DOWN으로 취급하지
   않는다. `application_id`/`application_name` 변수는 이 프로젝트가 쓰는 실제
@@ -669,16 +662,14 @@ Streaming/Serving API/Project Infrastructure)로 이동해 확인한다.
 - **Overall System Health 판정에는 EMR Serverless를 포함하지 않는다** — Prometheus
   기반 컴포넌트(A~G)와 CloudWatch 기반 EMR을 하나의 Grafana expression에서
   결합하는 게 현재 버전(12.4.8)에서 동작이 보장된다고 확신할 수 없고,
-  RunningJobs=0(정상 idle)을 장애 신호로 잘못 섞을 위험도 있다 —
-  `service-status-overview.json`의 Pipeline Health가 이미 같은 이유로 EMR을
-  제외하고 있어 그 판단을 그대로 따랐다. EMR 상태는 위 Service Status의
-  독립된 카드로만 확인한다.
+  RunningJobs=0(정상 idle)을 장애 신호로 잘못 섞을 위험도 있다. EMR 상태는
+  위 Service Status의 독립된 카드로만 확인한다.
 - **Trends**: 서비스별 대표 그래프 하나씩 — Kafka Message Rate over Time
   (`kafka.json`과 동일 query), Spark Streaming Rows/sec over Time
   (`spark-streaming.json`의 Rows/sec over Time과 동일), Airflow Task
-  Success/Failure Rate(`airflow.json`의 Task Success Rate/Task Failure Rate
-  stat 패널과 같은 query를 시간축 그래프로), Serving API Requests/sec
-  (`serving-api.json`의 Requests/sec stat 패널과 같은 query를 시간축 그래프로).
+  Success/Failure Rate(`airflow.json`의 Task Success/Failure Rate over Time과
+  동일), Serving API Requests/sec(`serving-api.json`의 Requests/sec stat 패널과
+  같은 query를 시간축 그래프로).
   나머지 그래프(latency percentile, DAG별/토픽별 breakdown 등)는 이 dashboard에
   옮기지 않았다 — 전부 옮기면 개별 dashboard를 그대로 복제하는 셈이라, "한눈에
   보는 화면"이라는 목적과 어긋난다.
@@ -692,34 +683,33 @@ Streaming/Serving API/Project Infrastructure)로 이동해 확인한다.
   cAdvisor 설정을 그대로 재사용). legend에 `instance`(어느 EC2인지)와 컨테이너
   이름이 함께 나와 어느 서비스가 자원을 많이 쓰는지 바로 구분된다.
 
-### Pipeline Health 4단계화
+### Overall System Health 4단계화
 
-`service-status-overview.json`의 Pipeline Health 패널은 원래
-HEALTHY/DEGRADED/FAILED 3단계였는데, 참조하는 원본 metric이 하나라도 아예 없으면
-(예: exporter 자체가 배포 전이라 Prometheus job이 없음) Grafana의 server-side
-math expression이 계산 자체를 못 해 패널 전체가 큰 "No data"로 표시됐다 — 실제
-장애(DOWN)와 metric 부재를 구분할 수 없는 문제였다.
+이 요약 패널은 원래 HEALTHY/DEGRADED/FAILED 3단계였는데, 참조하는 원본 metric이
+하나라도 아예 없으면(예: exporter 자체가 배포 전이라 Prometheus job이 없음)
+Grafana의 server-side math expression이 계산 자체를 못 해 패널 전체가 큰
+"No data"로 표시됐다 — 실제 장애(DOWN)와 metric 부재를 구분할 수 없는 문제였다.
+그래서 `UNKNOWN`을 넷째 상태로 분리하고 `FAILED`는 `UNHEALTHY`로 이름을 바꿨다.
 
-지금은 각 원본 query(A~E)를 `(<원래 쿼리>) or vector(2)`로 감싸 metric이 없을 때
-"UNKNOWN"을 뜻하는 값 2를 강제로 채운다(PromQL의 `or`가 왼쪽에 결과가 있으면
+지금은 각 원본 query(A~G)를 `(<원래 쿼리>) or vector(99)`로 감싸 metric이 없을 때
+"UNKNOWN"을 뜻하는 값 99를 강제로 채운다(PromQL의 `or`가 왼쪽에 결과가 있으면
 오른쪽을 무시하는 성질을 이용) — 값이 실제로 있으면 원래 쿼리 결과가 그대로
-쓰이므로 기존 판정은 바뀌지 않는다. `I`(down_count, A~E 중 0인 개수)와
-`J`(unknown_count, A~E 중 2인 개수)로 나눠 최종 값을 계산한다.
+쓰이므로 기존 판정은 바뀌지 않는다. `I`(down_count), `J`(unknown_count),
+`K`(degraded_count)로 나눠 최종 값을 계산한다.
 
 ```text
 UNHEALTHY(3) = down_count > 0
 UNKNOWN(2)   = down_count == 0 && unknown_count > 0
-DEGRADED(1)  = down_count == 0 && unknown_count == 0 && (F+G) > 0
+DEGRADED(1)  = down_count == 0 && unknown_count == 0 && degraded_count > 0
 HEALTHY(0)   = 그 외
 ```
 
-기존 `FAILED`는 `UNHEALTHY`로 이름을 바꿨다(작업 지시의 상태 이름에 맞춤).
-`System Overview` dashboard의 Overall System Health 패널도 같은 원칙을 쓰되,
-서비스 4개(Kafka/Airflow/Spark Streaming/Serving API)는 자기 자신이 이미
-다단계 Component Status 코드를 갖고 있어서, "코드가 DOWN 계열 값 이상이면
-down", "DEGRADED 계열 값이면 degraded"로 한 번 더 해석하는 단계가 있다 — 다른
-서비스의 코드 범위와 겹치지 않도록 absent 처리는 `vector(2)`가 아니라
-`vector(99)`를 쓴다(Kafka의 실제 코드값 2, BROKER DOWN과 겹치지 않기 위해).
+A~C는 EC2 3대의 `up`, D~G는 Kafka/Airflow/Spark Streaming/Serving API의
+Component Status 코드다. 서비스 4개는 자기 자신이 이미 다단계 코드를 갖고
+있어서 "코드가 DOWN 계열 값 이상이면 down", "DEGRADED 계열 값이면 degraded"로
+한 번 더 해석하는 단계가 있다 — absent 표시에 `vector(2)`가 아니라
+`vector(99)`를 쓰는 이유가 여기 있다(Kafka의 실제 코드값 2, BROKER DOWN과
+겹치지 않기 위해).
 
 ### Infrastructure Alert
 
@@ -1083,6 +1073,22 @@ metric들을 갱신한다.
   희소하다.** `rate(...[5m])` 윈도우 안에 샘플이 아예 없으면 `No data`가
   정상이다 — Kafka Exporter의 `Consumer Lag`류 패널과 같은 이유다.
 
+### Silver/Gold freshness는 아직 측정 불가 (observability gap)
+
+Bronze 적재 신선도는 Spark Streaming dashboard의 `Last Progress Age`/
+`Event-Time Lag`로 상시 관측된다. 반면 **Silver/Gold의 실제 적재·갱신 시각을
+노출하는 Prometheus/StatsD metric은 아직 없다.** 가장 가까운 기존 신호는
+`services/batch-jobs/src/batch_jobs/gold_audit_validation.py`의 Great
+Expectations 감사인데(Gold Postgres `standard_segment_comfort_score`/
+`current_segment_comfort_score`의 `age_seconds`를 SQL로 계산), Airflow DAG가
+돌 때 한 번 계산해 S3 Data Docs로만 남기는 soft-fail 감사라 Grafana가 상시
+조회할 수 있는 timeseries가 아니다. Silver 단계는 이런 감사조차 없다.
+
+측정하려면 Postgres exporter를 붙이거나 배치 잡이 완료 시각을 metric으로
+내보내야 한다 — 새 exporter/계측을 추가하는 작업이라 아직 하지 않았다. 이
+공백은 원래 `service-status-overview.json`의 text 패널에 적혀 있었고, 그
+dashboard를 지우면서(#586) 여기로 옮겼다.
+
 ### EMR Serverless dashboard 지표
 
 Prometheus가 아니라 CloudWatch datasource로 AWS `AWS/EMRServerless` 네임스페이스
@@ -1160,74 +1166,6 @@ dimension 전부이므로(추가 dimension 없음) direct query 하나로 충분
   [Service Status Overview dashboard](#service-status-overview-dashboard)도
   같은 원칙으로 설계했다.
 
-### Service Status Overview dashboard
-
-`infra/monitoring/grafana/dashboards/service-status-overview.json`. 개별
-dashboard를 하나씩 열어보지 않고 Project EC2/Host, Kafka, Airflow, Spark
-Streaming, Serving API, EMR Serverless 여섯 컴포넌트 상태를 한 화면에서 먼저
-확인하기 위한 dashboard다. 상세 metric은 각 컴포넌트 dashboard로 넘어가서
-본다 — 이 dashboard 자체는 패널을 최소화했다.
-
-**#437부터는 각 컴포넌트가 단순 UP/DOWN이 아니라 다단계 상태를 보여준다** — 각
-컴포넌트 카드는 해당 상세 dashboard의 `Component Status` 패널과 완전히 같은
-PromQL/mapping을 쓴다(판정 기준을 일치시키기 위함). 상태 목록과 우선순위 근거는
-아래 [장애 원인 세분화(Component Status, #437)](#장애-원인-세분화component-status-437)
-참고.
-
-| 컴포넌트 | 상태(우선순위 높은 순) | 비고 |
-| --- | --- | --- |
-| Project EC2 / Host | UP / DOWN (2단계, #437 대상 아님) | node_exporter + cAdvisor 스크랩 여부만 본다 |
-| Kafka | TARGET DOWN > BROKER DOWN > UNDER REPLICATED > HEALTHY | HIGH LAG는 정상 범위 기준이 없어 뺐다 |
-| Airflow | METRICS TARGET DOWN > SCHEDULER HEARTBEAT LOST > DAG PROCESSOR STALE > DAG IMPORT ERROR > HEALTHY | instance label이 실제 scheduler node가 아니라 exporter endpoint다(multi-instance 한계, 아래 참고) |
-| Spark Streaming | TARGET DOWN > QUERY STOPPED > PROGRESS STALE > EVENT DATA STALE > RUNNING | KAFKA BACKLOG(offset lag)는 정상 범위 기준이 없어 뺐다 |
-| Serving API | TARGET DOWN > HEALTHY (2단계) | HIGH 5XX/HIGH LATENCY는 확립된 SLA가 없어 뺐다 |
-| EMR Serverless | NO METRIC DATA / IDLE / RUNNING | CloudWatch `AWS/EMRServerless` `RunningJobs`(최근 6시간, `matchExact: true`) — 아래 EMR 설명 참고. `emr-serverless.json`에도 같은 패널이 있다(#437, 판정 일치) |
-
-Kafka/Airflow/Spark Streaming은 **처음에는 각각 `up{job="kafka"}`/
-`up{job="airflow"}`/`up{job="stream-processor"}`로 만들었다가 바꿨다** —
-`up`은 exporter/endpoint가 스크랩되고 있다는 뜻일 뿐, 그 안의 애플리케이션
-로직까지 정상이라는 뜻은 아니기 때문이다. 구체적으로:
-
-- Kafka Exporter는 살아있는데(`up==1`) Kafka broker가 전부 죽어도
-  `up{job="kafka"}`는 계속 1이다 — broker 생존은 `kafka_brokers`(Kafka
-  Exporter가 admin API로 직접 확인해 보고하는 값)로 봐야 한다.
-- Airflow도 statsd_exporter는 살아있는데(`up==1`) scheduler만 죽으면
-  `up{job="airflow"}`는 계속 1이다 — scheduler 생존은 heartbeat metric
-  증가량으로 봐야 한다(Airflow dashboard와 같은 기준).
-- Spark Streaming도 컨테이너는 떠 있지만(`up==1`) 쿼리가 예외로 죽어
-  재시작 대기 중인 순간에는 `stream_processor_query_running`이 0이 될 수
-  있다 — Spark Streaming dashboard에도 같은 설명이 있다.
-
-Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시나리오에
-해당하는 별도 애플리케이션 health metric이 없어(또는 있어도 이 dashboard
-범위를 벗어나) 그대로 `up{job="..."}`을 쓴다 — 이 두 컴포넌트는 여전히
-"exporter/endpoint가 스크랩되고 있다"는 뜻으로 읽어야 한다.
-
-**EMR Serverless는 Prometheus scrape 대상이 아니라서 `up{}`이 없다.** 대신
-CloudWatch `RunningJobs`를 최근 6시간 창(`matchExact: false`로 실제 dimension
-조합 검색)으로 조회해서, 그 창 안에 metric이 한 번이라도 있으면(0 running
-이어도) `OK`로, 6시간 내내 metric이 전혀 없으면 `NO METRIC DATA`로 표시한다.
-"job이 0개"와 "metric 자체가 없음"을 구분하기 위한 설계다 — job이 0개인
-idle 상태를 `OK`로, `ApplicationId`/`ApplicationName`이 비어있거나 틀렸거나
-IAM 권한이 없거나(또는 오래 idle이라 auto-stop된 경우도 포함) `NO METRIC
-DATA`로 나눈다. `NO METRIC DATA`가 곧바로 장애를 의미하지는 않는다 —
-auto-stop은 EMR Serverless의 정상 동작이다. 실제 application 상태는
-아래 명령으로 직접 확인해야 정확하다.
-
-```bash
-aws emr-serverless get-application --application-id <application_id>
-```
-
-이 dashboard도 EMR Serverless dashboard와 같은 `application_id`/
-`application_name` 변수를 쓴다(별도 dashboard라 변수를 공유하지 않지만,
-둘 다 이 프로젝트에서 쓰는 실제 값 `00g85ljahc0svj2p`/`de4-batch-jobs`를
-기본값으로 채워 뒀다). 다른 application을 보려면 값을 바꾼다.
-
-이 dashboard는 실제 AWS 계정으로 EMR Serverless가 idle→active를 오가는
-전이 상황까지 검증하지 못했다 — 6시간이라는 조회 창 길이가 실제 auto-stop
-주기에 비해 적절한지, `IDLE`/`RUNNING`/`NO METRIC DATA` 판정이 실제 장애
-상황에서 기대대로 동작하는지는 배포 후 관찰이 필요하다.
-
 ### 장애 원인 세분화(Component Status, #437)
 
 기존에는 대부분 `up{job="..."}` 같은 단순 2단계(UP/DOWN)로만 상태를 보여줬다.
@@ -1258,6 +1196,26 @@ instance는 아예 결과에서 빠지게(참인 instance만 남게)" 필터링�
 이 방식은 `by (instance)`를 붙이면 그대로 instance별로 독립적으로 동작한다
 — 아래 multi-instance 절 참고. `state-timeline` 패널은 같은 query를
 range query로 그대로 재사용한다(instant 제거).
+
+Kafka/Airflow/Spark Streaming은 **처음에는 각각 `up{job="kafka"}`/
+`up{job="airflow"}`/`up{job="stream-processor"}`로 만들었다가 바꿨다** —
+`up`은 exporter/endpoint가 스크랩되고 있다는 뜻일 뿐, 그 안의 애플리케이션
+로직까지 정상이라는 뜻은 아니기 때문이다. 구체적으로:
+
+- Kafka Exporter는 살아있는데(`up==1`) Kafka broker가 전부 죽어도
+  `up{job="kafka"}`는 계속 1이다 — broker 생존은 `kafka_brokers`(Kafka
+  Exporter가 admin API로 직접 확인해 보고하는 값)로 봐야 한다.
+- Airflow도 statsd_exporter는 살아있는데(`up==1`) scheduler만 죽으면
+  `up{job="airflow"}`는 계속 1이다 — scheduler 생존은 heartbeat metric
+  증가량으로 봐야 한다(Airflow dashboard와 같은 기준).
+- Spark Streaming도 컨테이너는 떠 있지만(`up==1`) 쿼리가 예외로 죽어
+  재시작 대기 중인 순간에는 `stream_processor_query_running`이 0이 될 수
+  있다 — Spark Streaming dashboard에도 같은 설명이 있다.
+
+Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시나리오에
+해당하는 별도 애플리케이션 health metric이 없어(또는 있어도 이 dashboard
+범위를 벗어나) 그대로 `up{job="..."}`을 쓴다 — 이 두 컴포넌트는 여전히
+"exporter/endpoint가 스크랩되고 있다"는 뜻으로 읽어야 한다.
 
 **컴포넌트별 상태(우선순위 높은 순).**
 
@@ -1485,13 +1443,13 @@ dashboard 새로고침 때 repository 버전으로 되돌아간다. dashboard를
      `"metricQueryType": 0, "metricEditorMode": 0`, `SUM(...)` 같은 Metric
      Math 쿼리는 `"metricQueryType": 0, "metricEditorMode": 1`이어야 한다.
 
-- Service Status Overview 패널: 개별 컴포넌트 dashboard에서 이미 `No data`나
-  `DOWN`을 확인했다면 그쪽 troubleshooting(Kafka/Airflow/Spark
-  Streaming/Serving API 각 절)을 그대로 따라간다. Overview 자체에서만
+- System Overview의 Service Status 패널: 개별 컴포넌트 dashboard에서 이미
+  `No data`나 `DOWN`을 확인했다면 그쪽 troubleshooting(Kafka/Airflow/Spark
+  Streaming/Serving API 각 절)을 그대로 따라간다. System Overview 자체에서만
   문제가 있어 보이면:
-  1. Host/Kafka/Airflow/Spark Streaming/Serving API 패널은 각 컴포넌트
-     dashboard의 `Target Status` 패널과 완전히 같은 datasource/PromQL을
-     쓴다 — Overview에서만 다르게 나올 수 없다. 다르게 보이면 브라우저
+  1. Kafka/Airflow/Spark Streaming/Serving API 카드는 각 컴포넌트
+     dashboard의 `Component Status` 패널과 완전히 같은 datasource/PromQL을
+     쓴다 — System Overview에서만 다르게 나올 수 없다. 다르게 보이면 브라우저
      캐시나 dashboard 새로고침 문제일 가능성이 높다.
   2. EMR Serverless 패널이 `NO METRIC DATA`면 위 EMR Serverless 패널
      troubleshooting을 따라가되, **`NO METRIC DATA`≠장애**라는 점을 먼저
