@@ -33,9 +33,9 @@ export STREAM_MIN_OFFSETS_PER_TRIGGER=600000
 export STREAM_MAX_TRIGGER_DELAY=30s
 # 복구 backlog가 한 번에 커지지 않도록 30초 batch를 12만 건으로 제한한다.
 export STREAM_MAX_OFFSETS_PER_TRIGGER=120000
-# 배치 한 번이 남길 파일 수. Kafka partition마다 task가 하나씩 생기므로
-# 합치지 않으면 배치마다 partition 수만큼 잔파일이 쌓인다.
-export STREAM_BRONZE_OUTPUT_PARTITIONS=1
+# 배치 한 번이 남길 파일 수. 2 vCPU Spark 런타임에서는 두 writer task가
+# coalesce(1)의 단일 S3 writer 병목을 피하면서 파일 수를 제한한다.
+export STREAM_BRONZE_OUTPUT_PARTITIONS=2
 
 SPARK_LOCAL_IP=127.0.0.1 uv run --package stream-processor stream-processor
 ```
@@ -106,3 +106,17 @@ docker run --rm --network host \
 - `processedRowsPerSecond` > `inputRowsPerSecond`
 - Kafka lag가 장기적으로 커지지 않음
 - 시간 경계 이벤트가 올바른 `event_date/hour` 파티션에 기록됨
+
+## Bronze writer canary
+
+`STREAM_BRONZE_OUTPUT_PARTITIONS=2` 는 2 vCPU Spark Streaming 런타임의
+초기 canary 값이다. 적용 전후에 다음을 같은 Kafka offset 범위에서 비교한다.
+
+- `stream_processor_processed_rows_per_second`와
+  `stream_processor_batch_duration_seconds`
+- batch당 Parquet 파일 수와 평균 파일 크기
+- Bronze의 `(topic, partition, offset)`과 value 내 `event_id` 중복/누락
+
+이 값이 2 vCPU에서 가장 빠르다는 결론을 미리 뜻하지는 않는다. batch duration이
+trigger interval을 넘거나 Kafka lag가 지속적으로 커지면 1개와 3개도 같은
+방법으로 재검증한다.

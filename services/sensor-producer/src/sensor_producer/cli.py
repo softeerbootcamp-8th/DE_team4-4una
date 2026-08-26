@@ -131,8 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("SENSOR_PRODUCER_WORKERS", "1")),
     )
-    # 배정 모드는 배타적이다. 아무것도 주지 않으면 기존과 같이 프로필 1로 고정한다.
-    assignment = run_parser.add_mutually_exclusive_group()
+    # 배정 모드는 배타적이고 필수다. 예전에는 아무것도 주지 않으면 프로필 1로
+    # 고정됐는데, 그러면 전 구간이 한 프로필 데이터가 되어 차량별 점수를 만들 수
+    # 없다. 실제로 이 기본값 때문에 이틀치가 프로필 1만으로 적재됐다.
+    assignment = run_parser.add_mutually_exclusive_group(required=True)
     assignment.add_argument("--vehicle-profile-id", type=int)
     assignment.add_argument("--vehicle-mix", choices=sorted(VEHICLE_MIXES))
     run_parser.add_argument("--max-trip-skip-ratio", type=ratio)
@@ -184,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
         run_id=arguments.run_id,
         sample_hz=arguments.sample_hz,
         time_scale=arguments.time_scale,
-        vehicle_profile_id=None if use_mix else (arguments.vehicle_profile_id or 1),
+        vehicle_profile_id=None if use_mix else arguments.vehicle_profile_id,
         vehicle_mix=arguments.vehicle_mix,
     )
     bounds, sampling_path, prepared = resolve_replay_input(arguments)
