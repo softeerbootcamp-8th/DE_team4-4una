@@ -157,3 +157,67 @@ class TestActionSpecs:
         }
 
         assert opted_in == set(ACTION_SPECS)
+
+    def test_bronze_ingestion_alerts_require_active_kafka_input(self):
+        from pathlib import Path
+
+        import yaml
+
+        repo_root = Path(__file__).resolve().parents[3]
+        document = yaml.safe_load(
+            (
+                repo_root
+                / "infra/monitoring/grafana/provisioning/alerting/rules.yaml"
+            ).read_text()
+        )
+        rules = {
+            rule["title"]: rule
+            for group in document["groups"]
+            for rule in group["rules"]
+        }
+
+        warning_titles = {"BronzeIngestionStalled", "BronzeIngestionLagGrowing"}
+        assert warning_titles <= rules.keys()
+        assert "StreamProcessorStale" not in rules
+
+        for title in warning_titles:
+            rule = rules[title]
+            prometheus_expressions = " ".join(
+                query["model"].get("expr", "")
+                for query in rule["data"]
+                if query["datasourceUid"] == "prometheus"
+            )
+            assert 'rate(kafka_topic_partition_current_offset' in prometheus_expressions
+            assert rule["noDataState"] == "OK"
+            assert rule["labels"]["severity"] == "warning"
+            assert "auto_remediate" not in rule["labels"]
+            assert rule["annotations"]["__dashboardUid__"] == "spark-streaming"
+
+        stalled_threshold = rules["BronzeIngestionStalled"]["data"][-1]
+        assert stalled_threshold["model"]["conditions"][0]["evaluator"] == {
+            "type": "gt",
+            "params": [90],
+        }
+
+    def test_stream_processor_down_is_critical_within_two_minutes(self):
+        from pathlib import Path
+
+        import yaml
+
+        repo_root = Path(__file__).resolve().parents[3]
+        document = yaml.safe_load(
+            (
+                repo_root
+                / "infra/monitoring/grafana/provisioning/alerting/rules.yaml"
+            ).read_text()
+        )
+        rules = {
+            rule["title"]: rule
+            for group in document["groups"]
+            for rule in group["rules"]
+        }
+        rule = rules["StreamProcessorDown"]
+
+        assert rule["for"] == "1m"
+        assert rule["labels"]["severity"] == "critical"
+        assert rule["annotations"]["__dashboardUid__"] == "spark-streaming"
