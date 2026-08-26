@@ -1,4 +1,4 @@
-"""bronze_compaction DAG의 구조를 docker 없이 검증하는 테스트 (#271, ADR-0009).
+"""zone_weather_compaction DAG의 구조를 docker 없이 검증하는 테스트 (#271, ADR-0009).
 
 실제 task 실행(S3 오브젝트 나열/삭제/쓰기)은 로컬 Airflow에서 수동으로 확인한다
 (spec의 완료 조건). 여기서는 DAG가 정상 파싱되고, task에 상하위 의존관계가 없으며,
@@ -15,13 +15,13 @@ from pathlib import Path
 from airflow.providers.standard.operators.python import PythonOperator
 
 DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
-DAG_PATH = DAGS_DIR / "bronze_compaction.py"
+DAG_PATH = DAGS_DIR / "zone_weather_compaction.py"
 
 sys.path.insert(0, str(DAGS_DIR))
 
 
 def _load_dag_module():
-    spec = importlib.util.spec_from_file_location("bronze_compaction", DAG_PATH)
+    spec = importlib.util.spec_from_file_location("zone_weather_compaction", DAG_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -31,7 +31,7 @@ def _load_dag_module():
 def test_dag_parses_with_expected_schedule():
     module = _load_dag_module()
 
-    assert module.dag.dag_id == "bronze_compaction"
+    assert module.dag.dag_id == "zone_weather_compaction"
     assert module.dag.schedule == "17 4 * * *"
     assert module.dag.catchup is False
     assert module.dag.max_active_runs == 1

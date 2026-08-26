@@ -28,7 +28,7 @@ _MINIMAL_YAML = textwrap.dedent(
           emr_teardown.check_idle:
             owner: bob
             severity: high
-      bronze_compaction:
+      zone_weather_compaction:
         owner: bob
         severity: low
     """
@@ -96,7 +96,7 @@ def test_task_group_id_is_used_when_task_id_has_no_override(tmp_path):
 def test_dag_without_task_overrides_uses_dag_default(tmp_path):
     registry = load_dag_owners_registry(_write_config(tmp_path))
 
-    owner = registry.resolve_owner("bronze_compaction")
+    owner = registry.resolve_owner("zone_weather_compaction")
     assert owner.name == "bob"
 
 
@@ -134,7 +134,7 @@ def test_real_config_file_covers_all_target_dags():
         "current_score_pipeline",
         "zone_weather_pipeline",
         "data_quality_audit",
-        "bronze_compaction",
+        "zone_weather_compaction",
     ):
         owner = registry.resolve_owner(dag_id)
         severity = registry.resolve_severity(dag_id)
