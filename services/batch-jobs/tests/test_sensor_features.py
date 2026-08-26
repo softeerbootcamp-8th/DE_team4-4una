@@ -88,28 +88,30 @@ class TestEventConfig:
     def test_load_event_feature_config_reads_provisional_thresholds(self) -> None:
         config = load_event_feature_config()
 
+        # max_gap_seconds만 여전히 provisional이다 — 나머지 넷은 #544에서 확정했다(event_features.yaml 주석 참고).
         assert config.max_gap_seconds.value == 0.5
         assert config.max_gap_seconds.provisional is True
         assert config.hard_accel_threshold_mps2.value == 3.0
-        assert config.hard_accel_threshold_mps2.provisional is True
+        assert config.hard_accel_threshold_mps2.provisional is False
         assert config.hard_brake_threshold_mps2.value == -3.0
-        assert config.hard_brake_threshold_mps2.provisional is True
+        assert config.hard_brake_threshold_mps2.provisional is False
         assert config.min_event_duration_seconds.value == 0.3
-        assert config.min_event_duration_seconds.provisional is True
+        assert config.min_event_duration_seconds.provisional is False
         assert config.sharp_steer_threshold_deg_per_sec.value == 100.0
-        assert config.sharp_steer_threshold_deg_per_sec.provisional is True
+        assert config.sharp_steer_threshold_deg_per_sec.provisional is False
         assert config.sharp_steer_min_duration_seconds.value == 0.3
-        assert config.sharp_steer_min_duration_seconds.provisional is True
+        assert config.sharp_steer_min_duration_seconds.provisional is False
 
 
 class TestSteeringConfig:
     def test_load_steering_feature_config_reads_provisional_thresholds(self) -> None:
         config = load_steering_feature_config()
 
+        # max_gap_seconds는 여전히 provisional, deadband는 #544에서 확정했다.
         assert config.max_gap_seconds.value == 0.5
         assert config.max_gap_seconds.provisional is True
         assert config.steering_rate_deadband_deg_per_sec.value == 10.0
-        assert config.steering_rate_deadband_deg_per_sec.provisional is True
+        assert config.steering_rate_deadband_deg_per_sec.provisional is False
 
 
 class TestEvents:

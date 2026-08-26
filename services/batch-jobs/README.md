@@ -83,6 +83,33 @@ The build writes its manifest only after every artifact succeeds. `--activate`
 then updates `prepared/simulation_environment/active.json`. A failed or rejected
 build cannot replace the previously active environment.
 
+## Comfort scoring calibration (one-off, not part of the pipeline)
+
+`analyze-hourly-feature-distribution` reads real `hourly_segment_features`
+(Silver2) and prints count/mean/min/max/P10/P25/P50/P75/P90/P95 for every
+feature `hourly_comfort.yaml`'s `normalizers` actually score, plus
+`avg_speed_mps`. Rate features (`hard_brake_rate` etc.) are derived the same
+way `hourly_comfort.py` derives them (`count / trip_count`), not read as-is,
+so the numbers match what scoring actually sees.
+
+No Airflow DAG or production command calls this — it exists so a human can
+look at the real distribution before changing `hourly_comfort.yaml`'s
+comfortable/uncomfortable anchors or `event_features.yaml`/`steering_features.yaml`
+thresholds (#544). Run it against a representative period, decide the new
+values from the output, then hard-code them in the YAML configs and bump
+`scoring_version`/`feature_version` — this command never writes config itself.
+
+```bash
+uv run --package batch-jobs batch-jobs analyze-hourly-feature-distribution \
+  --input-path s3://<bucket>/silver/hourly_segment_features \
+  --start 2026-08-01T00:00:00+00:00 \
+  --end 2026-08-08T00:00:00+00:00
+```
+
+`--input-path` defaults to `HOURLY_COMFORT_INPUT_PATH` (same env var the
+scoring job reads). `--start`/`--end` are optional; omit both to scan every
+partition under the path.
+
 ## Quality controls
 
 Structural checks reject empty road/zone data, duplicate LION IDs, invalid
