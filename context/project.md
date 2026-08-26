@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-26
 ---
 
 # Project Definition
@@ -22,7 +22,9 @@ time.
 
 - The serving unit is **road segment x vehicle type**.
 - The API returns the latest available comfort score for that unit.
-- Scores are recalculated monthly.
+- Standard scores are recalculated hourly over a rolling 168-hour window; a
+  weather-adjusted current score refreshes when the standard score or zone
+  weather changes.
 - The canonical road identifier is the LION `SegmentID`, represented internally
   as `segment_id`.
 - The published comfort-score range is 0 through 100. The direction and formula
@@ -92,10 +94,13 @@ monthly batch pipeline.
 - Persist immutable Bronze sensor events in S3 without a `segment_id`.
 - Use Spark to map sensor GPS points to versioned LION segments and retain one
   Silver row for every Bronze row, including unsuccessful matches.
-- Use Spark to calculate monthly segment x vehicle-type comfort scores.
-- The score formula is not yet defined. The first prototype should retain the
-  most relevant simulated variables so formulas can be evaluated without
-  rerunning every trip.
+- Use Spark to calculate hourly segment x vehicle-type comfort scores,
+  aggregate them into a rolling 168-hour standard score, and derive a
+  weather-adjusted current score.
+- The score formula is specified and implemented per
+  `context/comfort-score.md` but remains proposed pending formal acceptance
+  (OQ-006). The pipeline retains the most relevant simulated variables so
+  formulas can be re-evaluated without rerunning every trip.
 
 ## Initial API capability
 
@@ -131,7 +136,7 @@ score"); the request and response grain is in `context/data/contracts.md`.
 - Synthetic vehicle-motion and comfort-related events at a configurable sampling
   frequency
 - Kafka transport and lake persistence
-- Spark-based monthly aggregation
+- Spark-based hourly aggregation into a rolling 168-hour standard score
 - Latest-score API and a supporting dashboard if time permits
 - An architecture with a documented AWS migration path
 
@@ -153,7 +158,7 @@ The first end-to-end milestone is successful when the team can:
 2. Reproduce the same eligible-trip order, endpoints, routes, and sensor events
    from the same immutable input file and simulation configuration.
 3. Observe selected trip events flowing through Kafka into the local data lake.
-4. Run a Spark job that produces one versioned monthly result for each observed
+4. Run a Spark job that produces one versioned result for each observed
    segment x vehicle-type combination.
 5. Query the latest available result through the serving API.
 6. Trace an API result back to its calculation run and source snapshot versions.
