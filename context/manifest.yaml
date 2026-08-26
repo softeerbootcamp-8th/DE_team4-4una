@@ -1,5 +1,5 @@
-version: 0.2.5
-last_reviewed: 2026-08-22
+version: 0.2.6
+last_reviewed: 2026-08-26
 project_stage: implementation
 
 documents:
@@ -73,6 +73,11 @@ documents:
   - id: sensor-producer-smoke-test
     path: context/runs/2026-08-10-nyc-sensor-smoke.md
     purpose: Reproducible actual-NYC execution evidence and source checksums
+    status: verified
+
+  - id: dummy-full-pipeline-local-run
+    path: context/runs/2026-08-17-dummy-full-pipeline-local-run.md
+    purpose: Dummy-data full-pipeline local execution evidence
     status: verified
 
 canonical_external_paths:

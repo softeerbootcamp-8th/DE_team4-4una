@@ -1,7 +1,7 @@
 ---
 owner: project-team
 status: draft
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-26
 ---
 
 # Glossary
@@ -9,16 +9,16 @@ last_reviewed: 2026-08-23
 | Term | Meaning in this project |
 | --- | --- |
 | Canonical road segment | A LION road segment keyed by source `SegmentID`, represented as `segment_id` |
-| Comfort score | A versioned monthly 0-100 summary of simulated ride-comfort features for a LION segment and vehicle profile; direction is not yet defined |
+| Comfort score | A versioned 0-100 summary of simulated ride-comfort features for a LION segment and vehicle profile, published as an hourly-refreshed 168-hour standard score and a weather-adjusted current score; the formula remains proposed (OQ-006) |
 | Dispatch event | A replay action scheduled from an HVFHV request; when it runs, its UTC date anchors that Trip's published logical timestamps and passenger motion begins at pickup |
-| Gold dataset | Published monthly comfort-score records ready to load into the serving store |
+| Gold dataset | Published standard and current comfort-score records ready to load into the serving store |
 | HVFHV | NYC TLC High Volume For-Hire Vehicle trip records used as simulation inputs |
 | LION | NYC's street and address base map, considered as one source for road topology and segment identity |
 | Occupied journey | The passenger portion from simulated pickup to simulated drop-off; excludes travel to pickup |
 | Reference data | Monthly road, pavement, hump, and taxi-zone inputs used to build the simulation environment |
 | Road environment | A versioned routable network enriched with road-condition and speed-hump attributes |
-| Score period | The calendar or source month represented by a gold score; exact period semantics remain open |
-| Serving store | The database or index read by the API; technology is not yet selected |
+| Score period | The driving-data window a score represents; the implemented standard score covers a rolling 168-hour window ending at `score_as_of`, while formal period semantics remain open (OQ-012) |
+| Serving store | The database read by the API; the implemented prototype serves from PostgreSQL, while the formal production choice remains open (OQ-004) |
 | Simulation offset | Deterministic elapsed simulated time from a trip or run origin, independent of wall-clock execution time |
 | Source snapshot | Immutable copy plus metadata for one downloaded source version |
 | Taxi zone | TLC geographic zone used to constrain deterministic pickup and drop-off road-point selection |
@@ -33,5 +33,5 @@ last_reviewed: 2026-08-23
 - Distinguish source event time, simulation time, ingestion time, and processing
   time in names and contracts.
 - Use `score_period` for the data period and `calculated_at` for calculation time.
-- Do not use `realtime` to describe the monthly score. It applies only to the
+- Do not use `realtime` to describe comfort scores. It applies only to the
   wall-clock replay and streaming ingestion path.

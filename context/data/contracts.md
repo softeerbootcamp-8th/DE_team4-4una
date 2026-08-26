@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: draft-contract
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-26
 future_canonical_path: libs/de4-core/src/de4_core/contracts/
 ---
 
@@ -110,19 +110,24 @@ Candidate fields include entry/exit offsets, observed seconds and meters,
 acceleration and jerk summaries, bump counts, road features, validation status,
 and source raw-event locations.
 
-## Monthly comfort score
+## Comfort score (standard and current)
 
-**Grain:** one `segment_id x vehicle_profile_id x score_month`.
+**Implemented grain:** one `segment_id x vehicle_profile_id` row per serving
+table, keeping only the latest score.
 
-**Confirmed key:** `(segment_id, vehicle_profile_id, score_month)`.
+**Implemented key:** `(segment_id, vehicle_profile_id)` in both
+`standard_segment_comfort_score` and `current_segment_comfort_score`
+(migrations `0010`/`0012`).
 
-The supplied schema includes:
+The standard score aggregates hourly scores over a rolling 168-hour window
+ending at `score_as_of`; the current score applies zone-weather adjustment on
+top of it. Field-level schemas live in [`schema-catalog.md`](schema-catalog.md),
+and the executable DDL in
+`services/batch-jobs/src/batch_jobs/resources/migrations/` is authoritative.
 
-- a 0-100 final score plus vertical, longitudinal, lateral, and pavement scores
-- average speed, P95 vertical acceleration, and P95 jerk
-- braking, acceleration, discomfort-event, and sample counts
-- an explicit driving-data period and enriched-reference date
-- confidence, score version, and calculation time
+The originally confirmed monthly grain
+`(segment_id, vehicle_profile_id, score_month)` was superseded by this
+standard/current design; formal period semantics remain open (OQ-012).
 
 ## Minimum API response
 

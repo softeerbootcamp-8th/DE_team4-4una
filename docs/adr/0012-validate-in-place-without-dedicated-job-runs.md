@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-25
-supersedes:
+supersedes: 0004 (in-flight 검증의 별도 task 배치 부분에 한함)
 superseded_by:
 ---
 

@@ -93,8 +93,9 @@ Taxi-zone geometry is retained to choose valid deterministic endpoints.
 
 ### Road comfort map dashboard
 
-The implemented Streamlit dashboard (issue #376) reads one configured
-`road_segment` snapshot Parquet object from S3 through the AWS default
+The implemented dashboard — a FastAPI backend serving a React frontend
+(issue #435, replacing the issue #376 Streamlit prototype) — reads one
+configured `road_segment` snapshot Parquet object from S3 through the AWS default
 credential chain and converts the stored `EPSG:32118` WKB geometry to
 `EPSG:4326`. A borough selection narrows candidates first (issue #407); the
 map viewport narrows further to what is actually rendered (issue #414), and
