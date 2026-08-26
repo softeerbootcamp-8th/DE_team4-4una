@@ -26,7 +26,7 @@ _COMFORT_DEFAULTS = {
     "vertical_weight": 0.5,
     "longitudinal_weight": 0.3,
     "lateral_weight": 0.2,
-    "min_traffic_threshold": 5.0,
+    "evidence_saturation_trip_count": 5.0,
     "shrinkage_k": 10.0,
 }
 
@@ -80,6 +80,10 @@ class TestComfortScoreConfigPremises:
     def test_rejects_a_negative_shrinkage_k(self) -> None:
         with pytest.raises(ValueError, match="shrinkage_k"):
             _comfort_config(shrinkage_k=-1.0)
+
+    def test_rejects_a_non_positive_evidence_saturation_trip_count(self) -> None:
+        with pytest.raises(ValueError, match="evidence_saturation_trip_count"):
+            _comfort_config(evidence_saturation_trip_count=0.0)
 
     def test_the_shipped_config_satisfies_the_premises(self) -> None:
         assert load_comfort_score_config() is not None

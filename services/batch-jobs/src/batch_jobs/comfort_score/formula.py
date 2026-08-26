@@ -1,4 +1,4 @@
-"""Compute Segment x vehicle-profile comfort score and confidence (#127, #198).
+"""Compute Segment x vehicle-profile comfort score and confidence (#127, #198, #566).
 
 context/comfort-score.md에 정의된 Step 1~5(및 vehicle-agnostic 버전)를 그대로 구현한다.
 입력은 comfort_score/loader.py가 이미 168시간 윈도우로 필터링하고 최신 scoring_version만
@@ -8,14 +8,18 @@ Step 2~5는 방향(수직/종방향/횡방향)별로 따로 적용하고, 최종
 Step 1의 가중치로 합쳐서 만든다. Step 1~5가 전부 선형이라 "먼저 합치고 축소"와
 "축소하고 합치기"의 결과가 같기 때문이다.
 
-    c_h    = sum_d w_d * d_h                          (Step 1)
-    c_obs  = avg_h(c_h) = sum_d w_d * avg_h(d_h)      (Step 3; H는 방향과 무관)
-    mu     = avg(c_h)   = sum_d w_d * avg(d_h)        (Step 4)
-    Score  = (N*c_obs + k*mu)/(N+k) = sum_d w_d * Score_d
+    c_h    = sum_d w_d * d_h                                    (Step 1)
+    e_h    = min(1, trip_count_h / evidence_saturation_trip_count)  (Step 2, #566)
+    c_obs  = sum_h(e_h*c_h)/sum_h(e_h) = sum_d w_d * (weighted avg_h d_h)  (Step 3)
+    mu     = sum_h(e_h*c_h)/sum_h(e_h) (pooled)                  = sum_d w_d * mu_d  (Step 4)
+    Score  = (N_eff*c_obs + k*mu)/(N_eff+k) = sum_d w_d * Score_d
 
 즉 방향별 점수를 저장하려고 계산 구조를 바꿔도 기존 comfort_score 값은 달라지지
-않는다. T_min 필터가 trip_count(방향과 무관한 값)에만 걸리므로 qualifying hour 집합 H도
-세 방향이 공유한다.
+않는다. e_h가 trip_count(방향과 무관한 값)에만 걸리므로 세 방향이 같은 e_h를 공유한다.
+
+hard cutoff(trip_count >= T_min)는 #566에서 제거했다 — 1~4대만 지나간 시간도
+evidence_saturation_trip_count에 비례한 부분 evidence로 인정하고, 그 이상은 1시간
+분량으로 포화시킨다. trip_count=0인 시간만 evidence=0으로 제외된다.
 
 진입점은 compute_standard_comfort_scores 하나다 — 호출자가 넘긴 universe의 모든
 조합에 대해 행을 만든다. 관측된 조합만 산출하던 구 segment_comfort_score 경로는
@@ -35,7 +39,11 @@ from batch_jobs.comfort_score.loader import _validate_schema
 from batch_jobs.schemas import HOURLY_COMFORT_SCORE_SCHEMA
 
 # 이 계산 로직의 형태(shape) 버전. 공식 구조가 바뀌면 올린다 (comfort-score.md 참고).
-SCORE_VERSION = "1.0.0"
+# 2.0.0: hard traffic cutoff를 evidence weight로 대체 — N/confidence의 정의가 바뀐다(#566).
+SCORE_VERSION = "2.0.0"
+
+# Step 2 evidence weight 컬럼 이름. groupBy 집계 여러 곳에서 이 값을 재사용한다.
+_EVIDENCE_WEIGHT_COLUMN = "_evidence_weight"
 
 # vehicle_profile_id=0은 Gold 적재 시 전체 차량 대표값을, 1부터는 실제 차량 구분을 의미한다 (OQ-038).
 VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID = 0
@@ -91,8 +99,8 @@ def compute_standard_comfort_scores(
     (sentinel 0 제외 — vehicle-agnostic 행은 그 segment 목록으로 여기서 직접 만든다).
     관측이 전혀 없는 조합도 N=0, confidence=0으로 행이 나온다.
 
-    mu_p가 정의되지 않는 프로필(윈도우 전체에서 qualifying hour가 없는 경우)은
-    vehicle-agnostic 경로의 전역 mu로 대체한다.
+    mu_p가 정의되지 않는 프로필(윈도우 전체에서 evidence가 없는 경우, 즉 모든 시간이
+    trip_count=0인 경우)은 vehicle-agnostic 경로의 전역 mu로 대체한다.
     """
     _validate_universe(universe)
     return _compute(hourly_df, config, universe)
@@ -108,26 +116,26 @@ def _compute(
 
     # 시간별 원본은 per-vehicle 경로가 그대로 쓰고, vehicle-agnostic 경로는 프로필을
     # 트래픽 가중으로 접은 뒤 같은 Step 2~5를 탄다. 전역 mu와 vehicle-agnostic 경로가
-    # 똑같이 T_min 필터를 걸므로 필터까지 끝낸 결과를 한 번만 만들어 둘이 나눠 쓴다.
+    # 똑같이 evidence weight를 매기므로 그 결과를 한 번만 만들어 둘이 나눠 쓴다.
     #
     # 이 프레임을 persist하는 것도 시도했지만 실측 결과 손해였다 — 캐시가 AQE의
     # post-shuffle coalescing을 끊어서, 입력 756,000행 기준 실행 task가 188 -> 807로
     # 늘었다. Spark가 셔플을 재사용해 주지도 않는다(계획에 ReusedExchange 없음).
-    pooled_qualifying = _qualifying_hours(_pool_vehicle_profiles(hourly_df), config)
+    pooled_weighted = _attach_evidence_weight(_pool_vehicle_profiles(hourly_df), config)
 
     # 전역 mu는 vehicle-agnostic 경로의 모집단 평균이다. per-vehicle 경로의 mu_p
     # 대체값으로도 쓰이므로 한 번만 계산해 양쪽이 같은 값을 보게 한다.
-    global_mu = _collect_global_population_means(pooled_qualifying)
+    global_mu = _collect_global_population_means(pooled_weighted)
 
     per_vehicle = _per_vehicle_scores(hourly_df, config, universe, global_mu)
     vehicle_agnostic = _vehicle_agnostic_scores(
-        pooled_qualifying, config, universe, global_mu
+        pooled_weighted, config, universe, global_mu
     )
     return per_vehicle.unionByName(vehicle_agnostic)
 
 
 def _collect_global_population_means(
-    pooled_qualifying: DataFrame,
+    pooled_weighted: DataFrame,
 ) -> dict[str, Column]:
     """전역 mu를 드라이버로 한 번 걷어 방향별 리터럴로 만든다.
 
@@ -139,10 +147,11 @@ def _collect_global_population_means(
     값 자체는 한 행 세 컬럼뿐이라 드라이버로 걷어도 안전하다. 리터럴로 바꾸면 두 소비처가
     같은 상수를 보고, crossJoin과 중복 서브트리가 함께 사라진다.
 
-    윈도우 전체에 qualifying hour가 하나도 없으면 평균이 NULL이다. 여기서 막지 않고
-    NULL 리터럴을 그대로 흘려보낸다 — 실행을 실패시킬지는 호출자(standard_job)의 책임이다.
+    윈도우 전체에 evidence가 하나도 없으면(모든 시간이 trip_count=0) 평균이 NULL이다.
+    여기서 막지 않고 NULL 리터럴을 그대로 흘려보낸다 — 실행을 실패시킬지는
+    호출자(standard_job)의 책임이다.
     """
-    row = _population_means(pooled_qualifying, group_keys=()).first()
+    row = _population_means(pooled_weighted, group_keys=()).first()
     return {
         _population_column(direction): F.lit(
             None if row is None else row[_population_column(direction)]
@@ -247,13 +256,13 @@ def _per_vehicle_scores(
 ) -> DataFrame:
     group_keys = ("segment_id", "vehicle_profile_id")
 
-    qualifying = _qualifying_hours(hourly_df, config)
+    weighted = _attach_evidence_weight(hourly_df, config)
     # cross join 결과는 이미 중복이 없으므로 distinct를 걸지 않는다.
     observed_full = _observed_with_universe(
-        qualifying, _universe_pairs(universe), group_keys
+        weighted, _universe_pairs(universe), group_keys
     )
 
-    population = _population_means(qualifying, group_keys=("vehicle_profile_id",))
+    population = _population_means(weighted, group_keys=("vehicle_profile_id",))
     if global_mu is not None:
         # mu_p가 없는 프로필은 전역 mu로 대체한다. universe의 프로필 전체를 기준으로
         # 왼쪽 조인해야 관측이 하나도 없는 프로필까지 값을 갖는다.
@@ -266,16 +275,16 @@ def _per_vehicle_scores(
 
 
 def _vehicle_agnostic_scores(
-    pooled_qualifying: DataFrame,
+    pooled_weighted: DataFrame,
     config: ComfortScoreConfig,
     universe: Universe,
     global_mu: dict[str, Column],
 ) -> DataFrame:
     group_keys = ("segment_id",)
 
-    # T_min 필터는 _compute가 이미 적용했다. segment 목록도 이미 중복이 없다.
+    # evidence weight는 _compute가 이미 붙였다. segment 목록도 이미 중복이 없다.
     observed_full = _observed_with_universe(
-        pooled_qualifying, universe.segments, group_keys
+        pooled_weighted, universe.segments, group_keys
     )
 
     # 전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 조인 없이 컬럼으로 붙인다.
@@ -286,23 +295,32 @@ def _vehicle_agnostic_scores(
     )
 
 
-def _qualifying_hours(candidate_hours: DataFrame, config: ComfortScoreConfig) -> DataFrame:
-    """Step 2 - T_h(trip_count) >= T_min을 통과한 시간만 남긴다."""
-    return candidate_hours.filter(F.col("trip_count") >= config.min_traffic_threshold.value)
+def _attach_evidence_weight(candidate_hours: DataFrame, config: ComfortScoreConfig) -> DataFrame:
+    """Step 2 - hard cutoff 대신 e_h = min(1, trip_count_h / evidence_saturation_trip_count)를 매긴다(#566).
+
+    trip_count=0인 시간은 여기서 걸러낸다 — e_h가 정확히 0이라 이후 가중합에도 어차피
+    기여하지 않지만, 미리 빼야 data_period_start/end 롤업과 evidence_hours 합계가
+    "evidence 없는 시간"까지 세는 걸 막는다.
+    """
+    saturation = F.lit(config.evidence_saturation_trip_count.value)
+    return candidate_hours.filter(F.col("trip_count") > 0).withColumn(
+        _EVIDENCE_WEIGHT_COLUMN, F.least(F.lit(1.0), F.col("trip_count") / saturation)
+    )
 
 
-def _population_means(qualifying: DataFrame, group_keys: tuple[str, ...]) -> DataFrame:
-    """Step 4의 mu(_p) - 방향별로 이 윈도우의 모든 qualifying 시간을 pool한 평균.
+def _population_means(weighted_hours: DataFrame, group_keys: tuple[str, ...]) -> DataFrame:
+    """Step 4의 mu(_p) - evidence-weighted 평균 sum(e_h*d_h)/sum(e_h)(#566).
 
     `group_keys`가 비어 있으면 전역 mu(한 행)를 만든다.
     """
+    weight = F.col(_EVIDENCE_WEIGHT_COLUMN)
     aggregations = [
-        F.avg(direction).alias(_population_column(direction))
+        (F.sum(weight * F.col(direction)) / F.sum(weight)).alias(_population_column(direction))
         for direction in DIRECTION_COLUMNS
     ]
     if group_keys:
-        return qualifying.groupBy(*group_keys).agg(*aggregations)
-    return qualifying.agg(*aggregations)
+        return weighted_hours.groupBy(*group_keys).agg(*aggregations)
+    return weighted_hours.agg(*aggregations)
 
 
 def _fill_population_means(
@@ -313,7 +331,7 @@ def _fill_population_means(
     전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 crossJoin과 컬럼 rename 없이 그대로
     coalesce에 넣는다.
 
-    전역 mu 자체가 NULL이면(윈도우 전체에 qualifying hour가 하나도 없는 경우) 여기서
+    전역 mu 자체가 NULL이면(윈도우 전체에 evidence가 하나도 없는 경우) 여기서
     막지 않고 NULL을 그대로 흘려보낸다 — 그 판단은 실행 단위로 실패시켜야 하므로
     호출자(standard_job)의 책임이다.
     """
@@ -331,41 +349,42 @@ def _fill_population_means(
 
 
 def _observed_with_universe(
-    qualifying: DataFrame, universe: DataFrame, group_keys: tuple[str, ...]
+    weighted_hours: DataFrame, universe: DataFrame, group_keys: tuple[str, ...]
 ) -> DataFrame:
-    """Step 3 - qualifying 시간을 방향별로 평균 낸다.
+    """Step 3 - evidence-weighted 평균 sum(e_h*d_h)/sum(e_h)를 낸다(#566).
 
-    `universe`에 있는 키는 qualifying hour가 하나도 없어도 N=0 행으로 남긴다. 그래야
+    `universe`에 있는 키는 evidence가 하나도 없어도 N_eff=0 행으로 남긴다. 그래야
     Step 4 공식이 mu(_p)로 자연스럽게 대체한다("Handling a vehicle profile that never
     traversed a segment", comfort-score.md).
     """
-    observed = qualifying.groupBy(*group_keys).agg(
-        F.count(F.lit(1)).alias("qualifying_hours"),
+    weight = F.col(_EVIDENCE_WEIGHT_COLUMN)
+    observed = weighted_hours.groupBy(*group_keys).agg(
+        F.sum(weight).alias("evidence_hours"),
         *[
-            F.avg(direction).alias(_observed_column(direction))
+            (F.sum(weight * F.col(direction)) / F.sum(weight)).alias(_observed_column(direction))
             for direction in DIRECTION_COLUMNS
         ],
         F.sum("sample_count").alias("sample_count"),
         # 새로 계산하는 값이 아니라 입력이 이미 갖고 있는 시간 경계를 그대로 롤업한다.
-        # qualifying hour가 하나도 없는 키는 여기서 NULL로 남고, 그 채움은 배치
+        # evidence가 하나도 없는 키는 여기서 NULL로 남고, 그 채움은 배치
         # 윈도우 경계를 아는 job의 책임이다(#163, #198).
         F.min("data_period_start").alias("data_period_start"),
         F.max("data_period_end").alias("data_period_end"),
     )
     return universe.join(observed, on=list(group_keys), how="left").fillna(
-        {"qualifying_hours": 0, "sample_count": 0}
+        {"evidence_hours": 0.0, "sample_count": 0}
     )
 
 
 def _apply_shrinkage(
     joined: DataFrame, group_keys: tuple[str, ...], config: ComfortScoreConfig
 ) -> DataFrame:
-    """Step 4~5 - Score_d = (N*d_obs + k*mu_d)/(N+k), Confidence = N/(N+k).
+    """Step 4~5 - Score_d = (N_eff*d_obs + k*mu_d)/(N_eff+k), Confidence = N_eff/(N_eff+k)(#566).
 
     방향별로 축소한 뒤 Step 1의 가중치로 합쳐 comfort_score를 만든다. 반올림은 합친
     뒤 마지막에 한 번만 적용해서, 방향별 반올림 오차가 comfort_score에 누적되지 않게 한다.
 
-    모집단 평균이 없는 행(이 윈도우 전체에서 그 그룹이 qualifying hour를 하나도 못 채운
+    모집단 평균이 없는 행(이 윈도우 전체에서 그 그룹이 evidence를 하나도 못 채운
     경우)은 대체할 값이 없으므로 NULL 점수를 내보내는 대신 행을 통째로 제외한다 —
     "지나간 적 없는 조합은 만들지 않는다"는 원칙과 동일하다. standard 경로는 전역 mu로
     미리 채워 두므로 여기서 걸리지 않는다.
@@ -373,7 +392,7 @@ def _apply_shrinkage(
     first_population = _population_column(DIRECTION_COLUMNS[0])
     scorable = joined.filter(F.col(first_population).isNotNull())
 
-    n = F.col("qualifying_hours")
+    n = F.col("evidence_hours")
     k = F.lit(config.shrinkage_k.value)
 
     shrunk = {
@@ -398,7 +417,7 @@ def _apply_shrinkage(
         F.round(comfort_score, 6).alias("comfort_score"),
         F.round(confidence_score, 6).alias("confidence_score"),
         F.col("sample_count"),
-        n.alias("qualifying_hours"),
+        n.alias("evidence_hours"),
         # 진단용으로 남기는 결합 관측치/모집단 평균. 방향별 값의 가중합이라
         # 기존 경로가 직접 계산하던 값과 같다.
         F.round(

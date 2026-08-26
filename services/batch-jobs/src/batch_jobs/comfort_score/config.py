@@ -19,7 +19,7 @@ class ComfortScoreConfig:
     vertical_weight: ProvisionalThreshold
     longitudinal_weight: ProvisionalThreshold
     lateral_weight: ProvisionalThreshold
-    min_traffic_threshold: ProvisionalThreshold
+    evidence_saturation_trip_count: ProvisionalThreshold
     shrinkage_k: ProvisionalThreshold
 
     def __post_init__(self) -> None:
@@ -39,6 +39,10 @@ class ComfortScoreConfig:
             raise ValueError("direction weights must sum to 1")
         if self.shrinkage_k.value < 0:
             raise ValueError("shrinkage_k must not be negative")
+        # evidence weight e_h = min(1, trip_count_h / evidence_saturation_trip_count)의
+        # 분모라 0 이하면 0으로 나누거나 방향이 뒤집힌다(#566).
+        if self.evidence_saturation_trip_count.value <= 0:
+            raise ValueError("evidence_saturation_trip_count must be positive")
 
 
 # comfort_score.yaml을 읽어 ComfortScoreConfig로 검증한다
@@ -53,7 +57,9 @@ def load_comfort_score_config(
         vertical_weight=_parse_threshold(document, "vertical_weight", path),
         longitudinal_weight=_parse_threshold(document, "longitudinal_weight", path),
         lateral_weight=_parse_threshold(document, "lateral_weight", path),
-        min_traffic_threshold=_parse_threshold(document, "min_traffic_threshold", path),
+        evidence_saturation_trip_count=_parse_threshold(
+            document, "evidence_saturation_trip_count", path
+        ),
         shrinkage_k=_parse_threshold(document, "shrinkage_k", path),
     )
 
