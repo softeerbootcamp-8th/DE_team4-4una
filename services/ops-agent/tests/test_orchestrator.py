@@ -256,3 +256,47 @@ class TestOrchestratorHandle:
         posted = main_messages(slack_client)
         assert "1회" in block_text(posted[0])
         assert "2회" in block_text(posted[1])
+
+    def test_each_stage_is_logged_as_one_json_line(self, tmp_path, caplog):
+        import json
+        import logging
+
+        caplog.set_level(logging.INFO, logger="ops_agent.orchestrator")
+        orchestrator, _slack_client = make_orchestrator(
+            tmp_path=tmp_path, statuses=[down_status(), healthy_status()]
+        )
+        incident = Incident.from_grafana_alert(grafana_alert())
+
+        orchestrator.handle(incident)
+
+        stages = [
+            json.loads(record.getMessage())["stage"]
+            for record in caplog.records
+            if record.getMessage().startswith("{")
+        ]
+        # decide()가 _diagnose()보다 먼저 호출되므로 policy가 diagnose보다 앞선다.
+        assert stages == ["reverify", "policy", "diagnose", "remediate", "recovery"]
+
+    def test_the_healthy_path_logs_only_the_stages_it_actually_ran(self, tmp_path):
+        import json
+        import logging
+
+        orchestrator, _slack_client = make_orchestrator(
+            tmp_path=tmp_path, statuses=[healthy_status()]
+        )
+        incident = Incident.from_grafana_alert(grafana_alert())
+
+        logger = logging.getLogger("ops_agent.orchestrator")
+        records: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: records.append(record.getMessage())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            orchestrator.handle(incident)
+        finally:
+            logger.removeHandler(handler)
+
+        stages = [json.loads(line)["stage"] for line in records if line.startswith("{")]
+        # 정상이면 decide()를 부르지 않으므로 policy 단계가 없다.
+        assert stages == ["reverify", "diagnose"]

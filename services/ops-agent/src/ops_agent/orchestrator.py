@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -87,10 +88,12 @@ class OpsAgentOrchestrator:
             )
 
         status = self._prometheus.stream_processor_status()
+        self._log_stage("reverify", incident, status=status.label)
         if status.is_healthy:
             # 조치하지 않더라도 알린다 — 침묵하면 Grafana의 감지 알림 뒤로 후속이 없어
             # agent가 죽은 것인지 판단하고 넘어간 것인지 구분할 수 없다(설계 §1-1).
             diagnostics = self._diagnose(self._ssh_target)
+            self._log_diagnose(incident, diagnostics)
             self._notify(
                 incident,
                 status,
@@ -116,7 +119,11 @@ class OpsAgentOrchestrator:
             )
 
         policy_decision = decide(incident)
+        self._log_stage(
+            "policy", incident, allowed=policy_decision.allowed, reason=policy_decision.reason
+        )
         diagnostics = self._diagnose(self._ssh_target)
+        self._log_diagnose(incident, diagnostics)
 
         if not policy_decision.allowed:
             self._notify(incident, status, diagnostics, policy_decision, remediation=None, recovered=False)
@@ -158,9 +165,17 @@ class OpsAgentOrchestrator:
             incident.fingerprint, incident.alertname, policy_decision.action.value
         )
         remediation_result = self._remediate(self._ssh_target)
+        self._log_stage(
+            "remediate",
+            incident,
+            action=policy_decision.action.value,
+            succeeded=remediation_result.succeeded,
+            command=" ".join(remediation_result.command.argv),
+        )
 
         post_status = self._wait_for_recovery()
         recovered = post_status.is_healthy
+        self._log_stage("recovery", incident, status=post_status.label, recovered=recovered)
         self._incident_store.record_outcome(
             event_id, succeeded=remediation_result.succeeded, recovered=recovered
         )
@@ -180,6 +195,31 @@ class OpsAgentOrchestrator:
                 f"{incident.alertname}: remediation={policy_decision.action.value} "
                 f"succeeded={remediation_result.succeeded} recovered={recovered}"
             ),
+        )
+
+    def _log_stage(self, stage: str, incident: Incident, **fields) -> None:
+        # Slack에 싣지 않는 상세를 사후에 추적하려고 단계마다 한 줄 JSON으로 남긴다.
+        logger.info(
+            json.dumps(
+                {
+                    "stage": stage,
+                    "alertname": incident.alertname,
+                    "fingerprint": incident.fingerprint,
+                    **fields,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def _log_diagnose(
+        self, incident: Incident, diagnostics: StreamProcessorDiagnostics
+    ) -> None:
+        self._log_stage(
+            "diagnose",
+            incident,
+            container=diagnostics.container_status,
+            restart_count=diagnostics.restart_count,
+            commands=[command.display for command in diagnostics.commands],
         )
 
     def _wait_for_recovery(self) -> StreamProcessorStatus:
