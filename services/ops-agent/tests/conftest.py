@@ -38,11 +38,15 @@ class FakePrometheusClient:
 
 @dataclass
 class FakeSlackClient:
-    messages: list[tuple[str, str]] = field(default_factory=list)
+    """메시지 본문뿐 아니라 호출 인자 전체를 기록한다 — blocks/thread_ts 단언에 필요하다."""
 
-    def chat_postMessage(self, *, channel: str, text: str) -> dict:
+    messages: list[tuple[str, str]] = field(default_factory=list)
+    calls: list[dict] = field(default_factory=list)
+
+    def chat_postMessage(self, *, channel: str, text: str, **kwargs) -> dict:
         self.messages.append((channel, text))
-        return {"ok": True}
+        self.calls.append({"channel": channel, "text": text, **kwargs})
+        return {"ok": True, "ts": f"1700000000.{len(self.calls):06d}"}
 
 
 def executed(argv: tuple[str, ...], kind: CommandKind = CommandKind.READ) -> ExecutedCommand:

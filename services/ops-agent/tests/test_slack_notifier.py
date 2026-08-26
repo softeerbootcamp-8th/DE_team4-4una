@@ -14,6 +14,33 @@ class TestSlackNotifier:
 
         assert client.messages == [("#alerts", "hello")]
 
+    def test_post_returns_the_message_timestamp_for_threading(self):
+        client = FakeSlackClient()
+        notifier = SlackNotifier(channel="#alerts", client=client)
+
+        ts = notifier.post("hello")
+
+        assert ts == "1700000000.000001"
+
+    def test_post_passes_blocks_through(self):
+        client = FakeSlackClient()
+        notifier = SlackNotifier(channel="#alerts", client=client)
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "hi"}}]
+
+        notifier.post("fallback", blocks=blocks)
+
+        assert client.calls[0]["blocks"] == blocks
+        assert client.calls[0]["text"] == "fallback"
+
+    def test_a_thread_reply_targets_the_parent_message(self):
+        client = FakeSlackClient()
+        notifier = SlackNotifier(channel="#alerts", client=client)
+
+        notifier.post_thread_reply("1700000000.000001", "log tail")
+
+        assert client.calls[0]["thread_ts"] == "1700000000.000001"
+        assert client.calls[0]["text"] == "log tail"
+
 
 class TestMentionText:
     def test_prefers_slack_id_when_present(self):
