@@ -18,7 +18,11 @@ from ops_agent.notification import (
 )
 from ops_agent.owners import ServiceOwnersRegistry
 from ops_agent.policy import PolicyDecision, decide
-from ops_agent.prometheus_client import PrometheusClient, StreamProcessorStatus
+from ops_agent.prometheus_client import (
+    STREAM_PROCESSOR_HEALTH,
+    PrometheusClient,
+    ServiceStatus,
+)
 from ops_agent.remediation import RemediationResult, restart_container
 from ops_agent.slack_notifier import SlackNotifier
 from ops_agent.ssh import SshTarget
@@ -39,7 +43,7 @@ def _default_remediate(target: SshTarget) -> RemediationResult:
 class IncidentOutcome:
     incident: Incident
     handled: bool
-    reverified_status: StreamProcessorStatus | None
+    reverified_status: ServiceStatus | None
     policy: PolicyDecision | None
     diagnostics: ContainerDiagnostics | None
     remediation: RemediationResult | None
@@ -93,7 +97,7 @@ class OpsAgentOrchestrator:
                 summary=f"{incident.alertname}: status={incident.status!r}, no action taken",
             )
 
-        status = self._prometheus.stream_processor_status()
+        status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
         self._log_stage("reverify", incident, status=status.label)
         if status.is_healthy:
             # 조치하지 않더라도 알린다 — 침묵하면 Grafana의 감지 알림 뒤로 후속이 없어
@@ -228,20 +232,20 @@ class OpsAgentOrchestrator:
             commands=[command.display for command in diagnostics.commands],
         )
 
-    def _wait_for_recovery(self) -> StreamProcessorStatus:
+    def _wait_for_recovery(self) -> ServiceStatus:
         # docker restart 직후엔 Spark JVM 기동/Prometheus scrape가 아직 안 끝났을 수 있어 즉시 판정하지 않고 폴링한다.
-        status = self._prometheus.stream_processor_status()
+        status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
         elapsed = 0.0
         while not status.is_healthy and elapsed < self._recovery_wait_seconds:
             self._sleep(self._recovery_poll_interval_seconds)
             elapsed += self._recovery_poll_interval_seconds
-            status = self._prometheus.stream_processor_status()
+            status = self._prometheus.evaluate(STREAM_PROCESSOR_HEALTH)
         return status
 
     def _notify(
         self,
         incident: Incident,
-        status: StreamProcessorStatus,
+        status: ServiceStatus,
         diagnostics: ContainerDiagnostics,
         policy_decision: PolicyDecision | None,
         *,

@@ -8,7 +8,7 @@ from ops_agent.diagnostics import ContainerDiagnostics
 from ops_agent.models import Incident
 from ops_agent.owners import ServiceOwner
 from ops_agent.policy import PolicyDecision
-from ops_agent.prometheus_client import StreamProcessorStatus
+from ops_agent.prometheus_client import ServiceStatus
 from ops_agent.remediation import RemediationResult
 from ops_agent.slack_notifier import mention_text
 from ops_agent.ssh import CommandKind, ExecutedCommand
@@ -20,7 +20,7 @@ MAX_LOG_CHARS = 2600
 @dataclass(frozen=True, slots=True)
 class NotificationInput:
     incident: Incident
-    status: StreamProcessorStatus
+    status: ServiceStatus
     diagnostics: ContainerDiagnostics
     policy: PolicyDecision | None
     remediation: RemediationResult | None
