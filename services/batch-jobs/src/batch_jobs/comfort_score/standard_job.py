@@ -28,6 +28,7 @@ from batch_jobs.comfort_score.loader import (
     load_hourly_comfort_score_for_gold,
 )
 from batch_jobs.comfort_score.standard_storage import (
+    audit_standard_snapshot,
     read_active_standard_comfort_score_snapshot,
     write_standard_comfort_score_snapshot,
 )
@@ -170,7 +171,9 @@ def run_standard_comfort_score_job(
     ).persist(StorageLevel.MEMORY_AND_DISK)
 
     try:
-        scored_count = scored.count()
+        # 행 수와 score_as_of 검사를 aggregation 한 번으로 끝낸다. 이 값을 writer에
+        # 넘겨 저장 직전의 중복 집계도 없앤다.
+        scored_count = audit_standard_snapshot(scored, as_of)
         if scored_count == 0:
             raise RuntimeError(
                 "standard comfort score job produced 0 rows — the universe resolved "
@@ -180,6 +183,7 @@ def run_standard_comfort_score_job(
 
         gold_result = write_standard_comfort_score_snapshot(
             spark, scored, config.gold_output_uri, as_of,
+            expected_count=scored_count,
         )
         # 방금 쓴 gold_result.version_uri를 직접 읽지 않는다 — manifest를 다시 resolve해서
         # 얻은 활성 snapshot을 읽어야 manifest가 실제 source-of-truth pointer가 된다(#343).

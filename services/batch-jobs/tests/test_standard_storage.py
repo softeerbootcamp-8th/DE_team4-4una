@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 import pytest
 from batch_jobs.comfort_score.standard_storage import (
+    audit_standard_snapshot,
     read_active_standard_comfort_score_snapshot,
     resolve_active_standard_snapshot_uri,
     standard_manifest_uri,
@@ -78,8 +79,42 @@ class TestUriHelpers:
         assert unquote(standard_manifest_uri(root)) == f"{unquote(root)}/manifest.json"
 
 
+class TestAuditStandardSnapshot:
+    """행 수와 score_as_of 검사를 aggregation 한 번으로 처리한다."""
+
+    AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
+
+    def test_returns_the_row_count_when_every_row_matches(self, spark) -> None:
+        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0), ("seg-2", 1, 60.0))
+
+        assert audit_standard_snapshot(df, self.AS_OF) == 2
+
+    def test_rejects_a_mismatched_score_as_of(self, spark) -> None:
+        df = rows_df(spark, self.AS_OF.replace(hour=4), ("seg-1", 1, 50.0))
+
+        with pytest.raises(ValueError, match="score_as_of"):
+            audit_standard_snapshot(df, self.AS_OF)
+
+    def test_an_empty_frame_counts_zero(self, spark) -> None:
+        """global aggregation은 빈 입력에도 한 행을 돌려주므로 0으로 확정돼야 한다."""
+        empty = rows_df(spark, self.AS_OF).limit(0)
+
+        assert audit_standard_snapshot(empty, self.AS_OF) == 0
+
+
 class TestWriteStandardComfortScoreSnapshot:
     AS_OF = datetime(2026, 8, 23, 3, 0, 0, tzinfo=UTC)
+
+    def test_a_caller_supplied_count_is_used_for_the_read_back_check(
+        self, spark, tmp_path
+    ) -> None:
+        """호출자가 넘긴 행 수가 read-back 대조 기준이 된다 — 틀리면 승격 전에 막힌다."""
+        df = rows_df(spark, self.AS_OF, ("seg-1", 1, 50.0), ("seg-2", 1, 60.0))
+
+        with pytest.raises(ValueError, match="read-back row count"):
+            write_standard_comfort_score_snapshot(
+                spark, df, str(tmp_path), self.AS_OF, expected_count=99
+            )
 
     def test_rejects_naive_as_of_when_writing(self, spark, tmp_path) -> None:
         naive_as_of = datetime(2026, 8, 23, 3, 0, 0)  # noqa: DTZ001
