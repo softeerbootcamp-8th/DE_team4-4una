@@ -37,7 +37,7 @@ def test_reads_every_row_with_the_declared_columns(spark, tmp_path):
         spark, tmp_path, valid_value(trip_seq=47), valid_value(trip_seq=48)
     )
 
-    df = read_bronze_sensor_events(spark, path)
+    df = read_bronze_sensor_events(spark, path, _target_hour())
 
     assert df.count() == 2
     assert df.columns == [
@@ -54,7 +54,7 @@ def test_malformed_value_does_not_raise_and_keeps_the_row(spark, tmp_path):
         spark, tmp_path, valid_value(), MALFORMED_VALUE, valid_value(trip_seq=48)
     )
 
-    rows = read_bronze_sensor_events(spark, path).collect()
+    rows = read_bronze_sensor_events(spark, path, _target_hour()).collect()
 
     assert len(rows) == 3
 
@@ -63,7 +63,7 @@ def test_malformed_value_is_flagged_and_kept_as_raw_record(spark, tmp_path):
     # 깨진 값이 파싱 실패로 표시되고 원본 문자열이 그대로 남는지 확인한다.
     path = write_bronze_parquet(spark, tmp_path, valid_value(), MALFORMED_VALUE)
 
-    rows = read_bronze_sensor_events(spark, path).collect()
+    rows = read_bronze_sensor_events(spark, path, _target_hour()).collect()
 
     failed = [row for row in rows if row[PARSE_FAILED_COLUMN]]
     assert len(failed) == 1
@@ -75,7 +75,7 @@ def test_parsed_row_keeps_its_original_value_as_raw_record(spark, tmp_path):
     value = valid_value()
     path = write_bronze_parquet(spark, tmp_path, value)
 
-    row = read_bronze_sensor_events(spark, path).collect()[0]
+    row = read_bronze_sensor_events(spark, path, _target_hour()).collect()[0]
 
     assert row[PARSE_FAILED_COLUMN] is False
     assert row[RAW_RECORD_COLUMN] == value
@@ -90,7 +90,7 @@ def test_filters_valid_and_malformed_rows_to_one_target_hour(spark, tmp_path):
         valid_value(event_id="other", event_time="2024-02-01T06:00:00+00:00"),
         MALFORMED_VALUE,
     )
-    bronze = read_bronze_sensor_events(spark, path)
+    bronze = read_bronze_sensor_events(spark, path, _target_hour())
 
     result = filter_bronze_sensor_events_for_hour(
         bronze, BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)
@@ -134,3 +134,7 @@ def test_target_hour_returns_empty_when_partition_directory_is_missing(spark, tm
 
     assert result.count() == 0
     assert result.columns == read_bronze_sensor_events(spark, root, hour_6).columns
+
+
+def _target_hour() -> datetime:
+    return BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)

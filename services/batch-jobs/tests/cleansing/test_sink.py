@@ -14,7 +14,12 @@ from batch_jobs.schemas import (
     PROCESSED_SENSOR_EVENT_SCHEMA,
     SENSOR_EVENT_QUARANTINE_SCHEMA,
 )
-from bronze_samples import MALFORMED_VALUE, valid_value, write_bronze_parquet
+from bronze_samples import (
+    BRONZE_TIMESTAMP,
+    MALFORMED_VALUE,
+    valid_value,
+    write_bronze_parquet,
+)
 from pyspark import StorageLevel
 
 RUN_ID = "cleansing-20260815-001"
@@ -24,7 +29,9 @@ TARGET_HOUR = EVENT_TIME.replace(minute=0, second=0, microsecond=0)
 
 
 def cleanse(spark, path):
-    bronze = read_bronze_sensor_events(spark, path)
+    bronze = read_bronze_sensor_events(
+        spark, path, BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0)
+    )
     return cleanse_sensor_events(bronze, load_cleansing_config(), RUN_ID, PROCESSED_AT)
 
 

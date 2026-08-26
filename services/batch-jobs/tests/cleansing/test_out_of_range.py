@@ -3,14 +3,18 @@ from datetime import UTC, datetime
 from batch_jobs.cleansing.reader import read_bronze_sensor_events
 from batch_jobs.cleansing.rules import load_cleansing_config
 from batch_jobs.cleansing.validate import OUT_OF_RANGE, split_out_of_range_values
-from bronze_samples import valid_value, write_bronze_parquet
+from bronze_samples import BRONZE_TIMESTAMP, valid_value, write_bronze_parquet
 
 RUN_ID = "cleansing-20260814-001"
 REJECTED_AT = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
 
 
-def split(spark, path):
-    bronze = read_bronze_sensor_events(spark, path)
+def split(spark, path, target_hour=None):
+    bronze = read_bronze_sensor_events(
+        spark,
+        path,
+        target_hour or BRONZE_TIMESTAMP.replace(minute=0, second=0, microsecond=0),
+    )
     return split_out_of_range_values(bronze, load_cleansing_config(), RUN_ID, REJECTED_AT)
 
 
@@ -60,12 +64,13 @@ def test_event_time_outside_its_bounds_is_quarantined(spark, tmp_path):
         spark, tmp_path, valid_value(), valid_value(event_time="1000-01-01T00:00:00+00:00")
     )
 
-    result = split(spark, path)
+    result = split(spark, path, datetime(1000, 1, 1, tzinfo=UTC))
 
     rows = result.quarantined.collect()
     assert [row["reject_reason"] for row in rows] == [OUT_OF_RANGE]
     assert rows[0]["reject_detail"] == "event_time=1000-01-01T00:00:00+00:00"
-    assert len(result.passed.collect()) == 1
+    # 시간 파티션 reader는 1000년 파티션만 읽으므로, 다른 시간의 정상 행은 여기 없다.
+    assert result.passed.collect() == []
 
 
 def test_reject_detail_names_the_violating_columns_and_values(spark, tmp_path):

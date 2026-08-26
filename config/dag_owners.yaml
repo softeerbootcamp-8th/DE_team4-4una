@@ -38,6 +38,9 @@ dags:
   bronze_compaction:
     owner: JEONGKIJOON
     severity: low
+  bronze_sensor_events_compaction:
+    owner: JEONGKIJOON
+    severity: low
 
 # ops-agent(#447)가 escalation 시 멘션할 서비스별 담당자. dag_id가 아니라 alert label의 service 값과 매칭한다.
 services:
