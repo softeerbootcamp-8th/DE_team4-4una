@@ -69,6 +69,9 @@ jobs:
             stream-processor:
               - *shared
               - 'services/stream-processor/**'
+            ops-agent:
+              - *shared
+              - 'services/ops-agent/**'
             dashboard:
               - *shared
               - 'services/dashboard/**'
@@ -123,6 +126,7 @@ jobs:
             "serving-api":                {pkg: "serving-api",      paths: "services/serving-api/tests"},
             "orchestration":              {pkg: "orchestration",    paths: "services/orchestration/tests"},
             "stream-processor":           {pkg: "stream-processor", paths: "services/stream-processor/tests"},
+            "ops-agent":                  {pkg: "ops-agent",        paths: "services/ops-agent/tests"},
             "dashboard":                  {pkg: "dashboard",        paths: "services/dashboard/tests"},
             "pipeline-perf":              {pkg: "pipeline-perf",    paths: "tools/pipeline-perf/tests"},
             "batch-jobs-sensor-features": {pkg: "batch-jobs",       paths: ($bj + "/test_sensor_features.py")},
@@ -138,7 +142,8 @@ jobs:
             case "$path" in
               libs/de4-core/* | tests/* | \
               services/batch-jobs/* | services/dashboard/* | services/gold-loader/* | \
-              services/orchestration/* | services/sensor-producer/* | \
+              services/ops-agent/* | services/orchestration/* | \
+              services/sensor-producer/* | \
               services/serving-api/* | services/stream-processor/* | \
               tools/pipeline-perf/*) ;;
               *) unmapped="$unmapped $path" ;;
@@ -278,6 +283,7 @@ jobs:
           OPS_AGENT_SLACK_BOT_TOKEN: ci-placeholder
           OPS_AGENT_SLACK_ALERT_CHANNEL: ci-placeholder
           STREAM_PROCESSOR_SSH_HOST: 10.0.0.3
+          PROJECT_SSH_HOST: 10.0.0.4
         run: |
           set -euo pipefail
           docker compose -f infra/compose/monitoring.yaml config --quiet
@@ -375,6 +381,7 @@ jobs:
           OPS_AGENT_SLACK_BOT_TOKEN: ci-placeholder
           OPS_AGENT_SLACK_ALERT_CHANNEL: ci-placeholder
           STREAM_PROCESSOR_SSH_HOST: 10.0.0.3
+          PROJECT_SSH_HOST: 10.0.0.4
         run: |
           set -euo pipefail
 
@@ -421,6 +428,7 @@ jobs:
           OPS_AGENT_SLACK_BOT_TOKEN: ci-placeholder
           OPS_AGENT_SLACK_ALERT_CHANNEL: ci-placeholder
           STREAM_PROCESSOR_SSH_HOST: 10.0.0.3
+          PROJECT_SSH_HOST: 10.0.0.4
         run: |
           docker compose -f infra/compose/monitoring.yaml down -v
 

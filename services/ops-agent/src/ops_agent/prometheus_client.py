@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import requests
@@ -34,14 +35,32 @@ class PrometheusQueryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class StreamProcessorStatus:
+class HealthCheck:
+    """한 서비스의 상태를 판정하는 데 필요한 전부 — 조치 명세가 이걸 들고 다닌다."""
+
+    query: str
+    labels: Mapping[int, str]
+    # 정상으로 볼 코드. evaluate()가 max()로 최악을 고르므로 항상 labels의 최솟값이어야 한다.
+    healthy_code: int
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceStatus:
     code: int | None
     label: str
     instance: str | None
+    healthy_code: int
 
     @property
     def is_healthy(self) -> bool:
-        return self.code == HEALTHY_STATUS_CODE
+        return self.code == self.healthy_code
+
+
+STREAM_PROCESSOR_HEALTH = HealthCheck(
+    query=STREAM_PROCESSOR_STATUS_QUERY,
+    labels=STREAM_PROCESSOR_STATUS_LABELS,
+    healthy_code=HEALTHY_STATUS_CODE,
+)
 
 
 class PrometheusClient:
@@ -70,17 +89,20 @@ class PrometheusClient:
             raise PrometheusQueryError(f"Prometheus query did not succeed: {payload}")
         return payload["data"]["result"]
 
-    def stream_processor_status(self) -> StreamProcessorStatus:
-        """현재 stream-processor 상태 — instance가 여러 개면 가장 심각한 것을 고른다."""
-        results = self.instant_query(STREAM_PROCESSOR_STATUS_QUERY)
+    def evaluate(self, check: HealthCheck) -> ServiceStatus:
+        """check가 지시하는 PromQL로 현재 상태를 판정한다. instance가 여러 개면 가장 심각한 것을 고른다."""
+        results = self.instant_query(check.query)
         if not results:
             # metric 자체가 없으면 상태를 확정할 수 없으므로 "정상"으로 오판하지 않는다.
-            return StreamProcessorStatus(code=None, label="NO DATA", instance=None)
+            return ServiceStatus(
+                code=None, label="NO DATA", instance=None, healthy_code=check.healthy_code
+            )
 
         worst = max(results, key=lambda result: float(result["value"][1]))
         code = int(float(worst["value"][1]))
-        return StreamProcessorStatus(
+        return ServiceStatus(
             code=code,
-            label=STREAM_PROCESSOR_STATUS_LABELS.get(code, "UNKNOWN"),
+            label=check.labels.get(code, "UNKNOWN"),
             instance=(worst.get("metric") or {}).get("instance"),
+            healthy_code=check.healthy_code,
         )

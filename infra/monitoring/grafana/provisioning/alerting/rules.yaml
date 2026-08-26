@@ -108,7 +108,7 @@ groups:
               to: 0
             model:
               editorMode: code
-              expr: up{job=~"project-node|spark-node|monitoring-node"}
+              expr: up{job=~"project-node|monitoring-node"}
               instant: true
               range: false
               refId: A
@@ -129,7 +129,7 @@ groups:
           service: infrastructure
           severity: critical
         annotations:
-          summary: "{{ $labels.job }}({{ $labels.instance }})의 node_exporter가 2분 이상 scrape되지 않음"
+          summary: "{{ $labels.job }}({{ $labels.instance }})의 node_exporter가 2분 이상 scrape되지 않음 (spark 호스트는 SparkNodeExporterDown이 담당한다)"
 
       - uid: infra-high-cpu
         title: HighCPU
@@ -274,6 +274,46 @@ groups:
         annotations:
           summary: "{{ $labels.job }}({{ $labels.instance }}) root filesystem 사용률이 90%를 5분 이상 초과함 — 곧 디스크가 가득 참"
 
+      # NodeDown과 달리 spark 호스트만 본다 — alertname 하나로 조치 대상이 정해져야
+      # ops-agent가 라벨을 보지 않아도 된다. 호스트 자체가 죽은 경우는 SSH가 실패해
+      # 자연히 escalation된다.
+      # service를 infrastructure로 두면 notification-policies의 매처에 걸려
+      # infra-slack으로만 가고 ops-agent를 거치지 않으므로 다른 값을 쓴다.
+      - uid: spark-node-exporter-down
+        title: SparkNodeExporterDown
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: up{job="spark-node"}
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        labels:
+          service: spark-node
+          severity: high
+          auto_remediate: "true"
+        annotations:
+          summary: "spark EC2의 node_exporter가 2분 이상 scrape되지 않음 — exporter만 죽었으면 재시작한다"
+
       # Grafana 자신의 죽음은 다루지 않는다 — Grafana가 죽으면 Alerting도 같이 죽는 순환 의존이라(README 참고).
       - uid: self-health-prometheus-unreachable
         title: PrometheusUnreachable
@@ -343,3 +383,47 @@ groups:
           severity: high
         annotations:
           summary: "blackbox_exporter가 ops-agent /health를 2분 이상 probe하지 못함 — Grafana의 최초 장애 Slack 알림은 계속 동작하지만 ops-agent의 재검증/조치/escalation은 멈춘 상태일 수 있음"
+
+  - orgId: 1
+    name: serving-api
+    folder: Ops Agent
+    interval: 1m
+    rules:
+      # metrics 서버가 uvicorn과 같은 프로세스라(serving_api/__init__.py:21) up이 곧
+      # 프로세스 생사다. DB만 죽으면 앱은 살아서 metrics를 계속 내보내므로 여기 걸리지
+      # 않는다 — 재시작이 무의미한 경우를 자동으로 걸러낸다.
+      - uid: serving-api-down
+        title: ServingApiDown
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              editorMode: code
+              expr: up{job="serving-api"}
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              refId: C
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: NoData
+        execErrState: Error
+        # 배포 중 재시작을 장애로 오인하지 않게 StreamProcessorDown과 같은 값을 쓴다.
+        for: 2m
+        labels:
+          service: serving-api
+          severity: high
+          auto_remediate: "true"
+        annotations:
+          summary: "serving-api가 2분 이상 scrape되지 않음 — 프로세스/컨테이너 문제로 보임"

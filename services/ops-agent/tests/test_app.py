@@ -26,7 +26,7 @@ def make_client(tmp_path, statuses) -> TestClient:
         prometheus=FakePrometheusClient(statuses=statuses),
         incident_store=IncidentStore(str(tmp_path / "incidents.sqlite3")),
         owners=ServiceOwnersRegistry(services={}),
-        ssh_target=TARGET,
+        ssh_targets={"spark": TARGET, "project": TARGET},
         slack=SlackNotifier(channel="#alerts", client=FakeSlackClient()),
         cooldown_seconds=600,
         diagnose=fake_diagnose,

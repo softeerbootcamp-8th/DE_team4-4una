@@ -4,33 +4,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ops_agent.diagnostics import StreamProcessorDiagnostics
-from ops_agent.prometheus_client import StreamProcessorStatus
+from ops_agent.diagnostics import ContainerDiagnostics
+from ops_agent.prometheus_client import HealthCheck, ServiceStatus
 from ops_agent.remediation import RemediationResult
 from ops_agent.ssh import CommandKind, ExecutedCommand
 
 
-def status(code: int, label: str, instance: str = "spark-ec2:9103") -> StreamProcessorStatus:
-    return StreamProcessorStatus(code=code, label=label, instance=instance)
+def status(code: int, label: str, instance: str = "spark-ec2:9103") -> ServiceStatus:
+    return ServiceStatus(code=code, label=label, instance=instance, healthy_code=0)
 
 
-def healthy_status() -> StreamProcessorStatus:
+def healthy_status() -> ServiceStatus:
     return status(0, "RUNNING")
 
 
-def down_status() -> StreamProcessorStatus:
+def down_status() -> ServiceStatus:
     return status(4, "TARGET DOWN")
 
 
 @dataclass
 class FakePrometheusClient:
-    """`stream_processor_status()`가 순서대로 미리 정해둔 값을 돌려준다 —
+    """`evaluate()`가 순서대로 미리 정해둔 값을 돌려준다 —
     reverify(조치 전) -> reverify(조치 후) 흐름을 시뮬레이션한다."""
 
-    statuses: list[StreamProcessorStatus]
+    statuses: list[ServiceStatus]
     calls: int = 0
 
-    def stream_processor_status(self) -> StreamProcessorStatus:
+    def evaluate(self, _check: HealthCheck) -> ServiceStatus:
         index = min(self.calls, len(self.statuses) - 1)
         self.calls += 1
         return self.statuses[index]
@@ -53,8 +53,8 @@ def executed(argv: tuple[str, ...], kind: CommandKind = CommandKind.READ) -> Exe
     return ExecutedCommand(kind=kind, host="1.2.3.4", user="ec2-user", argv=argv)
 
 
-def fake_diagnose(_target) -> StreamProcessorDiagnostics:
-    return StreamProcessorDiagnostics(
+def fake_diagnose(_target, _container="stream-processor") -> ContainerDiagnostics:
+    return ContainerDiagnostics(
         container_status="running",
         restart_count=0,
         recent_logs="fake logs",
@@ -66,9 +66,9 @@ def fake_diagnose(_target) -> StreamProcessorDiagnostics:
 
 
 def make_fake_remediate(*, succeeded: bool = True):
-    def _remediate(_target) -> RemediationResult:
+    def _remediate(_target, _container="stream-processor", *, action="restart_stream_processor"):
         return RemediationResult(
-            action="restart_stream_processor",
+            action=action,
             succeeded=succeeded,
             detail="fake ssh output",
             command=executed(

@@ -61,6 +61,18 @@ comfort scores only through the serving API batch endpoint. It does not connect
 to PostgreSQL, calculate scores, or reproduce the serving API's
 current-to-standard fallback policy.
 
+## Current `ops-agent` scope
+
+Grafana alert를 받아 Prometheus로 재검증하고, 저위험 조치만 자동 실행한 뒤 결과를
+Slack으로 알린다. Monitoring EC2에서 동작하며 인바운드 요청은 Grafana webhook 하나만
+받는다 — Slack은 출력 전용이다.
+
+무엇을 자동 실행해도 되는지의 판정 기준은
+[ADR-0013](../docs/adr/0013-immediate-remediation-without-slack-approval.md)에 있다.
+어떤 alert가 어떤 조치로 이어지는지의 최종 정의는
+`services/ops-agent/src/ops_agent/policy.py`의 `ACTION_SPECS`이며, 이 문서는 그
+목록을 복제하지 않는다.
+
 ## Boundary rules
 
 - A service must not import another service package.

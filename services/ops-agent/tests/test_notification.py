@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from conftest import down_status, executed, fake_diagnose, grafana_alert, healthy_status
-from ops_agent.diagnostics import StreamProcessorDiagnostics
+from ops_agent.diagnostics import ContainerDiagnostics
 from ops_agent.models import Incident
 from ops_agent.notification import (
     MAX_LOG_CHARS,
@@ -19,9 +19,9 @@ from ops_agent.ssh import CommandKind
 OWNER = ServiceOwner(name="bob", email=None, slack_id="U0456GHIJKL", severity="high")
 
 
-def diagnostics_with_logs(logs: str) -> StreamProcessorDiagnostics:
+def diagnostics_with_logs(logs: str) -> ContainerDiagnostics:
     base = fake_diagnose(None)
-    return StreamProcessorDiagnostics(
+    return ContainerDiagnostics(
         container_status=base.container_status,
         restart_count=base.restart_count,
         recent_logs=logs,

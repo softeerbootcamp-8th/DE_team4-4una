@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 from ops_agent.prometheus_client import (
+    STREAM_PROCESSOR_HEALTH,
     STREAM_PROCESSOR_STATUS_QUERY,
+    HealthCheck,
     PrometheusClient,
     PrometheusQueryError,
 )
@@ -73,7 +75,7 @@ class TestStreamProcessorStatus:
         session = FakeSession(FakeResponse(success_payload([])))
         client = PrometheusClient("http://prometheus:9090", session=session)
 
-        status = client.stream_processor_status()
+        status = client.evaluate(STREAM_PROCESSOR_HEALTH)
 
         assert status.code is None
         assert status.is_healthy is False
@@ -88,7 +90,7 @@ class TestStreamProcessorStatus:
         )
         client = PrometheusClient("http://prometheus:9090", session=session)
 
-        status = client.stream_processor_status()
+        status = client.evaluate(STREAM_PROCESSOR_HEALTH)
 
         assert status.is_healthy is True
         assert status.label == "RUNNING"
@@ -107,8 +109,57 @@ class TestStreamProcessorStatus:
         )
         client = PrometheusClient("http://prometheus:9090", session=session)
 
-        status = client.stream_processor_status()
+        status = client.evaluate(STREAM_PROCESSOR_HEALTH)
 
         assert status.code == 4
         assert status.label == "TARGET DOWN"
         assert status.instance == "spark-ec2-2:9103"
+
+
+class TestEvaluate:
+    def test_it_maps_the_value_through_the_checks_label_table(self):
+        session = FakeSession(
+            FakeResponse(success_payload([{"metric": {"instance": "a:1"}, "value": [0, "4"]}]))
+        )
+        client = PrometheusClient("http://prometheus:9090", session=session)
+        check = HealthCheck(query="up", labels={0: "UP", 4: "TARGET DOWN"}, healthy_code=0)
+
+        status = client.evaluate(check)
+
+        assert status.code == 4
+        assert status.label == "TARGET DOWN"
+        assert status.is_healthy is False
+        assert session.calls[0]["params"] == {"query": "up"}
+
+    def test_no_data_is_never_reported_as_healthy(self):
+        session = FakeSession(FakeResponse(success_payload([])))
+        client = PrometheusClient("http://prometheus:9090", session=session)
+
+        status = client.evaluate(HealthCheck(query="up", labels={0: "UP"}, healthy_code=0))
+
+        assert status.code is None
+        assert status.label == "NO DATA"
+        assert status.is_healthy is False
+
+    def test_the_worst_instance_wins_when_several_match(self):
+        session = FakeSession(
+            FakeResponse(
+                success_payload(
+                    [
+                        {"metric": {"instance": "a:1"}, "value": [0, "1"]},
+                        {"metric": {"instance": "b:1"}, "value": [0, "4"]},
+                    ]
+                )
+            )
+        )
+        client = PrometheusClient("http://prometheus:9090", session=session)
+        check = HealthCheck(query="up", labels={1: "STALE", 4: "TARGET DOWN"}, healthy_code=0)
+
+        status = client.evaluate(check)
+
+        assert status.code == 4
+        assert status.instance == "b:1"
+
+    def test_the_stream_processor_check_reuses_the_dashboard_query(self):
+        assert STREAM_PROCESSOR_HEALTH.query == STREAM_PROCESSOR_STATUS_QUERY
+        assert STREAM_PROCESSOR_HEALTH.healthy_code == 0

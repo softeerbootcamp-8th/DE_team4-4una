@@ -45,17 +45,24 @@ Grafana Alert
 `diagnostics.py`(진단), `policy.py`(허용 판정), `incident_store.py`(중복 방지 + 실행 이력),
 `remediation.py`(조치 실행), `owners.py`/`slack_notifier.py`(전송),
 `notification.py`(알림 본문 조립), `orchestrator.py`(위 전체를 순서대로 엮음).
+`policy.py`의 `ACTION_SPECS`가 alert -> 조치 명세 매핑을 함께 들고 있습니다.
 
 ## 자동 조치 가능 범위 / 의도적으로 자동화하지 않은 범위
 
 - 무엇을 자동 실행해도 되는지의 판정 기준은
   [ADR-0013](../../docs/adr/0013-immediate-remediation-without-slack-approval.md)에 있다.
   Slack 예/아니오 승인 게이트를 두지 않기로 한 근거도 같은 문서에 있다.
-- 현재 구현된 조치는 `restart_stream_processor` (`docker restart stream-processor`)
-  뿐입니다. `RemediationAction`에 `RESTART_SERVING_API`, `RESTART_AIRFLOW_SCHEDULER`가
-  이미 정의돼 있지만 `IMPLEMENTED_ACTIONS`에는 포함되지 않아 실제로는 항상
-  escalation으로 빠집니다 — 구현을 늘릴 때는 그 실행 함수를 추가하고
-  `IMPLEMENTED_ACTIONS`/`ALLOWED_ACTIONS_BY_ALERTNAME`에 등록하면 됩니다.
+- 구현된 조치는 셋입니다 — `restart_stream_processor`(Spark EC2),
+  `restart_serving_api`(Project EC2), `restart_node_exporter`(Spark EC2). 어떤 alert가
+  어떤 조치로 이어지는지는 `policy.py`의 `ACTION_SPECS`가 유일한 정의입니다. 조치를
+  늘리려면 그 dict에 항목을 추가하고 `IMPLEMENTED_ACTIONS`에 등록하면 됩니다.
+- serving-api는 DB 장애로는 재시작되지 않습니다. metrics 서버가 앱과 같은 프로세스라
+  (`services/serving-api/src/serving_api/__init__.py:21`) `up{job="serving-api"}`가
+  프로세스 생사와 일치하고, DB만 죽으면 앱은 살아 있어 `ServingApiDown`이 발화하지
+  않습니다.
+- `project-node`/`monitoring-node`의 exporter는 자동 조치 대상이 아닙니다.
+  `monitoring-node`는 ops-agent가 같은 호스트에 있어 재시작하려면 docker socket
+  마운트가 필요한데, 호스트 root 권한과 동등합니다(ADR-0013).
 - Kafka broker 재시작, Kafka offset reset, EMR job 재실행, 데이터/S3 삭제, DB
   스키마 변경, 인프라 변경, 임의 쉘 실행은 `policy.ESCALATION_ONLY_ACTIONS`에
   이름만 문서화돼 있고 실행 코드는 존재하지 않습니다. 이런 장애는 항상 Slack
@@ -90,6 +97,9 @@ Grafana Alert
 | `STREAM_PROCESSOR_SSH_HOST` | ✅ | - | stream-processor가 떠 있는 EC2. 기본값을 두지 않음(아래 참고) |
 | `STREAM_PROCESSOR_SSH_USER` | - | `ec2-user` | |
 | `STREAM_PROCESSOR_SSH_KEY_PATH` | ✅ | - | 위 host에 접속할 개인키 경로 |
+| `PROJECT_SSH_HOST` | ✅ | - | serving-api가 있는 Project EC2 |
+| `PROJECT_SSH_USER` | - | `ec2-user` | |
+| `PROJECT_SSH_KEY_PATH` | ✅ | - | 위 host에 접속할 개인키 경로 |
 
 `STREAM_PROCESSOR_SSH_HOST`에 기본값이 없는 이유: `context/architecture.md`는
 Spark Streaming EC2를 Project EC2와 별도 인스턴스로 설명하지만,
@@ -104,7 +114,9 @@ export PROMETHEUS_URL=http://localhost:9090
 export SLACK_BOT_TOKEN=xoxb-...
 export SLACK_ALERT_CHANNEL=alerts
 export STREAM_PROCESSOR_SSH_HOST=1.2.3.4
-export STREAM_PROCESSOR_SSH_KEY_PATH=/path/to/key.pem
+export STREAM_PROCESSOR_SSH_KEY_PATH=/path/to/spark-key.pem
+export PROJECT_SSH_HOST=5.6.7.8
+export PROJECT_SSH_KEY_PATH=/path/to/project-key.pem
 
 uv run --package ops-agent ops-agent
 ```
@@ -140,13 +152,17 @@ uv run --package ops-agent pytest services/ops-agent/tests
 2. **SSH 개인키**: stream-processor가 떠 있는 EC2에 접속할 개인키를 Monitoring
    EC2의 `infra/monitoring/ops-agent/stream_processor.pem`에 직접 준비한다
    (저장소에는 커밋되지 않음 — `.gitignore`의 `*.pem`). 그 EC2의
-   `~/.ssh/authorized_keys`에 대응하는 공개키를 등록해야 한다.
+   `~/.ssh/authorized_keys`에 대응하는 공개키를 등록해야 한다. serving-api가 있는
+   Project EC2용 개인키도 같은 방식으로 `infra/monitoring/ops-agent/project.pem`에
+   준비한다(#547).
 3. **Slack 담당자**: `config/dag_owners.yaml`의 `services:` 아래에 서비스별
    `owner`(같은 파일의 `users:`에 등록된 이름)와 `severity`를 등록한다.
 4. **Grafana**: `infra/monitoring/grafana/provisioning/alerting/`에 contact
    point(`ops-agent`, webhook → `http://ops-agent:8080/webhooks/grafana`),
-   notification policy, alert rule 2개(`StreamProcessorDown`은 재시작 대상,
-   `StreamProcessorStale`은 알림만)를 이미 provisioning으로 구성해 뒀다 —
+   notification policy, alert rule을 이미 provisioning으로 구성해 뒀다. 자동 조치
+   대상은 `auto_remediate: "true"` 라벨이 붙은 것뿐이며(`StreamProcessorDown`,
+   `ServingApiDown`, `SparkNodeExporterDown`), 그 이름은 `policy.ACTION_SPECS`의
+   키와 일치해야 한다(테스트가 강제한다) —
    배포되면 자동으로 적용된다. 추가 alert rule이 필요하면 이 디렉터리에 규칙을
    더 추가하면 된다.
 5. **배포**: `.github/workflows/deploy-monitoring.yml`이 저장소 전체를

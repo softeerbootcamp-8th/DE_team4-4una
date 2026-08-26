@@ -6,6 +6,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from ops_agent.ssh import SshTarget
+
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
 
@@ -42,6 +44,9 @@ class OpsAgentConfig:
     stream_processor_ssh_host: str
     stream_processor_ssh_user: str
     stream_processor_ssh_key_path: str
+    project_ssh_host: str
+    project_ssh_user: str
+    project_ssh_key_path: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> OpsAgentConfig:
@@ -80,7 +85,26 @@ class OpsAgentConfig:
             stream_processor_ssh_key_path=_require(
                 source, "STREAM_PROCESSOR_SSH_KEY_PATH"
             ),
+            # serving-api가 있는 Project EC2. 위와 같은 이유로 기본값을 두지 않는다(#547).
+            project_ssh_host=_require(source, "PROJECT_SSH_HOST"),
+            project_ssh_user=(source.get("PROJECT_SSH_USER") or "ec2-user"),
+            project_ssh_key_path=_require(source, "PROJECT_SSH_KEY_PATH"),
         )
+
+    def ssh_targets(self) -> dict[str, SshTarget]:
+        """ActionSpec.ssh_target_key -> 실제 접속 정보."""
+        return {
+            "spark": SshTarget(
+                host=self.stream_processor_ssh_host,
+                user=self.stream_processor_ssh_user,
+                key_path=self.stream_processor_ssh_key_path,
+            ),
+            "project": SshTarget(
+                host=self.project_ssh_host,
+                user=self.project_ssh_user,
+                key_path=self.project_ssh_key_path,
+            ),
+        }
 
 
 def _require(source: Mapping[str, str], key: str) -> str:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ops_agent.diagnostics as diagnostics_module
-from ops_agent.diagnostics import collect_stream_processor_diagnostics
+from ops_agent.diagnostics import collect_container_diagnostics
 from ops_agent.ssh import CommandKind, ExecutedCommand, SshResult, SshTarget
 
 TARGET = SshTarget(host="1.2.3.4", user="ec2-user", key_path="/keys/id_ed25519")
@@ -29,7 +29,7 @@ class TestCollectStreamProcessorDiagnostics:
 
         monkeypatch.setattr(diagnostics_module, "run_remote_command", fake_run)
 
-        result = collect_stream_processor_diagnostics(TARGET)
+        result = collect_container_diagnostics(TARGET, "stream-processor")
 
         assert result.container_status == "running"
         assert result.restart_count == 2
@@ -44,7 +44,7 @@ class TestCollectStreamProcessorDiagnostics:
 
         monkeypatch.setattr(diagnostics_module, "run_remote_command", fake_run)
 
-        result = collect_stream_processor_diagnostics(TARGET)
+        result = collect_container_diagnostics(TARGET, "stream-processor")
 
         assert [command.argv[:2] for command in result.commands] == [
             ("docker", "inspect"),
@@ -62,10 +62,26 @@ class TestCollectStreamProcessorDiagnostics:
             ),
         )
 
-        result = collect_stream_processor_diagnostics(TARGET)
+        result = collect_container_diagnostics(TARGET, "stream-processor")
 
         assert result.container_status == "not found"
         assert result.restart_count is None
         assert "No such container" in result.recent_logs
         # inspect가 실패하면 logs를 시도하지 않으므로 명령이 하나만 남는다.
         assert len(result.commands) == 1
+
+    def test_it_inspects_the_container_it_was_given(self, monkeypatch):
+        seen = []
+        outputs = [(0, "running|0", ""), (0, "log", "")]
+
+        def fake_run(target, argv, *, kind, **kwargs):
+            seen.append(argv)
+            exit_code, stdout, stderr = outputs.pop(0)
+            return ssh_result(exit_code, stdout, stderr, argv, kind)
+
+        monkeypatch.setattr(diagnostics_module, "run_remote_command", fake_run)
+
+        collect_container_diagnostics(TARGET, "serving-api")
+
+        assert seen[0][-1] == "serving-api"
+        assert seen[1][-1] == "serving-api"
