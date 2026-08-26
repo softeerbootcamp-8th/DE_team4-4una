@@ -21,7 +21,10 @@ import urllib.parse
 from de4_core import ObjectStore, join_uri
 from pyspark.sql import DataFrame, SparkSession
 
-from batch_jobs.comfort_score.formula import VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID
+from batch_jobs.comfort_score.formula import (
+    VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID,
+    Universe,
+)
 
 ACTIVE_POINTER_KEY = "prepared/simulation_environment/active.json"
 SEGMENT_ARTIFACT_ROLE = "enriched_segment_reference"
@@ -32,18 +35,19 @@ def load_universe(
     road_environment_uri: str,
     connection,
     store: ObjectStore | None = None,
-) -> DataFrame:
-    """실제 차량 프로필 x 전체 segment의 cross join을 반환한다.
+) -> Universe:
+    """전체 segment 목록과 실제 차량 프로필 ID를 각각 반환한다.
+
+    두 축을 미리 cross join하지 않는다 — 소비처마다 필요한 축이 달라서, 합쳐 두면
+    다시 distinct로 뽑아내느라 큰 프레임에 셔플이 붙는다(formula.Universe 참고).
 
     sentinel `vehicle_profile_id=0`은 제외한다 — vehicle-agnostic 행은 formula.py가
     segment 목록으로부터 직접 만든다.
     """
-    segments = load_segment_ids(spark, road_environment_uri, store)
-    profile_ids = load_vehicle_profile_ids(connection)
-    profiles = spark.createDataFrame(
-        [(profile_id,) for profile_id in profile_ids], "vehicle_profile_id int"
+    return Universe(
+        segments=load_segment_ids(spark, road_environment_uri, store),
+        profile_ids=load_vehicle_profile_ids(connection),
     )
-    return segments.crossJoin(profiles)
 
 
 def load_segment_ids(

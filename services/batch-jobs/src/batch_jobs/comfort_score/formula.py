@@ -24,6 +24,8 @@ Step 1의 가중치로 합쳐서 만든다. Step 1~5가 전부 선형이라 "먼
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
@@ -59,32 +61,47 @@ REQUIRED_SCHEMA = StructType(
     [field for field in HOURLY_COMFORT_SCORE_SCHEMA.fields if field.name in REQUIRED_COLUMNS]
 )
 
-UNIVERSE_COLUMNS = ("segment_id", "vehicle_profile_id")
+
+@dataclass(frozen=True, slots=True)
+class Universe:
+    """이번 실행이 행을 만들어야 할 (segment, vehicle profile) 조합.
+
+    두 축을 합친 cross join 결과 하나로 들고 다니면, 소비처마다 필요한 축만 뽑으려고
+    그 큰 프레임에 distinct를 걸게 된다. 운영 기준 831,110행(166,222 세그먼트 x 5
+    프로필)에 셔플이 세 번 붙었다. 축을 따로 들고 있으면 그 셔플이 전부 없어진다.
+
+    - `segments`: `segment_id` 한 컬럼. 도로망 artifact에서 이미 중복이 제거돼 온다.
+    - `profile_ids`: PostgreSQL `vehicle_profile`의 실제 프로필 ID(sentinel 0 제외).
+      수가 적어 파이썬 값으로 들고 있는다 — 덕분에 sentinel 검사도 Spark Action 없이
+      끝난다.
+    """
+
+    segments: DataFrame
+    profile_ids: tuple[int, ...]
 
 
 def compute_standard_comfort_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame,
+    universe: Universe,
 ) -> DataFrame:
     """standard_segment_comfort_score용 산출 (#198).
 
-    `universe_df`는 (segment_id, vehicle_profile_id) 두 컬럼으로 이번 실행이 행을
-    만들어야 할 실제 차량 프로필 조합 전체를 담는다(sentinel 0 제외 — vehicle-agnostic
-    행은 그 안의 segment 목록으로 여기서 직접 만든다). 관측이 전혀 없는 조합도
-    N=0, confidence=0으로 행이 나온다.
+    `universe`는 이번 실행이 행을 만들어야 할 세그먼트와 실제 차량 프로필을 담는다
+    (sentinel 0 제외 — vehicle-agnostic 행은 그 segment 목록으로 여기서 직접 만든다).
+    관측이 전혀 없는 조합도 N=0, confidence=0으로 행이 나온다.
 
     mu_p가 정의되지 않는 프로필(윈도우 전체에서 qualifying hour가 없는 경우)은
     vehicle-agnostic 경로의 전역 mu로 대체한다.
     """
-    _validate_universe(universe_df)
-    return _compute(hourly_df, config, universe_df)
+    _validate_universe(universe)
+    return _compute(hourly_df, config, universe)
 
 
 def _compute(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame,
+    universe: Universe,
 ) -> DataFrame:
     _validate_schema(hourly_df.schema, REQUIRED_SCHEMA, source="hourly_comfort_score")
     _validate_no_reserved_vehicle_profile_id(hourly_df)
@@ -102,9 +119,9 @@ def _compute(
     # 대체값으로도 쓰이므로 한 번만 계산해 양쪽이 같은 값을 보게 한다.
     global_mu = _collect_global_population_means(pooled_qualifying)
 
-    per_vehicle = _per_vehicle_scores(hourly_df, config, universe_df, global_mu)
+    per_vehicle = _per_vehicle_scores(hourly_df, config, universe, global_mu)
     vehicle_agnostic = _vehicle_agnostic_scores(
-        pooled_qualifying, config, universe_df, global_mu
+        pooled_qualifying, config, universe, global_mu
     )
     return per_vehicle.unionByName(vehicle_agnostic)
 
@@ -134,24 +151,38 @@ def _collect_global_population_means(
     }
 
 
-def _validate_universe(universe_df: DataFrame) -> None:
-    missing = [column for column in UNIVERSE_COLUMNS if column not in universe_df.columns]
-    if missing:
-        raise ValueError(f"universe: missing required column(s): {', '.join(missing)}")
-    reserved_present = (
-        universe_df.filter(
-            F.col("vehicle_profile_id") == VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID
-        )
-        .limit(1)
-        .count()
-        > 0
-    )
-    if reserved_present:
+def _validate_universe(universe: Universe) -> None:
+    """프로필 목록이 파이썬 값이라 sentinel 검사에 Spark Action이 필요 없다."""
+    if "segment_id" not in universe.segments.columns:
+        raise ValueError("universe: missing required column(s): segment_id")
+    if not universe.profile_ids:
+        raise ValueError("universe: no vehicle_profile_id was resolved")
+    if VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID in universe.profile_ids:
         raise ValueError(
             f"universe must not contain vehicle_profile_id="
             f"{VEHICLE_AGNOSTIC_VEHICLE_PROFILE_ID}; the vehicle-agnostic row is "
             "generated from the universe's segment list instead"
         )
+
+
+def _universe_pairs(universe: Universe) -> DataFrame:
+    """(segment x profile) 조합을 만든다.
+
+    crossJoin 대신 explode를 쓴다 — 프로필 목록이 파이썬 값이라 리터럴 배열로 펼치면
+    되고, explode는 좁은(narrow) 연산이라 셔플이 없다.
+    """
+    return universe.segments.withColumn(
+        "vehicle_profile_id",
+        F.explode(F.array(*[F.lit(profile_id) for profile_id in universe.profile_ids])),
+    )
+
+
+def _profiles_frame(universe: Universe) -> DataFrame:
+    """프로필 목록만 담은 작은 프레임. 831,110행에 distinct를 걸던 자리를 대신한다."""
+    return universe.segments.sparkSession.createDataFrame(
+        [(profile_id,) for profile_id in universe.profile_ids],
+        "vehicle_profile_id int",
+    )
 
 
 def _validate_no_reserved_vehicle_profile_id(hourly_df: DataFrame) -> None:
@@ -211,25 +242,23 @@ def _pool_vehicle_profiles(hourly_df: DataFrame) -> DataFrame:
 def _per_vehicle_scores(
     hourly_df: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame | None,
+    universe: Universe,
     global_mu: dict[str, Column] | None,
 ) -> DataFrame:
     group_keys = ("segment_id", "vehicle_profile_id")
 
     qualifying = _qualifying_hours(hourly_df, config)
-    universe = (
-        universe_df.select(*group_keys).distinct()
-        if universe_df is not None
-        else hourly_df.select(*group_keys).distinct()
+    # cross join 결과는 이미 중복이 없으므로 distinct를 걸지 않는다.
+    observed_full = _observed_with_universe(
+        qualifying, _universe_pairs(universe), group_keys
     )
-    observed_full = _observed_with_universe(qualifying, universe, group_keys)
 
     population = _population_means(qualifying, group_keys=("vehicle_profile_id",))
     if global_mu is not None:
         # mu_p가 없는 프로필은 전역 mu로 대체한다. universe의 프로필 전체를 기준으로
         # 왼쪽 조인해야 관측이 하나도 없는 프로필까지 값을 갖는다.
         population = _fill_population_means(
-            universe.select("vehicle_profile_id").distinct(), population, global_mu
+            _profiles_frame(universe), population, global_mu
         )
 
     joined = observed_full.join(population, on="vehicle_profile_id", how="left")
@@ -239,19 +268,15 @@ def _per_vehicle_scores(
 def _vehicle_agnostic_scores(
     pooled_qualifying: DataFrame,
     config: ComfortScoreConfig,
-    universe_df: DataFrame | None,
+    universe: Universe,
     global_mu: dict[str, Column],
 ) -> DataFrame:
     group_keys = ("segment_id",)
 
-    # T_min 필터는 _compute가 이미 적용했다.
-    qualifying = pooled_qualifying
-    universe = (
-        universe_df.select("segment_id").distinct()
-        if universe_df is not None
-        else pooled_qualifying.select("segment_id").distinct()
+    # T_min 필터는 _compute가 이미 적용했다. segment 목록도 이미 중복이 없다.
+    observed_full = _observed_with_universe(
+        pooled_qualifying, universe.segments, group_keys
     )
-    observed_full = _observed_with_universe(qualifying, universe, group_keys)
 
     # 전역 mu는 이미 드라이버에서 걷어 온 리터럴이라 조인 없이 컬럼으로 붙인다.
     joined = observed_full.withColumns(global_mu)
