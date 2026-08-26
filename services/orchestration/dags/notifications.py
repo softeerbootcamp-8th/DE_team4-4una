@@ -19,9 +19,9 @@ _SUMMARY_TASK_IDS: dict[str, str] = {
     "current_score_pipeline": "compute_current_score",
     "zone_weather_pipeline": "collect_weather",
     "bronze_compaction": "compact_zone_weather_snapshot",
-    # report_pipeline_counts는 standard_score TaskGroup 밖(DAG 최상위)에 있으므로
-    # task_id에 TaskGroup 접두사가 붙지 않는다 — dags/standard_score_pipeline.py 참고.
-    "standard_score_pipeline": "report_pipeline_counts",
+    # report_pipeline_counts는 quality_validation TaskGroup 안에 있어 접두사가 붙는다
+    # — dags/standard_score_pipeline.py 참고.
+    "standard_score_pipeline": "quality_validation.report_pipeline_counts",
     "data_quality_audit": "report_audit_counts",
 }
 

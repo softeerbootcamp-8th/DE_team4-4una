@@ -99,7 +99,7 @@ def _registry(monkeypatch, tmp_path):
             owner: alice
             severity: critical
             tasks:
-              transform_sensor_readings:
+              score_computation.transform_sensor_readings:
                 owner: bob
                 severity: high
           current_score_pipeline:
@@ -172,7 +172,7 @@ def test_failure_callback_mentions_slack_id_owner_directly(_fake_slack_hook, _fa
 
 def test_failure_callback_resolves_email_owner_via_slack_lookup(_fake_slack_hook, _fake_object_store):
     context = _context(
-        "standard_score_pipeline", _FakeTaskInstance(task_id="report_pipeline_counts")
+        "standard_score_pipeline", _FakeTaskInstance(task_id="quality_validation.report_pipeline_counts")
     )
 
     notifications.on_failure_callback(context)
@@ -186,7 +186,7 @@ def test_failure_callback_resolves_email_owner_via_slack_lookup(_fake_slack_hook
 def test_failure_callback_uses_task_level_override_over_dag_default(_fake_slack_hook, _fake_object_store):
     context = _context(
         "standard_score_pipeline",
-        _FakeTaskInstance(task_id="transform_sensor_readings"),
+        _FakeTaskInstance(task_id="score_computation.transform_sensor_readings"),
         task_group_id="sensor_processing",
     )
 
@@ -284,7 +284,7 @@ def test_failure_callback_includes_counts_when_upstream_summary_already_succeede
     # 자신이 아니라 dag run 내 임의 task X의 XCom을 조회한다 — dag_run.get_task_instance()는
     # 더 이상 쓰지 않는다(#409 로컬 검증 중 실제 발견).
     task_instance = _FakeTaskInstance(task_id="some_later_task")
-    task_instance.xcom_store[("report_pipeline_counts", "return_value")] = {
+    task_instance.xcom_store[("quality_validation.report_pipeline_counts", "return_value")] = {
         "standard_segment_comfort_score_count": 80
     }
     context = _context("standard_score_pipeline", task_instance)
@@ -336,7 +336,7 @@ def test_failure_callback_still_posts_when_slack_email_lookup_fails(
     # slack_id가 없어 users_lookupByEmail 경로를 탄다.
     _fake_slack_hook.client.users_lookupByEmail.side_effect = RuntimeError("users_not_found")
     context = _context(
-        "standard_score_pipeline", _FakeTaskInstance(task_id="report_pipeline_counts")
+        "standard_score_pipeline", _FakeTaskInstance(task_id="quality_validation.report_pipeline_counts")
     )
 
     notifications.on_failure_callback(context)
@@ -387,7 +387,7 @@ def test_failed_tasks_s3_root_falls_back_to_default_when_variable_is_empty_strin
 # --- EMR driver 로그 진단 (실패 알림에 원인 분류를 붙인다) ---
 
 
-def _emr_task_instance(task_id: str = "transform_sensor_readings") -> _FakeTaskInstance:
+def _emr_task_instance(task_id: str = "score_computation.transform_sensor_readings") -> _FakeTaskInstance:
     from airflow.providers.amazon.aws.links.emr import EmrServerlessS3LogsLink
 
     task_instance = _FakeTaskInstance(task_id=task_id)
