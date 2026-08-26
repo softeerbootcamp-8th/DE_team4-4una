@@ -228,6 +228,17 @@ def adjust_comfort_scores(
     가중합과 일치하지 않는다. standard 테이블과 달리 여기서는 의도된 동작이다.
     """
     deduction = weather_deduction(conditions, config)
+    return apply_weather_deduction(vertical_score, longitudinal_score, lateral_score, deduction, config)
+
+
+def apply_weather_deduction(
+    vertical_score: float,
+    longitudinal_score: float,
+    lateral_score: float,
+    deduction: WeatherDeduction,
+    config: WeatherRuleConfig,
+) -> AdjustedScores:
+    """이미 계산된 WeatherDeduction을 적용한다(Step B -> C) — adjust_comfort_scores를 매번 부른 것과 결과가 같다(#559)."""
     adjusted_vertical = _clamp(vertical_score - deduction.vertical)
     adjusted_longitudinal = _clamp(longitudinal_score - deduction.longitudinal)
     adjusted_lateral = _clamp(lateral_score - deduction.lateral)
