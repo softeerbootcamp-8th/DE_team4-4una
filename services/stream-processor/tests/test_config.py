@@ -61,3 +61,47 @@ def test_deploy_workflow_uses_the_same_streaming_defaults() -> None:
     assert "STREAM_MAX_OFFSETS_PER_TRIGGER || '1200000'" in workflow
     assert "STREAM_MAX_TRIGGER_DELAY || '30s'" in workflow
     assert "STREAM_BRONZE_OUTPUT_PARTITIONS || '2'" in workflow
+
+
+def test_from_env_treats_empty_values_as_unset() -> None:
+    # docker compose는 호스트 .env에 값이 없으면 빈 문자열을 주입하고(#409),
+    # .env.example:16-27이 STREAM_* 를 전부 빈 값으로 배포한다. 예전에는 숫자 키에서
+    # int("")로 기동이 죽었다(#592).
+    empty = dict.fromkeys(
+        [
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "KAFKA_SENSOR_TOPIC",
+            "KAFKA_STARTING_OFFSETS",
+            "STREAM_TRIGGER_INTERVAL_SECONDS",
+            "STREAM_BRONZE_OUTPUT_PATH",
+            "STREAM_BRONZE_CHECKPOINT_LOCATION",
+            "STREAM_MIN_OFFSETS_PER_TRIGGER",
+            "STREAM_MAX_TRIGGER_DELAY",
+            "STREAM_MAX_OFFSETS_PER_TRIGGER",
+            "STREAM_BRONZE_OUTPUT_PARTITIONS",
+            "STREAM_DRIVER_MEMORY",
+        ],
+        "",
+    )
+
+    # 키가 아예 없을 때와 완전히 같은 설정이어야 한다.
+    assert StreamConfig.from_env(empty) == StreamConfig.from_env({})
+
+
+def test_explicit_zero_is_not_replaced_by_the_default() -> None:
+    # `or`는 문자열 단계에서 걸리고 "0"은 truthy라 그대로 통과한다. 0은 각각
+    # "트리거 하한 끄기"(로컬 스모크)와 "복구 배치 상한 없음"을 뜻하는 유효한 설정이라,
+    # 빈 값 처리가 이 값을 삼키면 안 된다.
+    config = StreamConfig.from_env(
+        {
+            "STREAM_MIN_OFFSETS_PER_TRIGGER": "0",
+            "STREAM_MAX_OFFSETS_PER_TRIGGER": "0",
+            "STREAM_BRONZE_OUTPUT_PARTITIONS": "0",
+            "STREAM_TRIGGER_INTERVAL_SECONDS": "0",
+        }
+    )
+
+    assert config.min_offsets_per_trigger == 0
+    assert config.max_offsets_per_trigger == 0
+    assert config.bronze_output_partitions == 0
+    assert config.trigger_interval_seconds == 0.0
