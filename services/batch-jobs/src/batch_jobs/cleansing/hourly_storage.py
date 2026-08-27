@@ -184,8 +184,10 @@ def _replace_partition(
 
 
 def _backup_path(final_path: str) -> str:
+    # Spark의 리스팅 필터가 `startsWith("_") && !contains("=")`라 `_` 프리픽스만으로는
+    # 부족하고 이름에서 `=`까지 없애야 파티션 탐색이 무시한다(#591).
     parent, name = final_path.rsplit("/", maxsplit=1)
-    return f"{parent}/_backup_{name}"
+    return f"{parent}/_backup_{name.replace('=', '_')}"
 
 
 def _recover_backup(spark: SparkSession, final_path: str, backup_path: str) -> None:

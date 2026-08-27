@@ -2155,13 +2155,33 @@ class TestHourlySegmentFeatureStorage:
 
     def test_backup_path_derives_a_sibling_key_under_an_s3_root(self) -> None:
         # _backup_path는 순수 문자열 조립이라 s3:// URI에서도 그대로 동작해야 한다(#380).
+        # 백업 이름은 `_`로 시작하면서 `=`이 없어야 Spark 파티션 탐색이 무시한다(#591).
         final_path = "s3://de4-silver/hourly_segment_features/data_period_date=2026-08-16/hour=10"
 
         backup_path = _backup_path(final_path)
 
         assert backup_path == (
-            "s3://de4-silver/hourly_segment_features/data_period_date=2026-08-16/hour=10.bak"
+            "s3://de4-silver/hourly_segment_features/data_period_date=2026-08-16/_backup_hour_10"
         )
+
+    def test_partition_discovery_keeps_the_hour_type_while_a_backup_exists(
+        self, spark, tmp_path
+    ) -> None:
+        # 스왑 중이거나 실행이 죽어 백업이 남은 동안 상위 디렉터리를 파티션 탐색으로 읽어도
+        # hour가 int로 유지되어야 한다. Spark의 리스팅 필터가
+        # `startsWith("_") && !contains("=")`이라, `hour=10.bak`은 hour="10.bak" 값으로
+        # 잡히고 `_backup_hour=10`은 파티션 컬럼 충돌로 읽기가 실패한다(#591).
+        output_root = str(tmp_path / "hourly_segment_features")
+        df = self.feature_rows_df(spark, [self.feature_row()])
+        write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, "run-1")
+
+        final = Path(hour_output_path(output_root, self.TARGET_HOUR))
+        shutil.copytree(final, Path(_backup_path(str(final))))
+
+        discovered = spark.read.parquet(output_root)
+
+        assert discovered.schema["hour"].dataType == IntegerType()
+        assert discovered.count() == 1
 
     def test_write_creates_data_at_the_expected_path(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
@@ -2376,7 +2396,7 @@ class TestHourlySegmentFeatureStorage:
 
         # 직전 실행이 final -> backup 이동 직후 죽은 상태를 재현한다.
         final = Path(hour_output_path(output_root, self.TARGET_HOUR))
-        backup = final.with_name(final.name + ".bak")
+        backup = Path(_backup_path(str(final)))
         shutil.move(str(final), str(backup))
         assert not final.exists()
 
