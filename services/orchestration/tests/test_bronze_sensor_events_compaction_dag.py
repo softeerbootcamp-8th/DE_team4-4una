@@ -23,6 +23,7 @@ def _load_dag_module():
 
 def test_dag_has_the_expected_schedule_and_single_soft_fail_task():
     module = _load_dag_module()
+    from emr_serverless import EMR_SERVERLESS_POOL
 
     assert module.dag.dag_id == "bronze_sensor_events_compaction"
     assert module.dag.schedule == "47 3 * * *"
@@ -31,4 +32,5 @@ def test_dag_has_the_expected_schedule_and_single_soft_fail_task():
     task = module.dag.get_task("compact_sensor_events")
     assert isinstance(task, PythonOperator)
     assert task.python_callable is module._compact_sensor_events
+    assert task.pool == EMR_SERVERLESS_POOL
     assert task.outlets == []
