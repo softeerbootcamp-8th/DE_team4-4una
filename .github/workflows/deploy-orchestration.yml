@@ -49,10 +49,6 @@ jobs:
       ENV_FILE: ${{ vars.ORCHESTRATION_ENV_FILE || '/etc/orchestration/orchestration.env' }}
       HEALTH_PATH: /api/v2/monitor/health
       HEALTH_TIMEOUT: "180"
-      SENSOR_EVENTS_COMPACTION_ROOT_URI: ${{ vars.SENSOR_EVENTS_COMPACTION_ROOT_URI }}
-      # 첫 운영 실행은 한 시간 파티션만 처리한다. 검증 후 repository variable로 늘린다.
-      SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN: ${{ vars.SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN || '1' }}
-      SENSOR_EVENTS_COMPACTION_ENABLED: ${{ vars.SENSOR_EVENTS_COMPACTION_ENABLED || 'true' }}
 
     steps:
       - name: Check required variables
@@ -60,10 +56,9 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           EC2_HOST: ${{ vars.EC2_HOST }}
           EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          SENSOR_EVENTS_COMPACTION_ROOT_URI: ${{ vars.SENSOR_EVENTS_COMPACTION_ROOT_URI }}
         run: |
           missing=""
-          for name in AWS_REGION EC2_HOST EC2_SSH_PRIVATE_KEY SENSOR_EVENTS_COMPACTION_ROOT_URI; do
+          for name in AWS_REGION EC2_HOST EC2_SSH_PRIVATE_KEY; do
             eval "value=\${$name}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -72,14 +67,6 @@ jobs:
             echo "::error::필수 설정값이 비어 있습니다:$missing"
             exit 1
           fi
-
-          case "$SENSOR_EVENTS_COMPACTION_ROOT_URI" in
-            s3://*/bronze/sensor-events|s3://*/bronze/sensor-events/) ;;
-            *)
-              echo "::error::SENSOR_EVENTS_COMPACTION_ROOT_URI는 s3://.../bronze/sensor-events 경로여야 합니다."
-              exit 1
-              ;;
-          esac
 
       - uses: actions/checkout@v4
         with:
@@ -123,7 +110,6 @@ jobs:
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
           EC2_HOST: ${{ vars.EC2_HOST }}
-          SENSOR_EVENTS_COMPACTION_ROOT_URI: ${{ vars.SENSOR_EVENTS_COMPACTION_ROOT_URI }}
         run: |
           set -euo pipefail
 
@@ -134,8 +120,6 @@ jobs:
           ssh "${EC2_USER}@${EC2_HOST}" \
             "cd '$REPO_DIR' \
             && AWS_REGION='$AWS_REGION' AWS_DEFAULT_REGION='$AWS_REGION' \
-            SENSOR_EVENTS_COMPACTION_ROOT_URI='$SENSOR_EVENTS_COMPACTION_ROOT_URI' \
-            SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN='$SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN' \
             docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml up -d \
             && docker compose --env-file '$ENV_FILE' -f infra/compose/airflow.yaml \
                  restart airflow-statsd-exporter"
@@ -190,23 +174,40 @@ jobs:
           ssh "${EC2_USER}@${EC2_HOST}" \
             "REPO_DIR='$REPO_DIR' \
             ENV_FILE='$ENV_FILE' \
-            SENSOR_EVENTS_COMPACTION_ROOT_URI='$SENSOR_EVENTS_COMPACTION_ROOT_URI' \
-            SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN='$SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN' \
-            SENSOR_EVENTS_COMPACTION_ENABLED='$SENSOR_EVENTS_COMPACTION_ENABLED' \
             HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
           set -euo pipefail
 
           cd "$REPO_DIR"
-          export SENSOR_EVENTS_COMPACTION_ROOT_URI
-          export SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN
           compose=(docker compose --env-file "$ENV_FILE" -f infra/compose/airflow.yaml)
 
           actual_root=$("${compose[@]}" exec -T airflow-scheduler python -c \
             'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_ROOT_URI", ""))')
-          if [ "$actual_root" != "$SENSOR_EVENTS_COMPACTION_ROOT_URI" ]; then
-            echo "::error::scheduler의 sensor-events compaction 경로가 배포값과 다릅니다."
-            exit 1
-          fi
+          case "$actual_root" in
+            s3://*/bronze/sensor-events|s3://*/bronze/sensor-events/) ;;
+            *)
+              echo "::error::$ENV_FILE의 SENSOR_EVENTS_COMPACTION_ROOT_URI를 운영 S3 Bronze 경로로 설정해야 합니다."
+              exit 1
+              ;;
+          esac
+
+          max_groups=$("${compose[@]}" exec -T airflow-scheduler python -c \
+            'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN", ""))')
+          case "$max_groups" in
+            ''|*[!0-9]*)
+              echo "::error::SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN은 0 이상의 정수여야 합니다."
+              exit 1
+              ;;
+          esac
+
+          enabled=$("${compose[@]}" exec -T airflow-scheduler python -c \
+            'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_ENABLED", ""))')
+          case "$enabled" in
+            true|false) ;;
+            *)
+              echo "::error::SENSOR_EVENTS_COMPACTION_ENABLED는 true 또는 false여야 합니다."
+              exit 1
+              ;;
+          esac
 
           elapsed=0
           interval=5
@@ -220,13 +221,14 @@ jobs:
             elapsed=$((elapsed + interval))
           done
 
-          if [ "$SENSOR_EVENTS_COMPACTION_ENABLED" = "true" ]; then
+          if [ "$enabled" = "true" ]; then
             "${compose[@]}" exec -T airflow-scheduler \
               airflow dags unpause bronze_sensor_events_compaction
           else
             "${compose[@]}" exec -T airflow-scheduler \
               airflow dags pause bronze_sensor_events_compaction
           fi
+          echo "sensor-events compaction: root=$actual_root, max_groups_per_run=$max_groups, enabled=$enabled"
           EOF
 
       - name: Job summary
