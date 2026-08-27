@@ -2183,6 +2183,15 @@ class TestHourlySegmentFeatureStorage:
         assert discovered.schema["hour"].dataType == IntegerType()
         assert discovered.count() == 1
 
+    def test_run_id_with_a_trailing_newline_is_rejected(self, spark, tmp_path) -> None:
+        # match는 문자열 끝을 보지 않아 개행이 붙은 run_id를 통과시킨다 — 자매 모듈과 같이
+        # fullmatch로 막는다(#591).
+        output_root = str(tmp_path / "hourly_segment_features")
+        df = self.feature_rows_df(spark, [self.feature_row()])
+
+        with pytest.raises(ValueError, match="unsafe path characters"):
+            write_hourly_segment_features(spark, df, output_root, self.TARGET_HOUR, "run-1\n")
+
     def test_write_creates_data_at_the_expected_path(self, spark, tmp_path) -> None:
         output_root = str(tmp_path / "hourly_segment_features")
         df = self.feature_rows_df(spark, [self.feature_row(), self.feature_row(segment_id="S2")])
