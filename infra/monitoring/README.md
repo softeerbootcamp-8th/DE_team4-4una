@@ -503,7 +503,7 @@ Spark Streaming의 Bronze 적재는 세 종류로 나눠 감지한다.
 | --- | --- | --- | --- |
 | `StreamProcessorDown` | Prometheus target 또는 Spark query가 중단된 상태가 1분 지속 | CRITICAL | 기존 Ops Agent 재검증·재시작 대상 |
 | `BronzeIngestionStalled` | Kafka 입력이 있는데 마지막 성공 progress가 90초 넘게 없음 | WARNING | 없음 |
-| `BronzeIngestionLagGrowing` | Kafka 입력 중 event-time lag가 90초를 넘거나 2분 동안 live offset lag가 증가 | WARNING | 없음 |
+| `BronzeIngestionLagGrowing` | Kafka 입력 중 event-time lag가 90초를 넘거나, 120만 건을 넘은 live offset lag가 5분간 120만 건 이상 증가 | WARNING | 없음 |
 
 `BronzeIngestionStalled`은 Kafka message rate가 0이면 시계열을 반환하지 않고
 `noDataState=OK`로 처리한다. 따라서 차량 입력이 없는 정상 상태를 적재 장애로 오인하지
@@ -519,10 +519,10 @@ commit한 end offset 합(`stream_processor_kafka_end_offset_sum`)을 Kafka Expor
 `ops-agent` contact point를 통해 Slack에 summary, query/lag 현재 값과 Spark Streaming
 dashboard 링크를 보내 사람이 원인을 확인한다.
 
-90초 기준은 `STREAM_MAX_TRIGGER_DELAY`를 30초로 줄이는 #557과 함께 배포하는 것을
-전제로 한다. 현재 기본값 5분을 유지한 채 이 규칙만 먼저 배포하면 입력량이
-`STREAM_MIN_OFFSETS_PER_TRIGGER`에 도달하지 않은 정상 대기 중에도 경고할 수 있으므로,
-#557 배포 전에는 이 규칙을 운영에 적용하지 않는다.
+90초 event-time 기준은 `STREAM_MAX_TRIGGER_DELAY=30s`를 전제로 한다.
+offset 경고는 정상 micro-batch 사이의 일시적 적체를 걸러내기 위해,
+한 배치 상한인 120만 건을 현재 backlog와 5분 증가량이 모두 넘고
+그 상태가 3분 지속될 때만 발화한다.
 
 `infrastructure` 그룹은 원래 `ProjectDiskPressure`(#504) 하나였다. 이번에 EC2 3대
 공통 host alert와 monitoring self-health alert를 이 그룹에 합치면서
@@ -1032,11 +1032,11 @@ metric들을 갱신한다.
 - **Component Status의 `QUERY STOPPED`는 프로세스 생존 여부(`up`)와 다르다.** 컨테이너는
   떠 있지만(`up == 1`) 쿼리가 예외로 죽어 재시작 대기 중인 짧은 순간에는
   `up == 1`, `stream_processor_query_running == 0`일 수 있다.
-- **`Last Progress Age`가 `STREAM_MAX_TRIGGER_DELAY`(기본 5분/300초) 근처까지
+- **`Last Progress Age`가 `STREAM_MAX_TRIGGER_DELAY`(기본 30초) 근처까지
   올라가는 것은 트래픽이 적을 때 정상이다.** `STREAM_MIN_OFFSETS_PER_TRIGGER`
   (기본 600,000건)가 쌓이기 전에는 이 지연 시간이 지나야 배치가 실행된다.
-  Threshold를 300초보다 조금 더 여유 있는 330초로 잡은 것도 이 때문이다 —
-  실제로 값이 계속 커지기만 하고 꺾이지 않아야 장애로 본다.
+  Component Status의 330초 threshold는 일시 지연이 아닌 장시간 progress
+  정체를 보수적으로 표시하는 별도 기준이다.
 - **아직 한 번도 progress가 발생하지 않은 초기 상태에서는 `Last Progress
   Age`가 `No data`인 게 정상이다.** `stream_processor_last_progress_timestamp_seconds`는
   gauge 초기값이 `0`(Unix epoch)이라, `time() - ...`을 그대로 계산하면
@@ -1046,7 +1046,7 @@ metric들을 갱신한다.
   — 이 필터 때문에 progress가 아직 없으면 값 자체가 없어(`No data`) 큰
   숫자로 오해할 일이 없다. 이 상태는 첫 마이크로배치가 끝나면 정상적으로
   풀린다.
-- **`Micro-batch Duration`은 배치가 5초~5분 간격으로만 발생해 데이터 포인트가
+- **`Micro-batch Duration`은 배치가 기본 30초 간격으로 발생해 데이터 포인트가
   희소하다.** `rate(...[5m])` 윈도우 안에 샘플이 아예 없으면 `No data`가
   정상이다 — 장애가 아니라 그 구간에 배치가 없었다는 뜻이다.
 
@@ -1208,9 +1208,9 @@ Host/Serving API는 이런 "exporter는 살아있는데 그 뒤가 죽는" 시�
   `kafka_consumergroup_lag` metric 자체가 이 구조에서는 존재하지 않는다
   (위 [Kafka dashboard 지표](#kafka-dashboard-지표) 참고). lag은 Spark
   Streaming 쪽 `Kafka Offset Lag`로 본다.
-- Spark `KAFKA BACKLOG` 절대값: 정상 backlog 크기로 합의한 기준이 없어
-  임의 threshold를 두지 않는다. 대신 Kafka 입력 중 2분 연속으로
-  backlog가 커지는 추세를 `BronzeIngestionLagGrowing`으로 감지한다.
+- Spark `KAFKA BACKLOG`: 30초 micro-batch의 상한 120만 건을 운영
+  기준으로 삼는다. 현재 backlog와 최근 5분 증가량이 모두 이
+  기준을 넘을 때 `BronzeIngestionLagGrowing`으로 감지한다.
 - Serving API `HIGH 5XX`/`HIGH LATENCY`: 5xx rate와 p95 latency 모두 이
   프로젝트에 확립된 SLA가 없다. 실제 운영 기준이 정해지면 이 패널들에
   추가한다.

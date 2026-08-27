@@ -205,7 +205,7 @@
       "id": 7,
       "type": "stat",
       "title": "Last Progress Age",
-      "description": "마지막 onQueryProgress 이후 경과 시간. STREAM_MAX_TRIGGER_DELAY(기본 5m) 동안은 새 데이터가 없어도 정상적으로 값이 쌓일 수 있다. stream_processor_last_progress_timestamp_seconds는 progress가 한 번도 없으면 0(gauge 초기값)이라, time()과 그대로 빼면 Unix epoch(1970-01-01) 기준 나이인 수십 년짜리 값이 나온다 — timestamp가 0보다 클 때만(즉 실제 progress가 한 번이라도 있었을 때만) age를 계산하도록 and로 걸러 초기 상태에서는 No data(아직 progress 없음, 장애 아님)를 보여준다.",
+      "description": "마지막 onQueryProgress 이후 경과 시간. STREAM_MAX_TRIGGER_DELAY(기본 30s) 동안은 새 데이터가 없어도 정상적으로 값이 쌓일 수 있다. stream_processor_last_progress_timestamp_seconds는 progress가 한 번도 없으면 0(gauge 초기값)이라, time()과 그대로 빼면 Unix epoch(1970-01-01) 기준 나이인 수십 년짜리 값이 나온다 — timestamp가 0보다 클 때만(즉 실제 progress가 한 번이라도 있었을 때만) age를 계산하도록 and로 걸러 초기 상태에서는 No data(아직 progress 없음, 장애 아님)를 보여준다.",
       "datasource": "Prometheus",
       "gridPos": { "x": 0, "y": 29, "w": 24, "h": 4 },
       "targets": [

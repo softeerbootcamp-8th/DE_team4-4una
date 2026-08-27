@@ -1,7 +1,7 @@
 ---
 owner: data-engineering
 status: proposed
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 
 # Target Architecture
@@ -130,7 +130,7 @@ Kafka decouples replay from persistence. The stream processor validates shared
 contracts, handles duplicates according to the accepted idempotency key, and
 writes raw events to S3 without discarding variables that may be useful to later
 scoring experiments. Its default Bronze collection policy attempts a micro-batch
-at most every 30 seconds and caps a batch at 120,000 records, so a recovery
+at most every 30 seconds and caps a batch at 1,200,000 records, so a recovery
 backlog is drained incrementally rather than turning one retry into an
 unbounded S3 write. S3 partitions still use sensor `event_time`, not the time
 at which a batch happens to commit.

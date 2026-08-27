@@ -156,8 +156,8 @@ groups:
           __dashboardUid__: "spark-streaming"
           __panelId__: "23"
 
-      # progress는 계속되더라도 처리량이 유입량을 못 따라가 lag가 커지는 경우를 잡는다
-      # event-time lag와 offset lag는 단위가 달라 0/1 조건으로 정규화한 뒤 합친다
+      # 정상 micro-batch 사이의 일시적 backlog는 경고하지 않는다
+      # 한 배치 상한(120만 건)을 넘은 backlog가 5분간 같은 크기 이상 늘어나야 처리량 부족으로 본다
       - uid: bronze-ingestion-lag-growing
         title: BronzeIngestionLagGrowing
         condition: C
@@ -171,8 +171,11 @@ groups:
               editorMode: code
               expr: >-
                 ((stream_processor_event_time_lag_seconds{job="stream-processor"} > bool 90)
-                 + ((scalar(delta((sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))[2m:]))
-                     - delta(stream_processor_kafka_end_offset_sum{job="stream-processor"}[2m])) > bool 0))
+                 + (((clamp_min(
+                        scalar(sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))
+                        - stream_processor_kafka_end_offset_sum{job="stream-processor"}, 0)) > bool 1200000)
+                    * ((scalar(delta((sum(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}))[5m:]))
+                        - delta(stream_processor_kafka_end_offset_sum{job="stream-processor"}[5m])) > bool 1200000)))
                 and on()
                 (sum(rate(kafka_topic_partition_current_offset{job="kafka",topic="sensor-events"}[2m])) > 0)
               instant: true
@@ -226,12 +229,12 @@ groups:
                     params: [0]
         noDataState: OK
         execErrState: Error
-        for: 2m
+        for: 3m
         labels:
           service: stream-processor
           severity: warning
         annotations:
-          summary: "Kafka 입력이 계속되는 동안 Bronze event-time 또는 offset lag가 증가함"
+          summary: "Kafka 입력이 계속되는 동안 Bronze event-time lag가 높거나 offset backlog가 지속적으로 증가함"
           __dashboardUid__: "spark-streaming"
           __panelId__: "24"
 
