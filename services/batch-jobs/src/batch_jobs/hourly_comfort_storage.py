@@ -28,10 +28,12 @@ def hour_output_path(output_root: str, target_hour: datetime) -> str:
 
 
 def _backup_path(final_path: str) -> str:
-    # 반드시 `_`로 시작해야 Spark 파티션 탐색이 무시한다. `hour=09.bak`으로 쓰면
-    # hour="09.bak" 값으로 인식돼 컬럼 타입 추론이 int에서 string으로 바뀐다.
+    # Spark의 리스팅 필터가 `startsWith("_") && !contains("=")`라 `_` 프리픽스만으로는
+    # 부족하고 이름에서 `=`까지 없애야 파티션 탐색이 무시한다(#591).
+    # `hour=09.bak`은 hour="09.bak" 값으로 잡혀 컬럼 타입 추론이 int에서 string으로 깨지고,
+    # `_backup_hour=09`는 CONFLICTING_PARTITION_COLUMN_NAMES로 읽기 자체가 실패한다.
     parent, name = final_path.rsplit("/", maxsplit=1)
-    return f"{parent}/_backup_{name}"
+    return f"{parent}/_backup_{name.replace('=', '_')}"
 
 
 def write_hourly_comfort_partition(

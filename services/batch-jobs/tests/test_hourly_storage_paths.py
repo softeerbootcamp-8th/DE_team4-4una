@@ -28,5 +28,5 @@ def test_backup_path_derives_a_sibling_key_under_an_s3_root():
     backup_path = _backup_path(final_path)
 
     assert backup_path == (
-        "s3://de4-silver/hourly_quarantine/target_date=2026-08-01/_backup_target_hour=05"
+        "s3://de4-silver/hourly_quarantine/target_date=2026-08-01/_backup_target_hour_05"
     )

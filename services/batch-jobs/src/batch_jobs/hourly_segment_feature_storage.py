@@ -12,7 +12,6 @@ from pyspark.sql import functions as F
 from batch_jobs.sensor_features.aggregation import validate_hourly_segment_features
 
 _STAGING_DIRNAME = "_staging"
-_BACKUP_SUFFIX = ".bak"
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.:+-]+$")
 
 
@@ -40,7 +39,7 @@ def write_hourly_segment_features(
     result_count: int | None = None,
 ) -> HourlySegmentFeatureWriteResult:
     # 검증된 result를 staging에 쓰고, read-back 확인 후에만 대상 Hour 경로에 반영한다
-    if not _SAFE_RUN_ID.match(run_id):
+    if not _SAFE_RUN_ID.fullmatch(run_id):
         raise ValueError(f"run_id contains unsafe path characters: {run_id!r}")
     _require_utc_target_hour(target_hour)
     _require_single_target_hour(result, target_hour)
@@ -89,8 +88,18 @@ def _require_single_target_hour(result: DataFrame, target_hour: datetime) -> Non
 
 
 def _backup_path(final_path: str) -> str:
+    """스왑 중 남는 백업 디렉터리가 Spark 파티션 탐색에 잡히지 않는 이름을 만든다(#591).
+
+    Spark의 리스팅 필터는 `startsWith("_") && !contains("=")`라서, `_` 프리픽스만으로는
+    부족하고 이름에서 `=`까지 없애야 무시된다. `hour=09` 기준으로 실측한 결과는 이렇다.
+
+    - `hour=09.bak`: hour가 "09.bak" 값으로 잡혀 컬럼 타입 추론이 int에서 string으로 깨진다.
+    - `_backup_hour=09`: 파티션 컬럼이 hour와 _backup_hour로 갈려
+      `CONFLICTING_PARTITION_COLUMN_NAMES`로 읽기 자체가 실패한다.
+    - `_backup_hour_09`: 리스팅에서 제외되어 hour가 int로 유지된다.
+    """
     parent, name = final_path.rsplit("/", maxsplit=1)
-    return f"{parent}/{name}{_BACKUP_SUFFIX}"
+    return f"{parent}/_backup_{name.replace('=', '_')}"
 
 
 def _recover_stale_backup(spark: SparkSession, final_path: str) -> None:

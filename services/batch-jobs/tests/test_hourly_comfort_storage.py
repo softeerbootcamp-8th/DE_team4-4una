@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -69,9 +70,10 @@ def test_hour_output_path_strips_a_trailing_slash():
     assert "//data_period_date" not in path
 
 
-def test_backup_path_starts_with_an_underscore_so_spark_ignores_it():
-    # `hour=09.bak`처럼 쓰면 Spark 파티션 탐색이 hour="09.bak" 값으로 읽어
-    # 컬럼 타입 추론이 int에서 string으로 바뀐다.
+def test_backup_path_is_ignored_by_spark_partition_discovery():
+    # Spark의 리스팅 필터는 `startsWith("_") && !contains("=")`라 이름에 `=`이 남으면
+    # `_` 프리픽스가 무효다. `hour=09.bak`은 hour="09.bak" 값으로 읽혀 컬럼 타입 추론이
+    # int에서 string으로 깨지고, `_backup_hour=09`는 파티션 컬럼 충돌로 읽기가 실패한다(#591).
     final_path = (
         "s3://de4-lake/silver/hourly_comfort_score"
         "/data_period_date=2026-08-25/hour=09"
@@ -81,8 +83,27 @@ def test_backup_path_starts_with_an_underscore_so_spark_ignores_it():
 
     assert backup == (
         "s3://de4-lake/silver/hourly_comfort_score"
-        "/data_period_date=2026-08-25/_backup_hour=09"
+        "/data_period_date=2026-08-25/_backup_hour_09"
     )
+
+
+def test_partition_discovery_keeps_the_hour_type_while_a_backup_exists(spark, tmp_path):
+    # 문자열 단언만으로는 부족하다 — 백업이 남은 상태로 상위 디렉터리를 실제 파티션 탐색으로
+    # 읽어, hour가 int로 유지되고 백업 행이 중복으로 딸려오지 않는지 확인한다(#591).
+    root = str(tmp_path / "hourly_comfort_score")
+    target_hour = datetime(2026, 8, 25, 9, tzinfo=UTC)
+    result = write_hourly_comfort_partition(
+        spark, _frame(spark, target_hour, ["a"]), root, target_hour, "run-1", SCHEMA
+    )
+
+    # 스왑 도중 죽어 백업이 남은 상태를 재현한다.
+    final = Path(result.output_path)
+    shutil.copytree(final, Path(_backup_path(str(final))))
+
+    discovered = spark.read.parquet(root)
+
+    assert discovered.schema["hour"].dataType == IntegerType()
+    assert discovered.count() == 1
 
 
 def test_write_creates_the_target_hour_partition(spark, tmp_path):
