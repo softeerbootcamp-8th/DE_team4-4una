@@ -90,6 +90,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* 라벨이 값보다 넓다. 오른쪽 끝을 맞춰야 수치가 툴바 가장자리에 붙는다. */
+  align-items: flex-end;
+  text-align: right;
 }
 
 .metric__label {

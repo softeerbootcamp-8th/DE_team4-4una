@@ -43,15 +43,27 @@ comfort_score_router = APIRouter(prefix="/api/v1", tags=["comfort-scores"])
 route_router = APIRouter(prefix="/api/v1", tags=["routes"])
 
 # Swagger UI의 "Try it out"은 파라미터/본문 레벨 examples를 입력칸에 미리 채워준다.
-# 그래서 Execute만 눌러도 형식이 맞는 요청이 나간다. 다만 어떤 구간이 실제로
-# 존재하는지는 스냅샷마다 다르므로, 아래 id로 200이 온다는 보장은 없다 — 형식을
-# 보여주는 것이 목적이고, 없는 구간이면 404나 not_found_segment_ids로 응답한다.
+# 그래서 Execute만 눌러도 형식이 맞는 요청이 나가고, 200이 온다.
+#
+# 아래 구간 id는 지어낸 값이 아니라 standard_segment_comfort_score에 실제로 행이
+# 있는 구간이다(score_as_of=2026-08-26T22:00Z 산출물에서 확인). 라벨의 도로명은
+# 같은 environment의 road_segment 스냅샷에서 가져왔다. 점수는 매시 갱신되므로
+# 라벨에 넣지 않는다 -- 도로명은 environment 빌드가 바뀌지 않는 한 그대로다.
+#
+# 전부 taxi zone이 배정된 구간으로 골랐다. zone이 없으면 날씨를 붙일 수 없어
+# current에 행이 만들어지지 않고(orchestration/jobs/current_score.py), 그러면 이
+# endpoint의 응답이 늘 standard 폴백이라 `source`가 무슨 뜻인지 보여주지 못한다.
+#
+# `missing`만 일부러 도로망에 없는 id다 -- 404 응답을 눌러 볼 수 있게 남긴다.
 _SEGMENT_ID_EXAMPLES = {
-    "sample_1": {"summary": "0032900", "value": "0032900"},
-    "sample_2": {"summary": "0032901", "value": "0032901"},
-    "sample_3": {"summary": "0041250", "value": "0041250"},
-    "sample_4": {"summary": "0125630", "value": "0125630"},
-    "missing": {"summary": "9999999 — 점수가 없는 구간 (404)", "value": "9999999"},
+    "liberty_avenue": {"summary": "0048146 — Liberty Avenue", "value": "0048146"},
+    "east_59_street": {"summary": "0036273 — East 59 Street", "value": "0036273"},
+    "9_avenue": {"summary": "0271240 — 9 Avenue", "value": "0271240"},
+    "grand_central_parkway": {
+        "summary": "9012488 — Grand Central Parkway",
+        "value": "9012488",
+    },
+    "missing": {"summary": "9999999 — 도로망에 없는 구간 (404)", "value": "9999999"},
 }
 # 0005_define_vehicle_profiles.sql의 vehicle_profile 행. OpenAPI는 DB에 닿지 않는
 # 시점에 만들어지므로 목록을 조회해 채울 수 없다 -- 프로필이 늘면 여기도 고친다.
@@ -67,32 +79,40 @@ _VEHICLE_PROFILE_EXAMPLES = {
 _BATCH_BODY_EXAMPLES = {
     "sample": {
         "summary": "구간 다건 조회",
-        "description": "마지막 구간은 점수가 없다고 가정한 예시다. `not_found_segment_ids`로 돌아온다.",
+        "description": (
+            "앞의 세 구간은 점수가 있는 구간이다. 마지막 `9999999`는 도로망에 없어"
+            " `not_found_segment_ids`로 돌아온다 — 오류가 아니다."
+        ),
         "value": {
             "vehicle_profile_id": 0,
-            "segment_ids": ["0032900", "0032901", "9999999"],
+            "segment_ids": ["0048146", "0036273", "0271240", "9999999"],
         },
     },
 }
+# 같은 taxi zone(116, Washington Heights) 안에서 이어지는 두 경로다 -- 한쪽은
+# 파크웨이, 다른 쪽은 지상 대로라 실제로 갈아탈 만한 후보다. 구간 순서는 도로망의
+# from/to node가 이어지는 순서 그대로다.
+#
+# 차량 프로필은 3(SUV 소형)으로 둔다 -- standard 점수는 universe(segment x 프로필)
+# 전체에 만들어지므로(comfort_score/universe.py) sentinel이 아닌 프로필로도 행이
+# 있다. 프로필별 점수 차이를 보여주는 편이 기본값 0을 다시 쓰는 것보다 낫다.
 _ROUTE_BODY_EXAMPLES = {
     "sample": {
         "summary": "후보 경로 비교",
+        "description": (
+            "두 경로의 구간 모두 점수가 있는 구간이다. 하나라도 점수가 없으면 이"
+            " endpoint는 404이므로, 예시는 존재하는 구간으로만 채운다."
+        ),
         "value": {
             "vehicle_profile_id": 3,
             "routes": [
                 {
-                    "route_id": "route_a",
-                    "segment_ids": [
-                        "0032900", "0032901", "0032902", "0032903",
-                        "0032904", "0032905", "0032906",
-                    ],
+                    "route_id": "henry_hudson_parkway",
+                    "segment_ids": ["0187217", "0338082", "0338083"],
                 },
                 {
-                    "route_id": "route_b",
-                    "segment_ids": [
-                        "0041250", "0041251", "0041252", "0041253",
-                        "0041254", "0041255",
-                    ],
+                    "route_id": "st_nicholas_avenue",
+                    "segment_ids": ["0038892", "0038913", "0038915"],
                 },
             ],
         },
