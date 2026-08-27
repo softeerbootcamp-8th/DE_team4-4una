@@ -24,13 +24,12 @@
 ## 목차
 
 1. [프로젝트 개요](#1-프로젝트-개요)
-2. [데이터 프로덕트](#2-데이터-프로덕트)
-3. [데이터 파이프라인](#3-데이터-파이프라인)
-4. [데이터 아키텍처](#4-데이터-아키텍처)
-5. [기술적 고민과 결정](#5-기술적-고민과-결정)
-6. [한계와 향후 개선](#6-한계와-향후-개선)
-7. [기술 스택](#7-기술-스택)
-8. [팀원](#8-팀원)
+2. [데이터 파이프라인](#2-데이터-파이프라인)
+3. [AWS 인프라 아키텍처](#3-aws-인프라-아키텍처)
+4. [기술적 고민과 결정](#4-기술적-고민과-결정)
+5. [한계 및 개선 방향](#5-한계-및-개선-방향)
+6. [기술 스택](#6-기술-스택)
+7. [팀원](#7-팀원)
 
 ---
 
@@ -223,38 +222,118 @@ NYC 택시 운행 기록과 도로 환경 데이터를 기반으로 차량 주�
 
 ## 4. 기술적 고민과 결정
 
-> **실시간으로 유입되는 주행 데이터와 변화하는 날씨를 빠르게 반영하면서도,  
-> 일부 데이터나 시스템에 문제가 생겼을 때 서비스가 함께 멈추지 않게 하려면 어떻게 해야 할까?**
+> **지속적으로 유입되는 주행 데이터와 변화하는 날씨를 빠르게 반영하면서도,  
+> 잘못된 데이터가 결과를 오염시키지 않고, 일부 시스템에 문제가 생겨도 서비스를 계속 제공하려면 어떻게 해야 할까?**
 
-저희는 이 문제를 해결하기 위해 데이터 파이프라인의 핵심 가치를  
-**최신성(Freshness)** 과 **가용성(Availability)** 으로 정의했습니다.
+파이프라인의 핵심 가치를  
+**최신성(Freshness)** · **신뢰성(Reliability)** · **가용성(Availability)** 으로 정의한다.
 
-기술을 먼저 정한 뒤 구조를 맞추기보다,  
-각 단계에서 두 핵심 가치를 지키기 위해 필요한 기술과 처리 방식을 선택했습니다.
+특정 기술을 먼저 선택하기보다,
+데이터가 생성되고 API로 제공되는 과정에서 발생하는  
+**지연·데이터 오류·시스템 장애를 어떻게 줄이고 격리할 것인가**를 기준으로 기술과 구조를 선택한다.
 
-| 핵심 가치 | 목표 | 주요 설계 |
+| 핵심 가치 | 핵심 질문 | 설계 방향 |
 | --- | --- | --- |
-| **최신성** | 센서와 날씨 변화를 필요한 갱신 주기 안에 반영 | Kafka, Spark Structured Streaming, Spark/EMR 최적화, Airflow |
-| **가용성** | 일부 데이터·컴포넌트에 문제가 생겨도 가능한 범위에서 계속 제공 | Serving Fallback, Data Quality, Observability, Ops Agent |
+| **최신성 Freshness** | 변화한 데이터를 필요한 시점 안에 반영할 수 있는가? | Streaming 수집, Spark 최적화, 필요한 범위만 재계산, Lag 관측 |
+| **신뢰성 Reliability** | 생성된 데이터와 Score를 믿고 사용할 수 있는가? | 계층별 검증, Quarantine, Circuit Breaker, Idempotency, Versioning |
+| **가용성 Availability** | 일부 데이터나 시스템이 실패해도 서비스를 계속 제공할 수 있는가? | Serving Fallback, 통합 모니터링, Alert, 자동 복구 및 Escalation |
 
-<p align="center"><sub>고민을 클릭하면 측정값·기각한 대안·검증 기준을 담은 상세 페이지로 이동합니다</sub></p>
+---
 
-| 고민 | 결정 |
-| --- | --- |
-| **[Spark 배치를 어디서 실행할까 →](docs/decisions/01-spark-execution-environment.md)** | 부트스트랩 5~10분이 연산 시간보다 긴 워크로드라 **EMR Serverless** 선택. |
-| **[Bronze에 소파일이 쌓인다 →](docs/decisions/02-bronze-small-files.md)** | 트리거 기준을 시간에서 **오프셋**으로 전환. 1시간 **3,545개 → 20개 이하** |
-| **[매시간 Bronze 전체를 스캔한다 →](docs/decisions/03-bronze-partition-pruning.md)** | 쓰기 측 파티션에 맞춰 읽기 프루닝. parquet scan **3회 → 1회** |
-| **[갱신 주기가 다른 데이터를 어떻게 묶을까 →](docs/decisions/05-pipeline-split-and-assets.md)** | 168시간 집계와 15분 보정을 **3개 DAG로 분리**하고 Airflow Asset으로 연결 |
-| **[품질 검증 실패를 어떻게 처리할까 →](docs/decisions/06-row-quarantine-and-circuit-breaker.md)** | 행 단위 **quarantine** + 실패율 **circuit breaker**. 정상 행은 계속 서빙 |
-| **[중간 산출물을 저장해야 할까 →](docs/decisions/07-in-memory-intermediate.md)** | T1·T2를 같은 Spark session으로 연결해 S3 write/read 제거 |
-| **[날씨를 이력으로 쌓아야 할까 →](docs/decisions/08-latest-zone-weather.md)** | 15분 스냅샷 누적을 **존별 최신 1건**으로 재설계, 적용 시각만 점수에 고정 |
+### 최신성 Freshness
 
-<p align="center">
-  <a href="docs/decisions/"><strong>의사결정 기록 템플릿과 전체 목록</strong></a>
-  &nbsp;·&nbsp;
-  <a href="docs/adr/"><strong>ADR</strong></a>
-</p>
+시간당 약 **1,200만 건의 Sensor Event**와
+15분 주기의 날씨 변화를 필요한 시점 안에 반영해야 한다.
 
+단순히 Spark 실행 자원을 늘리기보다  
+**불필요한 Scan·I/O·재계산을 줄이고, 실제 데이터 지연을 직접 관측하는 것**에 우선순위를 둔다.
+
+| 고민 | 결정 | 효과 |
+| --- | --- | --- |
+| **10Hz Sensor Event를 지속적으로 어떻게 수집할까** | **Kafka + Spark Structured Streaming**을 사용하고 30초 단위 Micro Batch로 S3 Bronze에 지속 적재한다 | Producer와 저장 처리 속도를 분리하고 일시적인 처리 지연을 Kafka가 흡수한다 |
+| **Streaming Process가 중단되면 어디서부터 다시 처리할까** | Spark Structured Streaming **Checkpoint**를 통해 처리 Offset을 보존한다 | 재시작 시 처음부터 읽지 않고 마지막 처리 지점부터 이어서 처리한다 |
+| **Streaming Process가 살아 있어도 데이터가 밀리고 있는지 어떻게 알까** | Structured Streaming Progress에서 **Event Time Lag, Kafka Offset Lag, Input/Processed Rows, Batch Duration, Query Status**를 Prometheus Metric으로 수집한다 | Process 생존 여부와 **실제 데이터 최신성**을 분리해 관측한다 |
+| **Bronze에 작은 Parquet File이 계속 쌓인다** | Offset 기반 Trigger와 **출력 Partition 수 제어**를 적용하고, 잔여 소파일은 별도 **Compaction DAG**로 정리한다 | 시간 단위 Batch의 파일 탐색·읽기 비용을 줄이고 지속적인 소파일 누적을 방지한다 |
+| **매시간 Bronze 전체를 Scan한다** | `event_date/hour` 기준 **Target Hour Partition만 읽도록 Partition Pruning**을 적용한다 | Parquet Scan **3회 → 1회**로 감소한다 |
+| **동일 데이터를 여러 Spark Action이 반복 계산한다** | 불필요한 Action을 제거하고 필요한 DataFrame을 재사용한다 | 반복 Scan과 연산을 줄인다 |
+| **T1 결과를 S3에 저장한 뒤 T2에서 다시 읽어야 할까** | T1과 T2를 동일 Spark Application에서 실행하고 DataFrame을 **In-memory로 전달**한다 | 중간 `processed_sensor_event` S3 Write / Read를 제거한다 |
+| **GPS Point마다 전체 LION Segment를 탐색해야 할까** | LION Reference를 **Broadcast**하고 Partition 내부에서 **STRtree + `mapInPandas`** 기반으로 주변 후보 Segment만 탐색한다 | 전체 Sensor × Segment Shuffle을 피하고 Map Matching 탐색 범위를 줄인다 |
+| **Spark Job마다 동일한 Resource를 할당해야 할까** | Job 특성에 따라 **EMR Serverless Resource Profile**을 분리하고 실행 동시성을 제어한다 | 작은 Job의 자원 낭비와 큰 Job의 자원 경합을 줄인다 |
+| **Standard와 Weather의 갱신 주기가 다르다** | Standard / Weather / Current를 **3개 DAG로 분리하고 Airflow Asset으로 연결**한다 | 날씨 변경 때문에 168시간 Standard 집계를 다시 수행하지 않는다 |
+| **15분마다 Weather를 수집할 때마다 Current를 전부 다시 계산해야 할까** | 날씨 값 자체가 아니라 **승차감 영향 등급이 변경된 Zone만 재계산**한다 | 실제 Score 변화가 없는 Zone의 불필요한 계산을 막는다 |
+| **Current 계산에는 최신 날씨만 필요한데 이력을 계속 조회해야 할까** | Serving 계산에는 **Zone별 최신 Weather 1건**을 사용한다 | Current 계산의 조회 범위와 데이터 관리 복잡도를 줄인다 |
+| **Kafka Broker 디스크 사용량이 계속 증가한다** | Batch 크기 증가 가설을 측정으로 기각하고 **zstd Compression**을 적용한다 | Broker 저장량을 약 **42% 감소**시킨다 |
+
+---
+
+### 신뢰성 Reliability
+
+빠르게 계산된 결과라도
+잘못된 데이터에서 만들어졌거나 어떤 기준으로 계산됐는지 추적할 수 없다면
+Serving 데이터로 사용할 수 없다.
+
+따라서 **잘못된 데이터는 조기에 격리하고,
+정상 데이터는 보존하며,
+같은 입력을 다시 처리했을 때 결과의 기준을 추적할 수 있도록 하는 것**을 목표로 한다.
+
+| 고민 | 결정 | 효과 |
+| --- | --- | --- |
+| **일부 Row의 품질 검증 실패 때문에 전체 갱신을 멈춰야 할까** | 실패 Row만 **Quarantine**하고 정상 Row는 계속 처리한다 | 일부 데이터 오류 때문에 정상 데이터까지 버리는 것을 방지한다 |
+| **상류 데이터 전체가 크게 오염된 경우에도 계속 처리해야 할까** | Quarantine 비율이 임계치를 넘으면 **Failure-rate Circuit Breaker**로 전체 반영을 중단한다 | 부분 오류는 격리하되 데이터 전체의 신뢰성이 무너지는 상황은 차단한다 |
+| **모든 품질 검증을 하나의 방식으로 처리해야 할까** | Schema·PK·필수값 같은 **Hard Invariant는 Code / DB에서 검증**하고, 범위·분포·품질 조건은 GX 또는 실행 단계 Validation으로 분리한다 | 검증 성격에 맞는 위치에서 오류를 가장 빠르게 발견한다 |
+| **Sensor Event가 처리 과정에서 조용히 유실되면 어떻게 알까** | Bronze Event가 **정상 Feature의 `sample_count` 또는 Quarantine 중 하나에 반드시 포함되도록 Conservation Rule**을 검증한다 | Silent Data Loss를 탐지한다 |
+| **중복 이벤트나 Replay 데이터를 어떻게 구분할까** | `(trip_id, trip_seq)`를 **Ordering / Replay / Deduplication Key**로 사용한다 | 재처리 시 동일 Sensor Event가 중복 반영되는 것을 방지한다 |
+| **원본 데이터를 정제 과정에서 변경해도 될까** | S3 Bronze Sensor Event는 **Immutable / Append-only**로 보존한다 | 산식이나 처리 로직이 변경되어도 원본부터 다시 계산할 수 있다 |
+| **도로 기준정보가 변경되면 과거 Map Matching 결과를 어떻게 설명할까** | 사용한 LION 기준정보의 **`road_snapshot_date`**를 결과와 함께 저장한다 | 어떤 도로 Snapshot을 기준으로 계산했는지 추적할 수 있다 |
+| **Score 산식이 변경되면 이전 결과와 어떻게 구분할까** | `feature_version`, `scoring_version`, `score_version` 등 **Algorithm Version을 데이터와 함께 관리**한다 | 산식 변경 전후 결과를 구분하고 재현할 수 있다 |
+| **결과가 어떤 실행에서 만들어졌는지 어떻게 추적할까** | Run ID, Data Period, 계산 시각, Snapshot / Version 정보를 결과에 함께 기록한다 | 장애 분석·Backfill·재처리 시 데이터 Lineage를 추적할 수 있다 |
+| **시간 단위 결과를 교체하다 실패하면 기존 정상 결과가 사라지지 않을까** | 결과를 **Staging에서 검증한 뒤 교체하고 Backup을 통해 실패 시 복구**할 수 있도록 구성한다 | 부분적으로 생성된 결과가 정상 데이터처럼 사용되는 것을 방지한다 |
+| **Serving 직전 검증만으로 충분할까** | 실행 중 검증과 별도로 Gold 데이터를 주기적으로 확인하는 **At-rest Audit**을 수행한다 | 이미 적재된 데이터의 Range·Freshness·Reference 이상도 지속적으로 탐지한다 |
+
+---
+
+### 가용성 Availability
+
+데이터와 시스템의 일부가 항상 정상이라고 가정하지 않는다.
+
+일부 최신 데이터가 없거나 Component 장애가 발생하더라도  
+**사용 가능한 데이터와 시스템을 활용해 서비스 제공을 지속하는 것**을 목표로 한다.
+
+| 고민 | 결정 | 효과 |
+| --- | --- | --- |
+| **Current Score가 없는 Segment 때문에 API 요청 전체를 실패시켜야 할까** | **Current Score를 우선 사용하고 없으면 Standard Score로 Fallback**한다 | 날씨 미수집 또는 Zone 외 Segment가 포함되어도 사용 가능한 기준 점수로 응답한다 |
+| **후보 경로마다 DB를 여러 번 조회해야 할까** | 여러 후보 경로의 Segment를 모아 PostgreSQL에서 **Bulk 조회**한다 | 경로·Segment 수 증가에 따른 DB Round Trip을 줄인다 |
+| **여러 Component의 장애를 Application Log만으로 확인할 수 있을까** | **Prometheus + Grafana**에서 EC2 / Container / Kafka / Spark Streaming / Airflow / Serving API 상태를 통합 관측한다 | 장애 지점과 영향 범위를 한 화면에서 파악한다 |
+| **EMR Serverless도 Prometheus로 직접 Scrape해야 할까** | AWS Managed Service인 EMR Serverless는 **CloudWatch Metric을 Grafana에서 조회**한다 | Prometheus 대상이 아닌 Managed Service까지 같은 Monitoring 화면에서 확인한다 |
+| **Monitoring System 자체가 죽으면 장애를 어떻게 알까** | Grafana / Prometheus / Ops Agent 등 핵심 Monitoring Component는 **외부 Probe 방식으로 Self-health를 확인**한다 | 모니터링 시스템 자신의 장애를 내부 Metric에만 의존하지 않는다 |
+| **Ops Agent가 죽으면 장애 알림까지 사라지지 않을까** | Grafana Alert를 **Slack과 Ops Agent에 병렬 전달**한다 | Ops Agent 장애와 관계없이 최초 장애 알림은 Slack으로 전달된다 |
+| **Grafana Alert를 받자마자 자동 복구를 실행할까** | Ops Agent가 **Prometheus에서 상태를 재검증하고 진단한 뒤** 조치 여부를 결정한다 | 일시적인 Alert나 이미 복구된 상태에 불필요한 조치를 수행하지 않는다 |
+| **모든 장애를 자동 복구해야 할까** | Container 재시작처럼 **영향 범위가 작고 되돌릴 수 있는 작업만 Allowlist**로 자동화한다 | 자동 복구로 인한 2차 장애 가능성을 제한한다 |
+| **Kafka Offset Reset·데이터 삭제·DB Schema 변경도 자동화할까** | 데이터와 인프라 상태를 직접 변경하는 작업은 **자동화하지 않고 담당자에게 Escalation**한다 | 복구 속도보다 데이터 정합성과 운영 안전성을 우선한다 |
+| **자동 조치 직후 바로 복구 성공으로 판단할까** | 일정 시간 상태를 Polling해 **실제 복구 여부를 다시 확인**한다 | Container 기동·Metric Scrape 지연을 복구 실패로 오판하지 않는다 |
+| **배치가 실패하면 처음부터 모든 데이터를 다시 처리해야 할까** | Immutable Bronze와 시간 단위 Partition을 기준으로 **대상 시간만 재처리 가능하도록 구성**한다 | 장애 복구 시 재처리 범위를 제한한다 |
+          
+---
+
+### 그 외 엔지니어링 결정
+
+세 가지 핵심 가치 외에도
+데이터가 장기간 운영되고 변경될 수 있다는 점을 고려해
+모델링·비용·문서화 측면의 기준을 함께 관리한다.
+
+| 영역 | 고민 | 결정 |
+| --- | --- | --- |
+| **데이터 모델링** | API 요청 시 필요한 조건과 Pipeline의 저장 Grain이 다르면 Serving이 복잡해지지 않을까 | Gold를 `Segment × Vehicle Profile` 중심으로 설계하고 Serving에서 사용하는 조회 Key와 맞춘다 |
+| **데이터 모델링** | 최신값만 필요한 테이블에 이력을 계속 누적해야 할까 | Standard / Current / Weather 등 사용 목적에 따라 **Snapshot과 Latest-state 저장 방식을 구분**한다 |
+| **버전 관리** | 산식·Reference·데이터 세대 변경을 어떻게 추적할까 | Version / Snapshot Date / 계산 시각을 결과와 함께 저장해 변경 이력을 추적한다 |
+| **비용 최적화** | Spark를 위해 Cluster를 항상 실행해둘 필요가 있을까 | Batch Compute는 **EMR Serverless**를 사용해 필요한 시점에만 실행한다 |
+| **저장 비용** | 오래된 Image와 Object가 계속 누적되어도 될까 | **S3 / ECR Lifecycle Policy**를 적용해 불필요한 저장 데이터를 정리한다 |
+| **문서화** | 빠르게 변경되는 설계를 팀 전체가 동일하게 이해하려면 | 주요 기술 결정은 `docs/decisions/`, ADR은 `docs/adr/`, Schema·Architecture·DQ 규칙은 `context/`에 지속적으로 기록한다 |
+| **AI 협업** | AI Agent마다 서로 다른 프로젝트 전제를 사용하면 구현이 어긋나지 않을까 | Architecture / Schema / Data Quality / Open Question 등을 Context로 관리해 **팀원과 AI Agent가 동일한 기준을 참조**하도록 한다 |
+
+---
+
+각 의사결정의 측정값·대안 비교·검증 과정은 [`docs/decisions/`](docs/decisions/)에 기록한다.
 ---
 
 ## 5. 한계 및 개선 방향
