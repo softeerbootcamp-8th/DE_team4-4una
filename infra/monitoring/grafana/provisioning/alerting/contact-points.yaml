@@ -18,22 +18,21 @@ contactPoints:
         settings:
           token: $GRAFANA_SLACK_BOT_TOKEN
           recipient: $GRAFANA_SLACK_ALERT_CHANNEL
-          title: '🚨 {{ .CommonLabels.service }} 알림 감지'
+          title: '{{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} [Grafana] {{ .CommonLabels.alertname }}'
           text: |
-            State: {{ .Status }}
-            {{ range .Alerts }}Alert: {{ .Labels.alertname }}
-            Severity: {{ .Labels.severity }}
+            상태: {{ if eq .Status "firing" }}발생{{ else }}해결{{ end }}
+            {{ range .Alerts }}알림: {{ .Labels.alertname }}
+            심각도: {{ .Labels.severity }}
             발생 시각: {{ .StartsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }})
+            {{ if eq $.Status "resolved" }}해결 시각: {{ .EndsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .EndsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }}){{ end }}
             {{ .Annotations.summary }}
-            현재 값: {{ .ValueString }}
+            평가 값: {{ .ValueString }}
             {{ if .DashboardURL }}Dashboard: {{ .DashboardURL }}{{ end }}
             {{ end }}
-            Ops Agent가 재검증 후 진단과 조치 여부를 판단합니다.
+            발신: Grafana 최초 감지 알림
 
-  # 인프라 alert 전용(#504). ops-agent contact point를 재사용하지 않는 이유는 두 가지다.
-  #   1. 그쪽 Slack 문구가 "Ops Agent가 재검증 후 진단/조치를 진행합니다"인데
-  #      디스크 경고는 자동 조치 대상이 아니라 사실과 다르다.
-  #   2. ops-agent webhook을 불필요하게 호출하지 않는다.
+  # 인프라 alert 전용(#504). 최초 Slack 형식은 공통으로 맞추되,
+  # stream-processor 전용인 ops-agent webhook을 불필요하게 호출하지 않는다.
   # Slack 자격증명은 ops-agent와 같은 env var를 재사용한다 -- 새 시크릿이 없다.
   # rules.yaml의 infrastructure 그룹(EC2 host alert + self-health alert)이 전부
   # service: infrastructure 라벨로 이 contact point를 그대로 재사용한다.
@@ -45,9 +44,15 @@ contactPoints:
         settings:
           token: $GRAFANA_SLACK_BOT_TOKEN
           recipient: $GRAFANA_SLACK_ALERT_CHANNEL
-          title: '💾 {{ .CommonLabels.alertname }}'
+          title: '{{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} [Grafana] {{ .CommonLabels.alertname }}'
           text: |
-            {{ range .Alerts }}{{ .Annotations.summary }}
-            현재 값: {{ .ValueString }}
+            상태: {{ if eq .Status "firing" }}발생{{ else }}해결{{ end }}
+            {{ range .Alerts }}알림: {{ .Labels.alertname }}
+            심각도: {{ .Labels.severity }}
+            발생 시각: {{ .StartsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }})
+            {{ if eq $.Status "resolved" }}해결 시각: {{ .EndsAt | date "2006-01-02 15:04:05 MST" }} (한국시간: {{ .EndsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 MST" }}){{ end }}
+            {{ .Annotations.summary }}
+            평가 값: {{ .ValueString }}
+            {{ if .DashboardURL }}Dashboard: {{ .DashboardURL }}{{ end }}
             {{ end }}
-            자동 조치 없음 -- 확인이 필요합니다.
+            발신: Grafana 최초 감지 알림

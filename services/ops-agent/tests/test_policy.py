@@ -199,6 +199,43 @@ class TestActionSpecs:
             "params": [90],
         }
 
+        lag_rule = rules["BronzeIngestionLagGrowing"]
+        lag_expression = lag_rule["data"][0]["model"]["expr"]
+        assert lag_rule["for"] == "3m"
+        assert lag_expression.count("> bool 1200000") == 2
+        assert "[5m:]" in lag_expression
+        assert 'stream_processor_kafka_end_offset_sum{job="stream-processor"}[5m]' in (
+            lag_expression
+        )
+
+    def test_grafana_slack_receivers_share_state_and_time_format(self):
+        from pathlib import Path
+
+        import yaml
+
+        repo_root = Path(__file__).resolve().parents[3]
+        document = yaml.safe_load(
+            (
+                repo_root
+                / "infra/monitoring/grafana/provisioning/alerting/contact-points.yaml"
+            ).read_text()
+        )
+        slack_receivers = [
+            receiver
+            for contact_point in document["contactPoints"]
+            for receiver in contact_point["receivers"]
+            if receiver["type"] == "slack"
+        ]
+
+        assert len(slack_receivers) == 2
+        assert len({receiver["settings"]["title"] for receiver in slack_receivers}) == 1
+        for receiver in slack_receivers:
+            message = receiver["settings"]["text"]
+            assert "Grafana 최초 감지 알림" in message
+            assert ".StartsAt" in message
+            assert ".EndsAt" in message
+            assert 'eq $.Status "resolved"' in message
+
     def test_stream_processor_down_is_critical_within_two_minutes(self):
         from pathlib import Path
 

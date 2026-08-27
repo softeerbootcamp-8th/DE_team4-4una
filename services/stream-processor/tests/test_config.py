@@ -43,11 +43,24 @@ def test_from_env_applies_defaults_when_missing() -> None:
     # 기본으로 켜 둔다. 600,000건이 parquet 약 128MB다.
     assert config.min_offsets_per_trigger == 600000
     # 복구 배치 상한도 기본으로 켜 둔다 -- 하한의 2배(#482).
-    assert config.max_offsets_per_trigger == 120000
+    assert config.max_offsets_per_trigger == 1200000
     # Spark 기본값 1 GiB로는 복구 배치를 못 버틴다(#482).
     assert config.driver_memory == "4g"
     assert config.max_trigger_delay == "30s"
     assert config.bronze_output_partitions == 2
+
+
+def test_deploy_workflow_uses_the_same_streaming_defaults() -> None:
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    workflow = (repo_root / ".github/workflows/deploy-stream-processor.yml").read_text()
+
+    assert "STREAM_TRIGGER_INTERVAL_SECONDS || '30'" in workflow
+    assert "STREAM_MIN_OFFSETS_PER_TRIGGER || '600000'" in workflow
+    assert "STREAM_MAX_OFFSETS_PER_TRIGGER || '1200000'" in workflow
+    assert "STREAM_MAX_TRIGGER_DELAY || '30s'" in workflow
+    assert "STREAM_BRONZE_OUTPUT_PARTITIONS || '2'" in workflow
 
 
 def test_from_env_treats_empty_values_as_unset() -> None:

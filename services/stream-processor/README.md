@@ -31,8 +31,8 @@ export STREAM_MIN_OFFSETS_PER_TRIGGER=600000
 # 위 조건과 항상 같이 걸린다. 양이 모자라도 이 시간이 지나면 배치를 실행한다.
 # 이게 없으면 한산할 때 배치가 아예 돌지 않아 멈춘 것처럼 보인다.
 export STREAM_MAX_TRIGGER_DELAY=30s
-# 복구 backlog가 한 번에 커지지 않도록 30초 batch를 12만 건으로 제한한다.
-export STREAM_MAX_OFFSETS_PER_TRIGGER=120000
+# 복구 backlog가 한 번에 커지지 않도록 30초 batch를 120만 건으로 제한한다.
+export STREAM_MAX_OFFSETS_PER_TRIGGER=1200000
 # 배치 한 번이 남길 파일 수. 2 vCPU Spark 런타임에서는 두 writer task가
 # coalesce(1)의 단일 S3 writer 병목을 피하면서 파일 수를 제한한다.
 export STREAM_BRONZE_OUTPUT_PARTITIONS=2
@@ -97,7 +97,7 @@ docker run --rm --network host \
 ## 30초 Bronze freshness canary
 
 기본값은 `processingTime=30s`, `maxTriggerDelay=30s`,
-`maxOffsetsPerTrigger=120000`이다. 센서 `event_time`이 04:00인 이벤트는
+`maxOffsetsPerTrigger=1200000`이다. 센서 `event_time`이 04:00인 이벤트는
 다음 batch에서 읽혀도 `event_date=.../hour=04`에 기록된다.
 
 실제 EC2 canary에서는 Spark Streaming dashboard로 연속 15분 이상 다음을 확인한다.

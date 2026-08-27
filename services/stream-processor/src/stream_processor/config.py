@@ -59,9 +59,11 @@ class StreamConfig:
             max_trigger_delay=source.get("STREAM_MAX_TRIGGER_DELAY") or "30s",
             # 복구 배치 상한(#482). min_offsets_per_trigger는 하한이라, 상한이 없으면
             # 장애 후 재시작할 때 첫 micro-batch가 그동안 Kafka에 쌓인 offset을 전부
-            # 소비하지 않도록 범위를 나눈다. 30초 canary에서는 120,000건으로
+            # 소비하지 않도록 범위를 나눈다. 30초 canary에서는 1,200,000건으로
             # batch duration과 복구 지연을 함께 제한한다. 0이면 상한 없음(이전 동작).
-            max_offsets_per_trigger=int(source.get("STREAM_MAX_OFFSETS_PER_TRIGGER") or "120000"),
+            max_offsets_per_trigger=int(
+                source.get("STREAM_MAX_OFFSETS_PER_TRIGGER") or "1200000"
+            ),
             # 2 vCPU 실행 환경에서는 write task를 두 개로 두면 coalesce(1)의 단일
             # S3 writer 병목을 피하면서 파일 수가 과도하게 늘지 않는다.
             bronze_output_partitions=int(source.get("STREAM_BRONZE_OUTPUT_PARTITIONS") or "2"),
