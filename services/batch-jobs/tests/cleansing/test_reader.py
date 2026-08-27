@@ -111,6 +111,19 @@ def test_target_hour_reads_only_the_matching_partition_directory(spark, tmp_path
     assert {row["event_id"] for row in rows} == {"in-hour-5"}
 
 
+def test_target_hour_reads_compacted_parquet_files(spark, tmp_path):
+    root = tmp_path / "bronze"
+    target_hour = datetime(2024, 2, 1, 5, tzinfo=UTC)
+    _write_partition(spark, root, target_hour, valid_value(event_id="compacted"))
+    partition = root / "event_date=2024-02-01" / "hour=05"
+    source = next(partition.glob("part-*.parquet"))
+    source.rename(partition / "compacted-test.parquet")
+
+    rows = read_bronze_sensor_events(spark, root, target_hour).collect()
+
+    assert {row["event_id"] for row in rows} == {"compacted"}
+
+
 def test_target_hour_partition_is_read_even_if_event_time_disagrees(spark, tmp_path):
     # 파티션 배정과 event_time이 어긋나는 경우(늦은 도착 등)에도 pruning 단계는
     # 파티션 위치만으로 읽는다. 실제 시간 필터링은 이후 in-memory 필터가 맡는다.

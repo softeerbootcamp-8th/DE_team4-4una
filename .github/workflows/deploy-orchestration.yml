@@ -165,6 +165,72 @@ jobs:
           done
           EOF
 
+      - name: Verify and configure sensor-events compaction
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          ssh "${EC2_USER}@${EC2_HOST}" \
+            "REPO_DIR='$REPO_DIR' \
+            ENV_FILE='$ENV_FILE' \
+            HEALTH_TIMEOUT='$HEALTH_TIMEOUT' bash -s" <<'EOF'
+          set -euo pipefail
+
+          cd "$REPO_DIR"
+          compose=(docker compose --env-file "$ENV_FILE" -f infra/compose/airflow.yaml)
+
+          actual_root=$("${compose[@]}" exec -T airflow-scheduler python -c \
+            'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_ROOT_URI", ""))')
+          case "$actual_root" in
+            s3://*/bronze/sensor-events|s3://*/bronze/sensor-events/) ;;
+            *)
+              echo "::error::$ENV_FILE의 SENSOR_EVENTS_COMPACTION_ROOT_URI를 운영 S3 Bronze 경로로 설정해야 합니다."
+              exit 1
+              ;;
+          esac
+
+          max_groups=$("${compose[@]}" exec -T airflow-scheduler python -c \
+            'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN", ""))')
+          case "$max_groups" in
+            ''|*[!0-9]*)
+              echo "::error::SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN은 0 이상의 정수여야 합니다."
+              exit 1
+              ;;
+          esac
+
+          enabled=$("${compose[@]}" exec -T airflow-scheduler python -c \
+            'import os; print(os.environ.get("SENSOR_EVENTS_COMPACTION_ENABLED", ""))')
+          case "$enabled" in
+            true|false) ;;
+            *)
+              echo "::error::SENSOR_EVENTS_COMPACTION_ENABLED는 true 또는 false여야 합니다."
+              exit 1
+              ;;
+          esac
+
+          elapsed=0
+          interval=5
+          until "${compose[@]}" exec -T airflow-scheduler airflow dags list 2>/dev/null \
+            | grep -q '^bronze_sensor_events_compaction '; do
+            if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
+              echo "::error::bronze_sensor_events_compaction DAG 등록을 기다리다 시간 초과했습니다."
+              exit 1
+            fi
+            sleep "$interval"
+            elapsed=$((elapsed + interval))
+          done
+
+          if [ "$enabled" = "true" ]; then
+            "${compose[@]}" exec -T airflow-scheduler \
+              airflow dags unpause bronze_sensor_events_compaction
+          else
+            "${compose[@]}" exec -T airflow-scheduler \
+              airflow dags pause bronze_sensor_events_compaction
+          fi
+          echo "sensor-events compaction: root=$actual_root, max_groups_per_run=$max_groups, enabled=$enabled"
+          EOF
+
       - name: Job summary
         if: always()
         env:

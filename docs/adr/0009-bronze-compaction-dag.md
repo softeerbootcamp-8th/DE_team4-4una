@@ -116,3 +116,19 @@ Airflow 스케줄러 컨테이너 안에서 직접 돈다 — docker-outside-of-
 - `services/stream-processor`의 write-side fix: `config.py`의
   `min_offsets_per_trigger`/`max_trigger_delay`, `bronze_sink.py`의
   `coalesce(bronze_output_partitions)`(`origin/develop`, 이 브랜치엔 미반영)
+
+## 후속 결정 — sensor-events compaction (#585, #601)
+
+2026-08-26의 #585는 이 ADR이 sensor-events를 제외할 때의 전제가 더 이상 운영
+reader에 적용되지 않음을 확인했다. #345 이후 hourly cleansing은 Bronze root가 아니라
+정확한 `event_date/hour` 파티션을 읽으므로 root의 `_spark_metadata/`를 사용하지 않고,
+같은 파티션에 생성된 `compacted-*.parquet`도 일반 Parquet 파일로 발견한다. 이에 따라
+sensor-events는 별도 `bronze_sensor_events_compaction` DAG가 row-group 단위로 병합하고,
+`_spark_metadata/`는 writer 전용 기록으로 남겨 둔다. 원래 제외 판단은 당시 결정의
+근거를 보존하기 위해 위 본문에서 삭제하지 않는다.
+
+S3에서 압축 결과 생성과 원본 삭제는 원자적이지 않다. 2026-08-27의 #601은 이 교체
+구간에 hourly reader가 원본과 결과를 함께 읽는 것을 막기 위해 compaction task와 모든
+EMR Serverless job을 기존 one-slot `emr_serverless` pool로 직렬화했다. 운영 배포는
+sensor-events S3 root를 필수로 검증하고 DAG pause 상태를 명시적으로 적용하며, 최초
+실행은 한 시간 파티션만 처리하는 canary로 제한한다.

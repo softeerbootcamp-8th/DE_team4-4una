@@ -484,6 +484,34 @@ path/`file://`/`s3://` URI를 모두 받고, 반환값도 항상 URI다. 운영�
 나중에 구분할 수 있는 곳은 이 테이블뿐이다 — `latest_zone_weather`는 실패한
 zone을 아예 건드리지 않으므로 흔적이 남지 않는다.
 
+## Bronze sensor-events compaction 운영 (#585, #601)
+
+`bronze_sensor_events_compaction`은 매일 03:47 UTC에 닫힌 시간 파티션의
+`part-*.parquet`을 약 128 MiB의 `compacted-*.parquet`으로 병합한다. 결과 footer의
+row 수가 원본 합과 일치할 때만 원본을 삭제하며 `_spark_metadata/`는 건드리지 않는다.
+
+운영 설정은 다른 orchestration 런타임 설정과 동일하게 EC2의
+`/etc/orchestration/orchestration.env`(또는 `ORCHESTRATION_ENV_FILE`이 가리키는 파일)에서
+관리한다.
+
+| 변수 | 값 | 설명 |
+| --- | --- | --- |
+| `SENSOR_EVENTS_COMPACTION_ROOT_URI` | `s3://<data-lake>/bronze/sensor-events` | 운영 필수, 다른 경로나 로컬 경로면 배포 실패 |
+| `SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN` | 최초 `1` | 최초 S3 canary가 처리할 시간 파티션 수 |
+| `SENSOR_EVENTS_COMPACTION_ENABLED` | `true` | `false`이면 배포 시 DAG를 pause |
+
+배포가 완료되면 `SENSOR_EVENTS_COMPACTION_ENABLED` 값에 따라 DAG의 pause 상태가
+자동으로 맞춰진다. 첫 실행 후에는 압축 전후 row 수, `compacted-*` 생성, 원본 삭제,
+`_spark_metadata/` 보존과 다음 hourly Spark read 결과를 확인한다. 검증을 통과하면
+`SENSOR_EVENTS_COMPACTION_MAX_GROUPS_PER_RUN`을 일일 생성 파티션을 따라잡을 값으로
+높인다. `0`은 안전 경계를 통과한 모든 파티션을 한 번에 처리하므로 과거 backlog가
+큰 첫 실행에는 쓰지 않는다.
+
+압축 파일을 올리고 원본을 지우기 전 hourly Spark가 같은 파티션을 읽으면 중복될 수
+있다. 이를 막기 위해 compaction task와 EMR Serverless job은 모두 한 slot인
+`emr_serverless` pool을 사용한다. 따라서 compaction이 길어지면 다음 hourly job이
+기다리게 되므로 canary 이후에도 실행 시간과 queue 대기 시간을 함께 확인한다.
+
 ## current_score_pipeline (#231)
 
 `standard_score_pipeline`/`zone_weather_pipeline` 둘 다 직접 쓰지 않는

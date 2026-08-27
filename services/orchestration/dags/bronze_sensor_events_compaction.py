@@ -6,6 +6,7 @@ import datetime
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from emr_serverless import EMR_SERVERLESS_POOL
 from notifications import (
     on_failure_callback,
     on_retry_callback,
@@ -50,7 +51,10 @@ with DAG(
     on_success_callback=on_success_callback,
     tags=["ops", "bronze", "sensor-events"],
 ) as dag:
+    # 압축 결과를 올린 뒤 원본을 지우기 전 Spark가 읽으면 같은 row를 두 번 셀 수 있다
+    # hourly EMR 작업과 같은 1-slot pool을 사용해 파일 교체와 읽기를 직렬화한다
     compact_sensor_events = PythonOperator(
         task_id="compact_sensor_events",
         python_callable=_compact_sensor_events,
+        pool=EMR_SERVERLESS_POOL,
     )
