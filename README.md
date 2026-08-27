@@ -1,57 +1,102 @@
 <div align="center">
 
-<h1>NYC Road Comfort Data Platform</h1>
+<h1>NYC Road Comfort Score API</h1>
 
-<h3>조금 더 걸리더라도, 더 편안한 길을 선택할 수 있도록</h3>
+<img width="2400" height="760" alt="banner_panel" src="https://github.com/user-attachments/assets/c088a8f9-f45d-4dd1-bbc4-e7da6aec0a39" />
+
+<h3>"조금 더 걸리더라도, 더 편안한 길을 선택할 수 있도록"</h3>
 
 <p>
   <strong>
     도로별 승차감 데이터를 구축해 내비게이션의<br/>
-    ‘편안한 경로 우선’ 기능을 가능하게 하는 데이터 플랫폼입니다
+    ‘편안한 경로 우선’ 기능을 가능하게 하는 API 제공 프로덕트입니다.
   </strong>
 </p>
 
 <p>
   <a href="http://43.203.192.129:8501/"><strong>대시보드 </strong></a>
-  
 </p>
-
-![Python](https://img.shields.io/badge/Python_3.12-3776AB?style=flat-square&logo=python&logoColor=white)
-![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white)
-![Spark](https://img.shields.io/badge/Apache_Spark-E25A1C?style=flat-square&logo=apachespark&logoColor=white)
-![Airflow](https://img.shields.io/badge/Apache_Airflow-017CEE?style=flat-square&logo=apacheairflow&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonaws&logoColor=white)
 
 </div>
 
 ---
 
+## 목차
+
+1. [프로젝트 개요](#1-프로젝트-개요)
+2. [데이터 프로덕트](#2-데이터-프로덕트)
+3. [데이터 파이프라인](#3-데이터-파이프라인)
+4. [데이터 아키텍처](#4-데이터-아키텍처)
+5. [기술적 고민과 결정](#5-기술적-고민과-결정)
+6. [한계와 향후 개선](#6-한계와-향후-개선)
+7. [기술 스택](#7-기술-스택)
+8. [팀원](#8-팀원)
+
+---
+
 ## 1. 프로젝트 개요
 
-### 누구의 문제를 해결하는가?
+### 대상
 
 - 도로별 승차감 정보를 경로 추천에 활용하려는 **내비게이션 시스템 개발자**
 
-### 어떤 문제인가?
+### 문제
 
 - 기존 경로 추천은 시간·거리·비용 중심으로, **승차감 기준이 부족함**
 - 도로 세그먼트별 승차감을 동일한 기준으로 비교할 데이터셋이 없음
 
-### 어떻게 해결할 것인가?
+### 해결 방법
 
-실제 NYC 운행 기록과 도로 환경을 바탕으로 차량 주행 센서 데이터를 생성하고,
-도로 세그먼트 × 차량 프로필별 **Comfort Score**를 제공합니다. 내비게이션이 전달한 여러 후보 경로의 점수를 계산해 가장 편안한 경로를
+NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 데이터를 생성하고,
+도로 Segment × 차량 Profile별 **Comfort Score**를 제공합니다. 내비게이션이 전달한 여러 후보 경로의 점수를 계산해 가장 편안한 경로를
 비교할 수 있게 합니다.
 
+### 기대 효과
 
+| 관점 | AS-IS | TO-BE |
+| --- | --- | --- |
+| 경로 추천 | 시간·거리 중심 | 승차감까지 고려 |
+| 승차감 정보 | 도로별 비교 데이터 없음 | Segment 단위 Comfort Score 제공 |
+| 환경 변화 | 현재 도로 상황 반영 어려움 | 최신 날씨를 반영한 Current Score 제공 |
+
+### API 명세서
+
+<img width="2218" height="982" alt="image" src="https://github.com/user-attachments/assets/c3af43fc-4c18-4cd3-9de8-5135bab36149" />
 
 ---
 
-## 2. 데이터 파이프라인
+## 2. 데이터 프로덕트
+
+### Input
+
+| 데이터 | 역할 |
+| --- | --- |
+| NYC TLC HVFHV | 실제 차량 운행 패턴 |
+| LION | 도로 Segment 기준정보 |
+| Pavement Ratings | 도로 노면 상태 |
+| Speed Humps | 도로 시설 정보 |
+| Taxi Zone | 공간 단위 및 날씨 매핑 |
+| Open-Meteo | 현재 기상 상태 |
+| Vehicle Profile | 차량 특성별 승차감 차이 |
+
+### Output
+
+| Output | Grain / 대상 | 주요 내용 |
+| --- | --- | --- |
+| **Hourly Comfort Score** | `1시간 × Segment × Vehicle Profile` | 센서 Feature를 기반으로 수직·종·횡 방향의 **0~100 Comfort Score** 계산 |
+| **Standard Comfort Score** | `Segment × Vehicle Profile` | 최근 **168시간(1주일)** 데이터를 집계해 기준 승차감과 **Confidence** 제공 |
+| **Current Comfort Score** | `Segment × Vehicle Profile` | Standard Score에 **최신 날씨 영향**을 반영한 현재 승차감 점수 |
+| **Serving API** | 후보 경로 | 후보 경로의 Segment 목록을 입력받아 **경로별 Comfort Score를 계산하고 추천 경로 제공** |
+
+---
+
+## 3. 데이터 파이프라인
+
+<img width="1165" height="413" alt="image" src="https://github.com/user-attachments/assets/0d29cdb7-f3e5-4af0-a1e6-17efa25f1021" />
+
 
 <p align="center"><sub>단계 이름으로 클릭한 뒤 항목을 펼치면 Input 규모, 처리 내용, Output을 확인할 수 있습니다</sub></p>
+
 <table align="center">
   <tr>
     <td align="center"><a href="#stage-source"><b>① Source</b></a><br/><sub>원천·기준정보</sub></td>
@@ -76,20 +121,8 @@
   </tr>
 </table>
 
-
-
-<details>
-<summary><strong>전체 아키텍처 다이어그램 보기</strong></summary>
-
-![NYC Road-Segment Comfort Score Platform 아키텍처](docs/images/software-architecture-pipeline-v5.png)
-
-</details>
-
-
-
-## 3. 데이터 상세
-
 <a id="stage-source"></a>
+
 <details>
 <summary><strong>① Source — 원천 데이터와 시뮬레이션 환경</strong></summary>
 
@@ -103,6 +136,7 @@
 </details>
 
 <a id="stage-simulation"></a>
+
 <details>
 <summary><strong>② Simulation — TLC 운행을 10Hz 센서 이벤트로 재생</strong></summary>
 
@@ -116,6 +150,7 @@
 </details>
 
 <a id="stage-bronze"></a>
+
 <details>
 <summary><strong>③ Bronze — Kafka 원본을 S3에 보존</strong></summary>
 
@@ -129,6 +164,7 @@
 </details>
 
 <a id="stage-features"></a>
+
 <details>
 <summary><strong>④ Silver Features — 정제·중복 제거·GPS 맵매칭</strong></summary>
 
@@ -142,6 +178,7 @@
 </details>
 
 <a id="stage-hourly"></a>
+
 <details>
 <summary><strong>⑤ Hourly Score — 수직·종·횡 승차감 계산</strong></summary>
 
@@ -155,6 +192,7 @@
 </details>
 
 <a id="stage-standard"></a>
+
 <details>
 <summary><strong>⑥ Standard Gold — 최근 168시간 기준 점수</strong></summary>
 
@@ -170,6 +208,7 @@
 </details>
 
 <a id="stage-current"></a>
+
 <details>
 <summary><strong>⑦ Current Gold — 최신 날씨 반영</strong></summary>
 
@@ -183,6 +222,7 @@
 </details>
 
 <a id="stage-serving"></a>
+
 <details>
 <summary><strong>⑧ Serving API — 최종 Comfort Score 제공</strong></summary>
 
@@ -197,7 +237,31 @@
 
 ---
 
-## 4. 기술적 고민과 결정
+## 4. 데이터 아키텍처
+
+<div align="center">
+
+<img width="739" height="461" alt="image" src="https://github.com/user-attachments/assets/bc953ad3-d688-43e9-85c9-a0c3fa98d1de" />
+
+</div>
+
+---
+
+## 5. 기술적 고민과 결정
+
+> **실시간으로 유입되는 주행 데이터와 변화하는 날씨를 빠르게 반영하면서도,  
+> 일부 데이터나 시스템에 문제가 생겼을 때 서비스가 함께 멈추지 않게 하려면 어떻게 해야 할까?**
+
+저희는 이 문제를 해결하기 위해 데이터 파이프라인의 핵심 가치를  
+**최신성(Freshness)** 과 **가용성(Availability)** 으로 정의했습니다.
+
+기술을 먼저 정한 뒤 구조를 맞추기보다,  
+각 단계에서 두 핵심 가치를 지키기 위해 필요한 기술과 처리 방식을 선택했습니다.
+
+| 핵심 가치 | 목표 | 주요 설계 |
+| --- | --- | --- |
+| **최신성** | 센서와 날씨 변화를 필요한 갱신 주기 안에 반영 | Kafka, Spark Structured Streaming, Spark/EMR 최적화, Airflow |
+| **가용성** | 일부 데이터·컴포넌트에 문제가 생겨도 가능한 범위에서 계속 제공 | Serving Fallback, Data Quality, Observability, Ops Agent |
 
 <p align="center"><sub>고민을 클릭하면 측정값·기각한 대안·검증 기준을 담은 상세 페이지로 이동합니다</sub></p>
 
@@ -219,7 +283,7 @@
 
 ---
 
-## 5. 한계와 향후 개선
+## 6. 한계와 향후 개선
 
 현재 프로토타입이 알고 있는 한계와, 이어서 진행할 개선 방향입니다.
 
@@ -250,7 +314,52 @@
 
 ---
 
-## 6. 팀원
+## 7. 기술 스택
+
+<div align="center">
+
+### Data Engineering
+
+![Python](https://img.shields.io/badge/Python_3.12-3776AB?style=flat-square&logo=python&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white)
+![Apache Spark](https://img.shields.io/badge/Apache_Spark-E25A1C?style=flat-square&logo=apachespark&logoColor=white)
+![Apache Airflow](https://img.shields.io/badge/Apache_Airflow-017CEE?style=flat-square&logo=apacheairflow&logoColor=white)
+![Great Expectations](https://img.shields.io/badge/Great_Expectations-FF6310?style=flat-square)
+
+### Storage / Serving
+
+![Amazon S3](https://img.shields.io/badge/Amazon_S3-569A31?style=flat-square&logo=amazons3&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Amazon RDS](https://img.shields.io/badge/Amazon_RDS-527FFF?style=flat-square&logo=amazonrds&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React_19-61DAFB?style=flat-square&logo=react&logoColor=black)
+![Leaflet](https://img.shields.io/badge/Leaflet-199900?style=flat-square&logo=leaflet&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white)
+
+### Infrastructure / Compute
+
+![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white)
+![Amazon EC2](https://img.shields.io/badge/Amazon_EC2-FF9900?style=flat-square&logo=amazonec2&logoColor=white)
+![Amazon EMR](https://img.shields.io/badge/EMR_Serverless-FF9900?style=flat-square&logo=amazonwebservices&logoColor=white)
+![Amazon ECR](https://img.shields.io/badge/Amazon_ECR-FF9900?style=flat-square&logo=amazonwebservices&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
+
+### Observability
+
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=flat-square&logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white)
+![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat-square&logo=slack&logoColor=white)
+
+### CI / CD
+
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=flat-square&logo=githubactions&logoColor=white)
+![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)
+
+</div>
+
+---
+
+## 8. 팀원
 
 <table align="center">
   <tr>
