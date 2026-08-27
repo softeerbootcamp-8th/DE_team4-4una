@@ -48,7 +48,7 @@ _PROFILE_FALLBACK_FIELD = Field(
 class ComfortScore(BaseModel):
     """한 구간 x 차량 프로필의 최신 승차감 점수."""
 
-    segment_id: str = Field(description="LION 도로 구간 식별자.", examples=["0012345"])
+    segment_id: str = Field(description="LION 도로 구간 식별자.", examples=["0048146"])
     vehicle_profile_id: int = Field(
         description="이 점수를 계산한 차량 프로필. 대체가 일어났다면 대체된 쪽이다.",
         examples=[0],
@@ -100,7 +100,7 @@ class ComfortScoreBatchRequest(BaseModel):
             "조회할 구간 목록. 같은 id가 여러 번 와도 한 번만 조회하며, 첫 등장 "
             "순서가 응답 순서가 된다."
         ),
-        examples=[["0012345", "0012346"]],
+        examples=[["0048146", "0036273"]],
     )
 
 
@@ -120,7 +120,7 @@ class ComfortScoreBatchResponse(BaseModel):
             "점수가 없어 `scores`에 담기지 않은 구간. 오류가 아니라 아직 점수가 "
             "계산된 적 없는 구간이다."
         ),
-        examples=[["0099999"]],
+        examples=[["9999999"]],
     )
 
 
@@ -143,7 +143,7 @@ class RouteCandidate(BaseModel):
             "경로가 지나는 구간을 주행 순서대로. 같은 구간을 두 번 지나면 두 번 "
             "넣는다 — 그만큼 실제로 주행하므로 점수에도 두 번 반영된다."
         ),
-        examples=[["0012345", "0012346", "0012347"]],
+        examples=[["0038892", "0038913", "0038915"]],
     )
 
 

@@ -128,12 +128,6 @@ export default function App() {
             </span>
             <span className="metric__value">{scopeCount.toLocaleString()}</span>
           </div>
-          <div className="metric">
-            <span className="metric__label">Drawn</span>
-            <span className="metric__value">
-              {loading ? "—" : (meta?.segment_count ?? 0).toLocaleString()}
-            </span>
-          </div>
         </div>
       </div>
 
