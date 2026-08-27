@@ -212,14 +212,28 @@ monthly result.
 
 ### Bronze compaction
 
-Bronze `zone_weather_snapshot` accumulates small files from its 15-minute writer. An
-independent, low-frequency `zone_weather_compaction` DAG (no outlets, does not block or gate
-other DAGs) merges same-partition objects once they are old enough that no further
-writes are expected, verifying row counts before discarding the originals.
-`sensor-events` was dropped from this DAG's scope after discovering that in-place
-compaction of a Structured Streaming FileStreamSink directory is unsafe (the sink's
-`_spark_metadata/` commit log would go stale); its backlog cleanup is deferred to a
-follow-up issue. See [ADR-0009](../docs/adr/0009-bronze-compaction-dag.md).
+Bronze small files are maintained by two independent, low-frequency DAGs. Both
+verify output row counts before deleting source objects and have no outlets, so
+they do not trigger or gate downstream datasets.
+
+- `zone_weather_compaction` merges completed weather date partitions at 04:17 UTC.
+- `bronze_sensor_events_compaction` merges closed sensor-event hour partitions at
+  03:47 UTC. It reads Parquet row groups incrementally, targets approximately
+  128 MiB outputs, leaves `_spark_metadata/` untouched, and skips partitions
+  modified inside its two-hour safety margin.
+
+Hourly cleansing now reads an exact `event_date/hour` partition rather than the
+FileStreamSink root, so it discovers the resulting `compacted-*.parquet` objects
+without consulting the root `_spark_metadata/` log. Creating the compacted objects
+and deleting their sources is not an atomic S3 operation; the compaction task and
+EMR jobs therefore share the one-slot `emr_serverless` Airflow pool. This prevents
+an hourly reader from observing both copies during the replacement window.
+
+The orchestration deployment requires an explicit S3 sensor-events root, verifies
+the scheduler received it, and declaratively applies the DAG's enabled state. A
+new environment starts with one hour group per run for its canary; the operator
+must raise that limit after validating row conservation and the following hourly
+read. See [ADR-0009](../docs/adr/0009-bronze-compaction-dag.md) and issues #585/#601.
 
 ### Operational monitoring
 
