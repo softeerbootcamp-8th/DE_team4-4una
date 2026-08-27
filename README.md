@@ -42,30 +42,36 @@
 
 ### 문제
 
-- 기존 경로 추천은 시간·거리·비용 중심으로, **승차감 기준이 부족함**
-- 도로 세그먼트별 승차감을 동일한 기준으로 비교할 데이터셋이 없음
+- 기존 경로 추천은 시간·거리·비용 중심으로 제공되어, 도로별 승차감을 비교할 수 있는 데이터의 부재
 
 ### 해결 방법
 
-NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 데이터를 생성하고,
-도로 Segment × 차량 Profile별 **Comfort Score**를 제공합니다. 내비게이션이 전달한 여러 후보 경로의 점수를 계산해 가장 편안한 경로를
-비교할 수 있게 합니다.
+NYC 택시 운행 기록과 도로 환경 데이터를 기반으로 차량 주행 센서 데이터를 생성하고,<br/>
+도로 Segment × 차량 Profile별 **Comfort Score**를 구축한다.<br/>
+
+또한 최신 날씨를 반영해 점수를 갱신하고, <br/>
+내비게이션이 전달한 여러 후보 경로의 승차감을 제공하여 <br/>
+가장 편안한 경로를 비교할 수 있게 한다.
 
 ### 기대 효과
 
 | 관점 | AS-IS | TO-BE |
 | --- | --- | --- |
-| 경로 추천 | 시간·거리 중심 | 승차감까지 고려 |
-| 승차감 정보 | 도로별 비교 데이터 없음 | Segment 단위 Comfort Score 제공 |
-| 환경 변화 | 현재 도로 상황 반영 어려움 | 최신 날씨를 반영한 Current Score 제공 |
+| **경로 추천 기준** | 시간·거리·비용 중심 | **승차감까지 고려한 경로 비교**  |
+| **도로 승차감 정보** | 도로별 비교 데이터 없음 | Segment 단위 Comfort Score 제공 |
+| **환경 변화 반영** | 현재 환경 반영 어려움 | 최신 날씨를 반영한 Current Score 제공 |
 
 ### API 명세서
 
 <img width="2218" height="982" alt="image" src="https://github.com/user-attachments/assets/c3af43fc-4c18-4cd3-9de8-5135bab36149" />
 
 ---
+## 2. 데이터 파이프라인
+<div align="center">
+  
+<img width="739" height="271" alt="image" src="https://github.com/user-attachments/assets/93370e3a-bdad-4671-9e4e-7cb0acac15b7" />
 
-## 2. 데이터 프로덕트
+</div>
 
 ### Input
 
@@ -88,40 +94,7 @@ NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 �
 | **Current Comfort Score** | `Segment × Vehicle Profile` | Standard Score에 **최신 날씨 영향**을 반영한 현재 승차감 점수 |
 | **Serving API** | 후보 경로 | 후보 경로의 Segment 목록을 입력받아 **경로별 Comfort Score를 계산하고 추천 경로 제공** |
 
----
-
-## 3. 데이터 파이프라인
-
-<img width="1165" height="413" alt="image" src="https://github.com/user-attachments/assets/0d29cdb7-f3e5-4af0-a1e6-17efa25f1021" />
-
-
-<p align="center"><sub>단계 이름으로 클릭한 뒤 항목을 펼치면 Input 규모, 처리 내용, Output을 확인할 수 있습니다</sub></p>
-
-<table align="center">
-  <tr>
-    <td align="center"><a href="#stage-source"><b>① Source</b></a><br/><sub>원천·기준정보</sub></td>
-    <td>→</td>
-    <td align="center"><a href="#stage-simulation"><b>② Simulation</b></a><br/><sub>10Hz 주행 센서 데이터 생성</sub></td>
-    <td>→</td>
-    <td align="center"><a href="#stage-bronze"><b>③ Bronze</b></a><br/><sub>Kafka → S3</sub></td>
-    <td>→</td>
-    <td align="center"><a href="#stage-features"><b>④ Silver Features</b></a><br/><sub>cleaning·맵매칭</sub></td>
-  </tr>
-  <tr>
-    <td colspan="7" align="right">↓</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="#stage-serving"><b>⑧ Serving API</b></a><br/><sub>후보 경로 평가</sub></td>
-    <td>←</td>
-    <td align="center"><a href="#stage-current"><b>⑦ Current Gold</b></a><br/><sub>현재 날씨 반영</sub></td>
-    <td>←</td>
-    <td align="center"><a href="#stage-standard"><b>⑥ Standard Gold</b></a><br/><sub>최근 168시간(1주일) 가중 평균</sub></td>
-    <td>←</td>
-    <td align="center"><a href="#stage-hourly"><b>⑤ Hourly Score</b></a><br/><sub>1시간 단위 방향별 점수</sub></td>
-  </tr>
-</table>
-
-<a id="stage-source"></a>
+### 각 파이프라인 단계별 Input/Output
 
 <details>
 <summary><strong>① Source — 원천 데이터와 시뮬레이션 환경</strong></summary>
@@ -135,6 +108,7 @@ NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 �
 
 </details>
 
+### 
 <a id="stage-simulation"></a>
 
 <details>
@@ -237,17 +211,17 @@ NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 �
 
 ---
 
-## 4. 데이터 아키텍처
+## 3. AWS 인프라 아키텍처
 
 <div align="center">
 
-<img width="739" height="461" alt="image" src="https://github.com/user-attachments/assets/bc953ad3-d688-43e9-85c9-a0c3fa98d1de" />
+<img width="486" height="379" alt="image" src="https://github.com/user-attachments/assets/094c5863-0d41-4d59-ad31-cdd2f560aa3c" />
 
 </div>
 
 ---
 
-## 5. 기술적 고민과 결정
+## 4. 기술적 고민과 결정
 
 > **실시간으로 유입되는 주행 데이터와 변화하는 날씨를 빠르게 반영하면서도,  
 > 일부 데이터나 시스템에 문제가 생겼을 때 서비스가 함께 멈추지 않게 하려면 어떻게 해야 할까?**
@@ -283,38 +257,52 @@ NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 �
 
 ---
 
-## 6. 한계와 향후 개선
+## 5. 한계 및 개선 방향
 
-현재 프로토타입이 알고 있는 한계와, 이어서 진행할 개선 방향입니다.
+현재 프로토타입을 운영하며 확인한 한계와, 이후 개선 방향이다.
 
-**데이터와 점수**
+### 데이터와 점수
 
-- Comfort Score는 시뮬레이션 데이터 기반입니다. 파이프라인은 내부 일관성을 검증하지만,
-  실제 승차감과의 일치(실차 캘리브레이션)는 검증 범위 밖입니다
-  ([context/comfort-score.md](context/comfort-score.md)의 Evaluation strategy).
-- 점수 산식(방향·가중치·최소 통행량 필터)은 구현되어 있으나 정식 승인 대기 상태입니다
-  ([context/open-questions.md](context/open-questions.md) OQ-006).
+* Comfort Score는 **시뮬레이션 센서 데이터**를 기반으로 산출한다. 파이프라인 내부의 데이터 정합성과 점수 분포는 검증했지만, 실제 차량에서 느끼는 승차감과의 일치 여부는 아직 검증하지 않았다.
 
-**파이프라인**
+  * 향후 실제 주행 데이터를 수집해 **실차 캘리브레이션 및 점수 검증**을 진행할 필요가 있다.
 
-- standard 점수는 매시 168시간 윈도우 전체를 다시 읽어 계산합니다. 증분 계산이 없어
-  데이터가 늘면 계산량이 선형으로 증가합니다.
-- Bronze `sensor-events`의 스트리밍 소파일 백로그는 아직 정리 경로가 없습니다
-  ([ADR-0009](docs/adr/0009-bronze-compaction-dag.md)에서 범위 제외, 후속 과제).
-- quarantine으로 격리된 데이터를 재처리하는 경로는 아직 없습니다. 격리는 되지만
-  복구는 수동입니다.
+* 현재 점수 산식과 임계치는 수집된 시뮬레이션 데이터의 분포를 기준으로 조정되어 있다.
 
-**운영**
+  * 다양한 차량·도로 환경의 실제 데이터를 확보해 **임계치와 가중치를 지속적으로 보정**할 수 있다.
 
-- AWS 리소스는 수동으로 생성합니다. IaC(Terraform 등) 도입은 향후 과제입니다.
-- EMR Job Run에 전달하는 서빙 DB 자격증명은 임시 방편이며, Secrets Manager 또는
-  IAM DB 인증으로 교체할 예정입니다.
-- Airflow는 단일 EC2의 LocalExecutor로 동작하며, DAG·태스크 수준 execution timeout은
-  아직 설정하지 않았습니다.
+### 파이프라인 및 처리 성능
+
+* Kafka로 유입되는 데이터량은 **시간대별 택시 운행량에 따라 일정하지 않는다.** 예를 들어 새벽에는 운행 차량이 줄어들고, 출·퇴근 시간대에는 입력량이 증가한다.
+
+  * 이처럼 시간별 입력 건수가 달라지면서 동일한 파이프라인에서도 **전체 처리 시간에 약 1~2분의 편차**가 발생한다.
+  * 현재는 정해진 리소스로 처리하고 있어, 향후 **입력량에 따른 EMR Executor 조정, 파티션 최적화, Auto Scaling** 등을 통해 처리 시간을 안정화할 수 있다.
+
+* Standard Comfort Score는 매시간 **최근 168시간 데이터를 다시 읽어 계산**한다. 현재 규모에서는 처리 가능하지만 데이터 규모가 커질수록 계산량도 함께 증가한다.
+
+  * 향후 이전 집계 결과를 활용하는 **증분 집계 방식**으로 전환해 반복 연산을 줄일 수 있다.
+
+* Bronze 데이터의 Small File은 주기적인 Compaction으로 정리하고 있지만, 실시간 적재와 별도의 배치 작업으로 수행된다.
+
+  * 대규모 backlog가 발생하는 상황까지 고려해 **입력량 기반 Compaction 주기 및 파일 크기 최적화**가 필요하다.
+
+* 처리 과정에서 문제가 발생한 데이터는 Quarantine으로 격리하지만, 현재는 **자동 재처리 경로가 없다.**
+
+  * 실패 원인 수정 후 Quarantine 데이터를 다시 투입할 수 있는 **Replay/Reprocessing 파이프라인**을 추가할 수 있다.
+
+### 운영 및 모니터링
+
+* Airflow는 현재 **단일 EC2에서 LocalExecutor로 운영**하고 있어 해당 인스턴스가 장애를 일으키면 orchestration 전체가 영향을 받는다.
+
+  * 운영 규모가 커질 경우 Airflow 구성 요소 분리 및 **고가용성 구조**로 확장할 수 있다.
+
+* AWS 인프라는 대부분 수동으로 구성하고 있어 환경 재생성 및 변경 이력 관리에 한계가 있다.
+
+  * 향후 Terraform 등의 **IaC(Infrastructure as Code)** 를 적용해 인프라 구성을 코드로 관리할 수 있다.
 
 ---
 
-## 7. 기술 스택
+## 6. 기술 스택
 
 <div align="center">
 
@@ -359,7 +347,7 @@ NYC 택시 운행 기록과 도로 환경을 기반으로 차량 주행 센서 �
 
 ---
 
-## 8. 팀원
+## 7. 팀원
 
 <table align="center">
   <tr>
