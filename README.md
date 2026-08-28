@@ -68,7 +68,7 @@ NYC 택시 운행 기록과 도로 환경 데이터를 기반으로 차량 주�
 ## 2. 데이터 파이프라인
 <div align="center">
   
-<img width="739" height="271" alt="image" src="https://github.com/user-attachments/assets/93370e3a-bdad-4671-9e4e-7cb0acac15b7" />
+  <img width="901" height="338" alt="image" src="https://github.com/user-attachments/assets/33dd132b-5fc6-4e3f-a250-486cf882bfb1" />
 
 </div>
 
