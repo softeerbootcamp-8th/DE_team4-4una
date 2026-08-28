@@ -264,8 +264,33 @@ NYC 택시 운행 기록과 도로 환경 데이터를 기반으로 차량 주�
 | **Current 계산에는 최신 날씨만 필요한데 이력을 계속 조회해야 할까** | Serving 계산에는 **Zone별 최신 Weather 1건**을 사용한다 | Current 계산의 조회 범위와 데이터 관리 복잡도를 줄인다 |
 | **Kafka Broker 디스크 사용량이 계속 증가한다** | Batch 크기 증가 가설을 측정으로 기각하고 **zstd Compression**을 적용한다 | Broker 저장량을 약 **42% 감소**시킨다 |
 
+<img width="864" height="235" alt="image" src="https://github.com/user-attachments/assets/7f79cced-2d60-454a-8a9b-d1de1048cc04" />
+<img width="2048" height="489" alt="image" src="https://github.com/user-attachments/assets/274d3260-e39d-4ea2-a711-19dfd46dd02a" />
+
+
 ---
 
+### 가용성 Availability
+
+데이터와 시스템의 일부가 항상 정상이라고 가정하지 않는다.
+
+일부 최신 데이터가 없거나 Component 장애가 발생하더라도  
+**사용 가능한 데이터와 시스템을 활용해 서비스 제공을 지속하는 것**을 목표로 한다.
+
+| 고민 | 결정 | 효과 |
+| --- | --- | --- |
+| **Current Score가 없는 Segment 때문에 API 요청 전체를 실패시켜야 할까** | **Current Score를 우선 사용하고 없으면 Standard Score로 Fallback**한다 | 날씨 미수집 또는 Zone 외 Segment가 포함되어도 사용 가능한 기준 점수로 응답한다 |
+| **후보 경로마다 DB를 여러 번 조회해야 할까** | 여러 후보 경로의 Segment를 모아 PostgreSQL에서 **Bulk 조회**한다 | 경로·Segment 수 증가에 따른 DB Round Trip을 줄인다 |
+| **여러 Component의 장애를 Application Log만으로 확인할 수 있을까** | **Prometheus + Grafana**에서 EC2 / Container / Kafka / Spark Streaming / Airflow / Serving API 상태를 통합 관측한다 | 장애 지점과 영향 범위를 한 화면에서 파악한다 |
+| **EMR Serverless도 Prometheus로 직접 Scrape해야 할까** | AWS Managed Service인 EMR Serverless는 **CloudWatch Metric을 Grafana에서 조회**한다 | Prometheus 대상이 아닌 Managed Service까지 같은 Monitoring 화면에서 확인한다 |
+| **Monitoring System 자체가 죽으면 장애를 어떻게 알까** | Grafana / Prometheus / Ops Agent 등 핵심 Monitoring Component는 **외부 Probe 방식으로 Self-health를 확인**한다 | 모니터링 시스템 자신의 장애를 내부 Metric에만 의존하지 않는다 |
+| **Ops Agent가 죽으면 장애 알림까지 사라지지 않을까** | Grafana Alert를 **Slack과 Ops Agent에 병렬 전달**한다 | Ops Agent 장애와 관계없이 최초 장애 알림은 Slack으로 전달된다 |
+| **Grafana Alert를 받자마자 자동 복구를 실행할까** | Ops Agent가 **Prometheus에서 상태를 재검증하고 진단한 뒤** 조치 여부를 결정한다 | 일시적인 Alert나 이미 복구된 상태에 불필요한 조치를 수행하지 않는다 |
+| **모든 장애를 자동 복구해야 할까** | Container 재시작처럼 **영향 범위가 작고 되돌릴 수 있는 작업만 Allowlist**로 자동화한다 | 자동 복구로 인한 2차 장애 가능성을 제한한다 |
+| **Kafka Offset Reset·데이터 삭제·DB Schema 변경도 자동화할까** | 데이터와 인프라 상태를 직접 변경하는 작업은 **자동화하지 않고 담당자에게 Escalation**한다 | 복구 속도보다 데이터 정합성과 운영 안전성을 우선한다 |
+| **자동 조치 직후 바로 복구 성공으로 판단할까** | 일정 시간 상태를 Polling해 **실제 복구 여부를 다시 확인**한다 | Container 기동·Metric Scrape 지연을 복구 실패로 오판하지 않는다 |
+
+---
 ### 신뢰성 Reliability
 
 빠르게 계산된 결과라도
@@ -290,29 +315,10 @@ Serving 데이터로 사용할 수 없다.
 | **시간 단위 결과를 교체하다 실패하면 기존 정상 결과가 사라지지 않을까** | 결과를 **Staging에서 검증한 뒤 교체하고 Backup을 통해 실패 시 복구**할 수 있도록 구성한다 | 부분적으로 생성된 결과가 정상 데이터처럼 사용되는 것을 방지한다 |
 | **Serving 직전 검증만으로 충분할까** | 실행 중 검증과 별도로 Gold 데이터를 주기적으로 확인하는 **At-rest Audit**을 수행한다 | 이미 적재된 데이터의 Range·Freshness·Reference 이상도 지속적으로 탐지한다 |
 
----
+<img width="2933" height="1890" alt="image" src="https://github.com/user-attachments/assets/2ce683bc-3902-49d4-8a7b-bb01726b9c36" />
+<img width="3016" height="1492" alt="image" src="https://github.com/user-attachments/assets/5085de61-4c8b-4e11-b418-97915bc9c2c2" />
 
-### 가용성 Availability
 
-데이터와 시스템의 일부가 항상 정상이라고 가정하지 않는다.
-
-일부 최신 데이터가 없거나 Component 장애가 발생하더라도  
-**사용 가능한 데이터와 시스템을 활용해 서비스 제공을 지속하는 것**을 목표로 한다.
-
-| 고민 | 결정 | 효과 |
-| --- | --- | --- |
-| **Current Score가 없는 Segment 때문에 API 요청 전체를 실패시켜야 할까** | **Current Score를 우선 사용하고 없으면 Standard Score로 Fallback**한다 | 날씨 미수집 또는 Zone 외 Segment가 포함되어도 사용 가능한 기준 점수로 응답한다 |
-| **후보 경로마다 DB를 여러 번 조회해야 할까** | 여러 후보 경로의 Segment를 모아 PostgreSQL에서 **Bulk 조회**한다 | 경로·Segment 수 증가에 따른 DB Round Trip을 줄인다 |
-| **여러 Component의 장애를 Application Log만으로 확인할 수 있을까** | **Prometheus + Grafana**에서 EC2 / Container / Kafka / Spark Streaming / Airflow / Serving API 상태를 통합 관측한다 | 장애 지점과 영향 범위를 한 화면에서 파악한다 |
-| **EMR Serverless도 Prometheus로 직접 Scrape해야 할까** | AWS Managed Service인 EMR Serverless는 **CloudWatch Metric을 Grafana에서 조회**한다 | Prometheus 대상이 아닌 Managed Service까지 같은 Monitoring 화면에서 확인한다 |
-| **Monitoring System 자체가 죽으면 장애를 어떻게 알까** | Grafana / Prometheus / Ops Agent 등 핵심 Monitoring Component는 **외부 Probe 방식으로 Self-health를 확인**한다 | 모니터링 시스템 자신의 장애를 내부 Metric에만 의존하지 않는다 |
-| **Ops Agent가 죽으면 장애 알림까지 사라지지 않을까** | Grafana Alert를 **Slack과 Ops Agent에 병렬 전달**한다 | Ops Agent 장애와 관계없이 최초 장애 알림은 Slack으로 전달된다 |
-| **Grafana Alert를 받자마자 자동 복구를 실행할까** | Ops Agent가 **Prometheus에서 상태를 재검증하고 진단한 뒤** 조치 여부를 결정한다 | 일시적인 Alert나 이미 복구된 상태에 불필요한 조치를 수행하지 않는다 |
-| **모든 장애를 자동 복구해야 할까** | Container 재시작처럼 **영향 범위가 작고 되돌릴 수 있는 작업만 Allowlist**로 자동화한다 | 자동 복구로 인한 2차 장애 가능성을 제한한다 |
-| **Kafka Offset Reset·데이터 삭제·DB Schema 변경도 자동화할까** | 데이터와 인프라 상태를 직접 변경하는 작업은 **자동화하지 않고 담당자에게 Escalation**한다 | 복구 속도보다 데이터 정합성과 운영 안전성을 우선한다 |
-| **자동 조치 직후 바로 복구 성공으로 판단할까** | 일정 시간 상태를 Polling해 **실제 복구 여부를 다시 확인**한다 | Container 기동·Metric Scrape 지연을 복구 실패로 오판하지 않는다 |
-| **배치가 실패하면 처음부터 모든 데이터를 다시 처리해야 할까** | Immutable Bronze와 시간 단위 Partition을 기준으로 **대상 시간만 재처리 가능하도록 구성**한다 | 장애 복구 시 재처리 범위를 제한한다 |
-          
 ---
 
 ### 그 외 엔지니어링 결정
