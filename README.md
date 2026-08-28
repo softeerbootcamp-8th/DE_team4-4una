@@ -264,6 +264,11 @@ NYC 택시 운행 기록과 도로 환경 데이터를 기반으로 차량 주�
 | **Current 계산에는 최신 날씨만 필요한데 이력을 계속 조회해야 할까** | Serving 계산에는 **Zone별 최신 Weather 1건**을 사용한다 | Current 계산의 조회 범위와 데이터 관리 복잡도를 줄인다 |
 | **Kafka Broker 디스크 사용량이 계속 증가한다** | Batch 크기 증가 가설을 측정으로 기각하고 **zstd Compression**을 적용한다 | Broker 저장량을 약 **42% 감소**시킨다 |
 
+<img width="864" height="232" alt="image" src="https://github.com/user-attachments/assets/027b43a4-1ba6-4491-b813-733204f36e81" />
+
+<img width="2048" height="489" alt="image" src="https://github.com/user-attachments/assets/85507927-8978-480d-bbb2-1c5170629d49" />
+
+
 ---
 
 ### 신뢰성 Reliability
@@ -289,6 +294,12 @@ Serving 데이터로 사용할 수 없다.
 | **결과가 어떤 실행에서 만들어졌는지 어떻게 추적할까** | Run ID, Data Period, 계산 시각, Snapshot / Version 정보를 결과에 함께 기록한다 | 장애 분석·Backfill·재처리 시 데이터 Lineage를 추적할 수 있다 |
 | **시간 단위 결과를 교체하다 실패하면 기존 정상 결과가 사라지지 않을까** | 결과를 **Staging에서 검증한 뒤 교체하고 Backup을 통해 실패 시 복구**할 수 있도록 구성한다 | 부분적으로 생성된 결과가 정상 데이터처럼 사용되는 것을 방지한다 |
 | **Serving 직전 검증만으로 충분할까** | 실행 중 검증과 별도로 Gold 데이터를 주기적으로 확인하는 **At-rest Audit**을 수행한다 | 이미 적재된 데이터의 Range·Freshness·Reference 이상도 지속적으로 탐지한다 |
+
+<img width="2933" height="1890" alt="image" src="https://github.com/user-attachments/assets/76852292-143e-44ff-a1b7-02256c9c13a3" />
+
+<img width="3016" height="1492" alt="image" src="https://github.com/user-attachments/assets/fc26add7-0ff5-4f47-9704-e94e39912103" />
+
+
 
 ---
 
